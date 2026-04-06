@@ -1,0 +1,22 @@
+name: Update plugin submodules
+on:
+  repository_dispatch:
+    types: [plugin-updated]
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.MARKETPLACE_PAT }}
+
+      - name: Update submodule
+        run: |
+          git submodule update --remote plugins/${{ github.event.client_payload.plugin }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugins/
+          git diff --cached --quiet || git commit -m "Update ${{ github.event.client_payload.plugin }} submodule to ${{ github.event.client_payload.ref }}"
+          git push
