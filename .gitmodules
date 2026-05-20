@@ -1,3 +1,0 @@
-[submodule "plugins/coolant"]
-	path = plugins/coolant
-	url = https://github.com/todd-w-shaffer/coolant.git
