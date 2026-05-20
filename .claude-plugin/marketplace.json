@@ -11,6 +11,16 @@
       "description": "Thermal management for Claude Code — caps test runner concurrency, suppresses build tools during parallel mode",
       "source": "./plugins/coolant",
       "category": "development"
+    },
+    {
+      "name": "excavate",
+      "description": "Code archaeology — reconstruct the why behind a file, symbol, or commit by reading git history, commit bodies, and CLAUDE.md/README evolution. Pairs with LSP plugins.",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/todd-w-shaffer/excavate.git",
+        "path": "plugins/excavate"
+      },
+      "category": "exploration"
     }
   ]
 }
