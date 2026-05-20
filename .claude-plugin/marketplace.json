@@ -9,7 +9,11 @@
     {
       "name": "coolant",
       "description": "Thermal management for Claude Code — caps test runner concurrency, suppresses build tools during parallel mode",
-      "source": "./plugins/coolant",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/todd-w-shaffer/coolant.git",
+        "path": "."
+      },
       "category": "development"
     },
     {
