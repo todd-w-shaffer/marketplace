@@ -100,8 +100,12 @@ names the second, which needs nothing installed.
 
 **Probed 2026-10-09, CLI 2.1.296, maintainer's local directory source:** a `commit-msg` hook run by a Bash-tool
 `git commit` saw `CLAUDECODE=1` and found `token-ledger` on PATH, so a git hook inherits `bin/`. On this machine
-that entry is the working copy (`~/Desktop/apps/marketplace/plugins/commit-skill/bin`), not the plugin cache, so
-the probe has to be repeated from a URL install (Migration step 1).
+that entry is the working copy (`~/Desktop/apps/marketplace/plugins/commit-skill/bin`), not the plugin cache.
+**Repeated from a URL install, 2026-10-09** (commit-skill 1.3.3 installed by URL into an isolated
+`CLAUDE_CONFIG_DIR`): the hook saw `CLAUDECODE=1` and resolved `token-ledger` to
+`<config>/plugins/cache/todd-w-shaffer/commit-skill/1.3.3/bin/token-ledger`. PATH lookup holds for both install
+kinds. The fallback below is not needed. The resolved path names the version, which is why the stub must look up
+`commit-gate` on PATH rather than record where it was found.
 
 **Fallback, if the URL probe fails:** the stub runs a launcher that `install` writes under `${CLAUDE_PLUGIN_DATA}`,
 which survives plugin updates, and the mint rewrites that launcher to point at the current `${CLAUDE_PLUGIN_ROOT}`.
@@ -180,9 +184,8 @@ The guard keeps today's denials and adds three, because the move puts new things
 
 Ordered so that no step leaves shoots.film unable to commit.
 
-1. **Probe** (D3). Done on the local directory source (see D3). Repeat it from a URL install: a throwaway
-   repository whose stub prints `command -v commit-gate`, committed from a Bash tool call. Also probe, and record
-   the results here:
+1. **Probe** (D3). PATH inheritance passed on the local directory source and on a URL install (see D3). Still to
+   probe, and record here:
    - that a plugin `PreToolUse` hook on `Skill` sees `tool_input.skill == "commit-skill:ship"`;
    - whether a session's own write of `enabledPlugins: false` takes effect mid-session. If it does, the guard
      disappears while the stub refuses, and `--no-verify` then skips the stub: add that to the residues.
