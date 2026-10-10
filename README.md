@@ -16,7 +16,6 @@ claude plugin marketplace add todd-w-shaffer/marketplace
 |--------|-------------|
 | [coolant](https://github.com/todd-w-shaffer/coolant) | Thermal management for Claude Code — caps test runner concurrency, suppresses build tools during parallel mode |
 | [commit-skill](plugins/commit-skill) | `/commit`: structured narrative commits with build validation, plus a per-commit cost line. `/ship`: push, then update the docs the push made stale. `commit-gate install` (from a terminal) makes git refuse a Claude Code session's commits outside `/commit` and `/ship` in that repository |
-| [ship-skill](plugins/ship-skill) | Deprecated: `/ship` moved to commit-skill. Use `/commit-skill:ship` |
 | [sittings](plugins/sittings) | `/savor` audits a spec before you build it; `/observations` surfaces test gaps, stale docs and architecture notes after |
 | [clearmind](plugins/clearmind) | `/clearmind`: audit auto-memory for stale, shipped or redundant entries |
 
