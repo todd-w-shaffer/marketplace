@@ -1,8 +1,0 @@
-{
-  "name": "ship-skill",
-  "version": "1.3.0",
-  "description": "Moved to commit-skill: install commit-skill 2.1.0+ and use /commit-skill:ship. This copy still works but is no longer updated, and comes off the marketplace in a later release",
-  "author": {
-    "name": "Todd Shaffer"
-  }
-}
