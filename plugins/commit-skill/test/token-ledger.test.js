@@ -348,15 +348,12 @@ function raceToMain(sb, { shipBegin }) {
   return { bSha, shipA: ships.find((r) => r.session === 'sA'), shipB: ships.find((r) => r.session === 'sB') };
 }
 
-test('rebase between ship-begin and push: the ship claims only its own commits', {
-  todo: 'claims session B\'s already-shipped commit and its $3.00; see PR description',
-}, (t) => {
+test('rebase between ship-begin and push: the ship claims only its own commits', (t) => {
   const sb = sandbox(t);
   const { bSha, shipA } = raceToMain(sb, { shipBegin: true });
-  t.diagnostic(`ship A claimed ${shipA.commits.length} commits, `
-    + `${shipA.commits.filter((c) => c.matched).length} matched, $${shipA.cost.usd}`);
-  assert.deepEqual(shipA.commits.map((c) => c.sha).includes(bSha), false);
+  assert.ok(!shipA.commits.some((c) => c.sha === bSha));
   assert.equal(shipA.commits.length, 1);
+  assert.equal(shipA.skipped, 1);
   assert.equal(shipA.cost.usd, 1);
 });
 
@@ -367,4 +364,92 @@ test('rebase before the push without ship-begin: the reflog base claims only its
   assert.equal(shipA.commits.length, 1);
   assert.ok(!shipA.commits.some((c) => c.sha === bSha));
   assert.equal(shipA.cost.usd, 1);
+});
+
+// ---------- review findings ----------
+
+test('a branch stacked on a shipped branch claims only its own commits', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+
+  sb.git(dir, 'checkout', '-q', '-b', 'parent');
+  sb.tracked(dir, 's1', 'p.txt', { input_tokens: 3e6 });
+  sb.ledger(dir, 's1', 'ship-begin');
+  sb.git(dir, 'push', '-q', '-u', 'origin', 'parent');
+  sb.ledger(dir, 's1', 'ship');
+
+  sb.git(dir, 'checkout', '-q', '-b', 'child');
+  const c = sb.tracked(dir, 's1', 'c.txt');
+  sb.ledger(dir, 's1', 'ship-begin');
+  sb.git(dir, 'push', '-q', 'origin', 'HEAD:child');
+  const out = sb.ledger(dir, 's1', 'ship');
+
+  const ship = last(sb.rows(), 'ship');
+  assert.deepEqual(ship.commits.map((x) => x.sha), [c]);
+  assert.equal(ship.cost.usd, 1);
+  assert.match(out, /^\*\*Ship cost:\*\* \$1\.00 across 1 commit /);
+});
+
+test("/ship's own docs commit is not reported as untracked", (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+
+  sb.tracked(dir, 's1', 'a.txt');
+  sb.ledger(dir, 's1', 'ship-begin');
+  sb.git(dir, 'push', '-q');
+  fs.writeFileSync(path.join(dir, 'README'), 'updated\n');
+  sb.git(dir, 'commit', '-q', '-am', 'Update docs to reflect: add a.txt');
+  sb.git(dir, 'push', '-q');
+  const out = sb.ledger(dir, 's1', 'ship');
+
+  assert.equal(out, '**Ship cost:** $1.00 across 1 commit (+ $0.00 ship overhead) · 100% lead · 0% subagent\n');
+  const ship = last(sb.rows(), 'ship');
+  assert.equal(ship.untracked, 0);
+  assert.deepEqual(ship.commits.map((c) => Boolean(c.docs)), [false, true]);
+  assert.match(sb.ledger(dir, 's1', 'report'), /\n1 ship · 1 commit · /);
+});
+
+test('patch ids survive color.ui=always in the user\'s git config', (t) => {
+  const sb = sandbox(t);
+  fs.writeFileSync(path.join(sb.env.HOME, '.gitconfig'), '[color]\n\tui = always\n');
+  const dir = sb.repo();
+
+  const sha = sb.tracked(dir, 's1', 'a.txt');
+  const plain = spawnSync('sh', ['-c', `git -c color.ui=never show ${sha} | git patch-id --stable`],
+    { cwd: dir, env: sb.env, encoding: 'utf8' }).stdout.split(' ')[0];
+  assert.match(plain, /^[0-9a-f]{40}$/);
+  assert.equal(last(sb.rows(), 'commit').patch_id, plain);
+});
+
+test('a repo without origin/HEAD: a new branch ships from origin/main', (t) => {
+  const sb = sandbox(t);
+  const { wt } = worktree(sb);
+  sb.git(wt, 'remote', 'set-head', 'origin', '-d');
+  const base = sb.git(wt, 'rev-parse', 'origin/main');
+
+  const sha = sb.tracked(wt, 's1', 'a.txt');
+  sb.ledger(wt, 's1', 'ship-begin');
+  sb.git(wt, 'push', '-q', '-u', 'origin', 'feature');
+  sb.ledger(wt, 's1', 'ship');
+
+  const ship = last(sb.rows(), 'ship');
+  assert.equal(ship.range, `${base}..${sha}`);
+  assert.deepEqual(ship.commits.map((c) => c.matched), [true]);
+});
+
+test('one ledger entry is claimed once per ship, even when a later commit repeats its patch', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+
+  sb.tracked(dir, 's1', 'a.txt');
+  sb.git(dir, 'revert', '--no-edit', 'HEAD');
+  sb.commit(dir, 'a.txt'); // the same patch again, outside /commit
+  sb.ledger(dir, 's1', 'ship-begin');
+  sb.git(dir, 'push', '-q');
+  sb.ledger(dir, 's1', 'ship');
+
+  const ship = last(sb.rows(), 'ship');
+  assert.deepEqual(ship.commits.map((c) => c.matched), [true, false, false]);
+  assert.equal(ship.untracked, 2);
+  assert.equal(ship.cost.usd, 1);
 });

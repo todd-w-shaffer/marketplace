@@ -248,8 +248,11 @@ function writeMarkers(m) {
 
 function patchIdOf(sha) {
   try {
-    const show = execFileSync('git', ['show', sha], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-    const out = execFileSync('git', ['patch-id', '--stable'], { input: show, encoding: 'utf8' }).trim();
+    // diff-tree is plumbing, so a user's color.ui=always or external diff tool
+    // cannot reach the patch; `git show` output under color gave no patch-id.
+    const diff = execFileSync('git', ['diff-tree', '-p', '--root', '--no-color', '--no-ext-diff', sha],
+      { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    const out = execFileSync('git', ['patch-id', '--stable'], { input: diff, encoding: 'utf8' }).trim();
     return out ? out.split(/\s+/)[0] : null;
   } catch { return null; }
 }
@@ -325,11 +328,17 @@ async function cmdCommit(args) {
 }
 
 // The remote-tracking ref a push lands on: the branch's upstream, or the
-// remote's default branch for a worktree branch that has no upstream.
+// remote's default branch for a worktree branch that has no upstream. A repo
+// made with `git init` and `remote add` has no origin/HEAD, so try the usual
+// default names after it.
 function shipRef() {
   return gitSafe(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
-    || gitSafe(['rev-parse', '--abbrev-ref', 'origin/HEAD']);
+    || gitSafe(['rev-parse', '--abbrev-ref', 'origin/HEAD'])
+    || ['origin/main', 'origin/master'].find((r) => gitSafe(['rev-parse', '--verify', '--quiet', r])) || null;
 }
+
+// /ship's doc step commits under this subject without going through /commit.
+const DOCS_SUBJECT = 'Update docs to reflect:';
 
 function cmdShipBegin() {
   const id = sessionId();
@@ -363,21 +372,49 @@ async function cmdShip() {
   const shas = (gitSafe(['rev-list', '--reverse', `${base}..${head}`]) || '').split('\n').filter(Boolean);
 
   const rows = readLedger();
+  const project = projectRoot();
   const byPatch = new Map();
   const bySha = new Map();
+  // A commit an earlier ship already claimed is not this ship's: base..HEAD
+  // reaches back over it when a pull --rebase lands after ship-begin, or when
+  // this branch was stacked on one that shipped first. A sha is the same
+  // commit in any clone; a patch-id can recur in an unrelated repo, so it
+  // only counts within this project.
+  const shipped = new Set();
   for (const r of rows) {
+    if (r.kind === 'ship') {
+      const here = inProject(r, project);
+      for (const c of r.commits || []) {
+        if (c.sha) shipped.add(c.sha);
+        if (c.patch_id && here) shipped.add(c.patch_id);
+      }
+    }
     if (r.kind !== 'commit') continue;
     if (r.patch_id) byPatch.set(r.patch_id, r);
     if (r.sha) bySha.set(r.sha, r);
   }
+  const subjects = new Map();
+  for (const line of (gitSafe(['log', '--format=%H %s', `${base}..${head}`]) || '').split('\n')) {
+    const sp = line.indexOf(' ');
+    if (sp > 0) subjects.set(line.slice(0, sp), line.slice(sp + 1));
+  }
 
   const commits = [];
-  let matchedUsd = 0; let matchedLead = 0; let matchedSub = 0; let untracked = 0;
+  const claimed = new Set();
+  let matchedUsd = 0; let matchedLead = 0; let matchedSub = 0; let untracked = 0; let skipped = 0;
   let partial = false;
   for (const sha of shas) {
     const pid = patchIdOf(sha);
-    const entry = (pid && byPatch.get(pid)) || bySha.get(sha) || null;
+    if (shipped.has(sha) || (pid && shipped.has(pid))) { skipped++; continue; }
+    if ((subjects.get(sha) || '').startsWith(DOCS_SUBJECT)) {
+      commits.push({ sha, patch_id: pid, matched: false, usd: null, docs: true });
+      continue;
+    }
+    // Each entry pays once: a later commit that repeats its patch is untracked.
+    let entry = (pid && byPatch.get(pid)) || bySha.get(sha) || null;
+    if (entry && claimed.has(entry)) entry = null;
     if (entry) {
+      claimed.add(entry);
       matchedUsd += entry.cost.usd;
       matchedLead += entry.cost.lead_usd;
       matchedSub += entry.cost.sub_usd;
@@ -404,7 +441,7 @@ async function cmdShip() {
     kind: 'ship',
     ts: new Date(endMs).toISOString(),
     repo,
-    project: projectRoot(),
+    project,
     branch: gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']),
     range: `${base}..${head}`,
     session: id,
@@ -423,17 +460,23 @@ async function cmdShip() {
       partial,
     },
     untracked,
+    skipped,
   });
 
   if (marker) { delete markers[repo]; writeMarkers(markers); }
 
-  const n = commits.length;
+  const n = codeCommits(commits);
   let out = `**Ship cost:** ${fmtUsd(total)}${plus} across ${n} commit${n === 1 ? '' : 's'}`
     + ` (+ ${fmtUsd(o.usd)} ship overhead) · ${pct(leadUsd, total)}% lead · ${pct(subUsd, total)}% subagent`;
   if (untracked) {
     out += `\n  ${untracked} commit${untracked === 1 ? '' : 's'} not tracked (committed outside /commit)`;
   }
   process.stdout.write(out + '\n');
+}
+
+// The commits a ship paid for, leaving out /ship's own docs commit.
+function codeCommits(commits) {
+  return (commits || []).filter((c) => !c.docs).length;
 }
 
 function sinceMs(spec) {
@@ -466,7 +509,7 @@ function cmdReport(args) {
   if (by === 'ship') {
     lines.push('DATE'.padEnd(10) + 'COMMITS'.padStart(7) + 'TOTAL'.padStart(10) + 'LEAD'.padStart(6) + 'SUB'.padStart(7) + '  BRANCH');
     for (const r of rows) {
-      const n = r.commits ? r.commits.length : 0;
+      const n = codeCommits(r.commits);
       total += r.cost.usd; lead += r.cost.lead_usd; sub += r.cost.sub_usd; units += n;
       lines.push([
         r.ts.slice(0, 10),

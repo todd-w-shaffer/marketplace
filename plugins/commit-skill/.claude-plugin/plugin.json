@@ -1,6 +1,6 @@
 {
   "name": "commit-skill",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Structured narrative commit workflow with build validation and recipe distillation",
   "author": {
     "name": "Todd Shaffer"
