@@ -15,7 +15,7 @@ Run silently — do NOT output intermediate progress, tool results, or commentar
 
 ### 0. Pre-flight
 
-Run `token-ledger ship-begin` before anything else. It records the pre-push upstream sha that step 8 measures the rollup from, and prints nothing.
+Run `token-ledger ship-begin` before anything else. It records the pre-push upstream sha that step 8 measures the rollup from, and prints nothing. `token-ledger` comes from commit-skill; if it isn't on PATH, the cost lines drop out and the ship carries on.
 
 Check `git status` for uncommitted changes.
 
@@ -97,15 +97,13 @@ If any files were changed in steps 3-4:
 2. Commit with the message format:
 
 ```
-docs(<scope>): sync with <description from the code commit>
+Update docs to reflect: <subject line of the code commit>
 
 Changes:
   <file> — <what was updated and why>
 ```
 
-   - Take the scope and description from the code commit's subject (`feat(cli): add --dry-run flag` gives `docs(cli): sync with add --dry-run flag`). If the code commit had no scope, write `docs: sync with …`. If several code commits were pushed, describe the one the docs changes follow from.
-   - Keep `sync with` word for word: token-ledger recognises /ship's own docs commit by that phrase, and anything else is counted as an untracked commit.
-   - The subject stays under 70 characters. If it runs over, shorten the description, not the scope.
+   - Keep `Update docs to reflect:` word for word. token-ledger recognises /ship's own docs commit by it, and a project with a commit gate (shoots.film's `scripts/commit-gate.sh`) admits /ship's docs commit only under that subject.
    - Never include `Co-Authored-By` lines, the same rule /commit follows.
 
 3. Push the documentation commit.
