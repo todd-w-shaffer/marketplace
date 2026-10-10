@@ -2,7 +2,8 @@
 
 **Status:** steps 1–4 done, 2026-10-10. Step 2: commit-skill 2.0.0. Step 3: shoots.film `00bb077e` and `db4a6767`, live
 proof passed. Step 4: shoots.film `faed905e`, commit-skill 2.1.0. Step 5: ship-skill 1.3.0 is the
-deprecation release; delisting it is still to do. Savored 2026-10-09; D1 and D3 settled with Todd.
+deprecation release, Todd uninstalled it, and commit-skill 2.1.1's mint drops `ship-skill:ship`; delisting
+is still to do. Savored 2026-10-09; D1 and D3 settled with Todd.
 
 ## Problem
 
@@ -342,7 +343,8 @@ These rows don't port; they stay in shoots.film with what they test:
   mint was the only one left in the project.
 - 4: Todd's terminal commit `12e343c4` landed, on a scratch branch.
 - 5: both commands were denied by the plugin's guard.
-- 6: still open. It needs a session that started with 2.0.0 or later committing in an ungated repository.
+- 6: the marketplace session reloaded commit-skill 2.1.0 and committed `822f87b` in this ungated repository. It
+  landed, and no `.git/commit-gate` appeared.
 
 ## Residues
 

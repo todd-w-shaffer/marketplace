@@ -52,7 +52,7 @@ describe('the mint writes a token for /commit and /ship and for nothing else', (
     assert.equal(has('ship-docs'), false);
   });
 
-  for (const name of ['commit-skill:ship', 'ship-skill:ship']) {
+  for (const name of ['commit-skill:ship']) {
     test(`writes the ship-docs token on a ${name} call`, (t) => {
       const { has, skill } = minting(t);
 
@@ -80,7 +80,7 @@ describe('the mint writes a token for /commit and /ship and for nothing else', (
     const { sb, repo, has, skill } = minting(t);
     sb.mint(repo, 'commit');
 
-    for (const name of ['foo:ship', 'foo:commit', 'commit-skill:commit-all', 'ship-skill:shipit']) {
+    for (const name of ['foo:ship', 'foo:commit', 'commit-skill:commit-all', 'ship-skill:shipit', 'ship-skill:ship']) {
       assert.equal(skill(name).status, 0);
       assert.equal(has('ship-docs'), false, name);
     }
@@ -100,9 +100,9 @@ describe('the mint writes a token for /commit and /ship and for nothing else', (
     }
   });
 
-  test('writes the ship-docs token when Todd types /ship, /commit-skill:ship or /ship-skill:ship', (t) => {
+  test('writes the ship-docs token when Todd types /ship or /commit-skill:ship', (t) => {
     const { has, typed, clear } = minting(t);
-    for (const text of ['/ship', '/commit-skill:ship', '/ship-skill:ship']) {
+    for (const text of ['/ship', '/commit-skill:ship']) {
       clear();
 
       const r = typed(text);
@@ -114,7 +114,7 @@ describe('the mint writes a token for /commit and /ship and for nothing else', (
 
   test('writes nothing for a prompt that is not a /commit or /ship command', (t) => {
     const { has, typed } = minting(t);
-    for (const text of ['commit this', '/commitment', 'please run /commit', 'please run\n/commit', '/shipit']) {
+    for (const text of ['commit this', '/commitment', 'please run /commit', 'please run\n/commit', '/shipit', '/ship-skill:ship']) {
       const r = typed(text);
 
       assert.equal(r.status, 0, r.stderr);

@@ -1,6 +1,6 @@
 {
   "name": "commit-skill",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Structured narrative commits (/commit) and the post-commit propagation cascade (/ship), with a per-commit cost line and an opt-in git gate that admits a Claude Code session's commits only through /commit or /ship",
   "author": {
     "name": "Todd Shaffer"
