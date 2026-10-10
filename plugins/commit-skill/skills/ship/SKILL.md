@@ -97,13 +97,15 @@ If any files were changed in steps 3-4:
 2. Commit with the message format:
 
 ```
-Update docs to reflect: <subject line of the code commit>
+docs(<scope>): sync with <description from the code commit>
 
 Changes:
   <file> — <what was updated and why>
 ```
 
-   - Keep `Update docs to reflect:` word for word. token-ledger recognises /ship's own docs commit by it, and in a repository with the commit gate installed (`commit-gate install`) git admits /ship's docs commit only under a subject the two recognise alike (`lib/commit-format.js`).
+   - Take the scope and description from the code commit's subject (`feat(cli): add --dry-run flag` gives `docs(cli): sync with add --dry-run flag`). If the code commit had no scope, write `docs: sync with …`. If several code commits were pushed, describe the one the docs changes follow from.
+   - Keep `sync with` word for word. token-ledger recognises /ship's own docs commit by that phrase, and in a repository with the commit gate installed (`commit-gate install`) git admits /ship's docs commit only under a subject the two recognise alike (`lib/commit-format.js`).
+   - The subject stays under 70 characters. If it runs over, shorten the description, not the scope.
    - Never include `Co-Authored-By` lines, the same rule /commit follows.
 
 3. Push the documentation commit.

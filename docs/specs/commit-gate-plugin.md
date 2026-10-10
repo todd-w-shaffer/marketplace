@@ -1,6 +1,7 @@
 # Move the commit gate into the plugin
 
-**Status:** step 2 built, 2026-10-09 (commit-skill 2.0.0). Savored 2026-10-09; D1 and D3 settled with Todd.
+**Status:** steps 1–4 done, 2026-10-10. Step 2: commit-skill 2.0.0. Step 3: shoots.film `00bb077e` and `db4a6767`, live
+proof passed. Step 4: shoots.film `faed905e`, commit-skill 2.1.0. Step 5 open. Savored 2026-10-09; D1 and D3 settled with Todd.
 
 ## Problem
 
@@ -332,6 +333,15 @@ These rows don't port; they stay in shoots.film with what they test:
 4. Todd's terminal commit lands.
 5. `--no-verify` and `env -i` are denied.
 6. In an ungated repository with the plugin enabled, a session commit lands, and no `.git/commit-gate` appears.
+
+**Run 2026-10-10 in shoots.film (reported by its step 3 session):**
+- 1: a bare session commit was refused with "no /commit call made room for this commit".
+- 2: the step 3 commits landed through `/commit`.
+- 3: `/ship`'s docs commit `552964c7` landed under a `ship-docs` token minted on `commit-skill:ship`. The plugin's
+  mint was the only one left in the project.
+- 4: Todd's terminal commit `12e343c4` landed, on a scratch branch.
+- 5: both commands were denied by the plugin's guard.
+- 6: still open. It needs a session that started with 2.0.0 or later committing in an ungated repository.
 
 ## Residues
 
