@@ -53,9 +53,9 @@ If everything is one unit, proceed silently. If multiple independent threads exi
 
   ```
   Detected N independent threads in this diff:
-    (A) <subject> — file1, file2, file3
-    (B) <subject> — file4, file5
-    (C) <subject> — file6
+    (A) <type>(<scope>): <subject> — file1, file2, file3
+    (B) <type>: <subject> — file4, file5
+    (C) <type>(<scope>): <subject> — file6
 
   Commit separately, or send as one?
   ```
@@ -83,7 +83,7 @@ Guidelines for the recipe:
 Format:
 
 ```
-<concise narrative subject line>
+<type>(<scope>): <concise narrative subject line>
 
 Recipe: <distilled prompt that would reproduce this outcome in one
 shot — captures the full arc of the conversation as a self-contained
@@ -95,7 +95,22 @@ Changes:
 ```
 
 Rules:
-- Subject line: imperative mood, under 70 characters, no period
+- Subject line: imperative mood, under 70 characters counting the prefix, no period
+- If the prefix pushes the subject past 70, shorten the description, not the scope: `feat(cli): add --dry-run flag to preview writes`
+- Type: the one that names the commit's main purpose. A feature that ships with its own tests is `feat`, not `test`; the type answers "why does this commit exist?"
+  - `feat` — adds a new feature
+  - `fix` — fixes a bug
+  - `refactor` — restructures code without fixing a bug or adding a feature
+  - `perf` — a refactor aimed at performance
+  - `test` — adds missing tests or corrects existing ones
+  - `docs` — documentation only, such as the README
+  - `style` — formatting that doesn't change meaning (whitespace, semicolons)
+  - `build` — build system, dependencies, project version
+  - `ci` — continuous integration config
+  - `ops` — infrastructure, deployment, backup, recovery
+  - `chore` — miscellaneous changes that touch neither source nor tests (e.g. `.gitignore`)
+  - `revert` — reverts a previous commit
+- Scope: optional. Add it when the change sits in one clear area (a plugin, module, or directory a reader would recognize), e.g. `fix(token-ledger): …`. Leave it off when the change spans areas rather than inventing a vague umbrella
 - Never include `Co-Authored-By` lines
 - The Recipe is a synthesized artifact — it should read like something the user could paste into a new conversation and get 90% of the way to the same result
 - The Changes section is narrative — explain *what* and *why*, not line counts
@@ -138,8 +153,8 @@ If a larger task called this skill and step 2 found more than one thread, append
 
 ```
 **Remaining:** N threads, one call each
-  (B) <subject> — file3, file4
-  (C) <subject> — file5
+  (B) <type>(<scope>): <subject> — file3, file4
+  (C) <type>: <subject> — file5
 ```
 
 This is the only user-visible output for the entire commit run. Then follow "After the commit": the run is over, but the turn may not be.
