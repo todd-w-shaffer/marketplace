@@ -338,7 +338,8 @@ function shipRef() {
 }
 
 // /ship's doc step commits under this subject without going through /commit.
-const DOCS_SUBJECT = 'Update docs to reflect:';
+// The legacy prefix stays recognised so older ships still read the same.
+const DOCS_SUBJECT = /^(docs(\([^)]*\))?: sync with |Update docs to reflect:)/;
 
 function cmdShipBegin() {
   const id = sessionId();
@@ -406,7 +407,7 @@ async function cmdShip() {
   for (const sha of shas) {
     const pid = patchIdOf(sha);
     if (shipped.has(sha) || (pid && shipped.has(pid))) { skipped++; continue; }
-    if ((subjects.get(sha) || '').startsWith(DOCS_SUBJECT)) {
+    if (DOCS_SUBJECT.test(subjects.get(sha) || '')) {
       commits.push({ sha, patch_id: pid, matched: false, usd: null, docs: true });
       continue;
     }

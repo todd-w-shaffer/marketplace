@@ -1,6 +1,6 @@
 {
   "name": "ship-skill",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Post-commit propagation cascade — push, detect stale docs/memory, surgically update, commit docs. Requires commit-skill",
   "author": {
     "name": "Todd Shaffer"

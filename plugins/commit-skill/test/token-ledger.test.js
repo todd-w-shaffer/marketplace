@@ -390,23 +390,45 @@ test('a branch stacked on a shipped branch claims only its own commits', (t) => 
   assert.match(out, /^\*\*Ship cost:\*\* \$1\.00 across 1 commit /);
 });
 
-test("/ship's own docs commit is not reported as untracked", (t) => {
+for (const subject of [
+  'docs(a): sync with add a.txt',
+  'docs: sync with add a.txt',
+  'Update docs to reflect: add a.txt',
+]) {
+  test(`/ship's own docs commit is not reported as untracked: "${subject}"`, (t) => {
+    const sb = sandbox(t);
+    const dir = sb.repo();
+
+    sb.tracked(dir, 's1', 'a.txt');
+    sb.ledger(dir, 's1', 'ship-begin');
+    sb.git(dir, 'push', '-q');
+    fs.writeFileSync(path.join(dir, 'README'), 'updated\n');
+    sb.git(dir, 'commit', '-q', '-am', subject);
+    sb.git(dir, 'push', '-q');
+    const out = sb.ledger(dir, 's1', 'ship');
+
+    assert.equal(out, '**Ship cost:** $1.00 across 1 commit (+ $0.00 ship overhead) · 100% lead · 0% subagent\n');
+    const ship = last(sb.rows(), 'ship');
+    assert.equal(ship.untracked, 0);
+    assert.deepEqual(ship.commits.map((c) => Boolean(c.docs)), [false, true]);
+    assert.match(sb.ledger(dir, 's1', 'report'), /\n1 ship · 1 commit · /);
+  });
+}
+
+test('a docs commit that is not /ship\'s sync is still untracked', (t) => {
   const sb = sandbox(t);
   const dir = sb.repo();
 
   sb.tracked(dir, 's1', 'a.txt');
   sb.ledger(dir, 's1', 'ship-begin');
-  sb.git(dir, 'push', '-q');
   fs.writeFileSync(path.join(dir, 'README'), 'updated\n');
-  sb.git(dir, 'commit', '-q', '-am', 'Update docs to reflect: add a.txt');
+  sb.git(dir, 'commit', '-q', '-am', 'docs(readme): fix a typo');
   sb.git(dir, 'push', '-q');
-  const out = sb.ledger(dir, 's1', 'ship');
+  sb.ledger(dir, 's1', 'ship');
 
-  assert.equal(out, '**Ship cost:** $1.00 across 1 commit (+ $0.00 ship overhead) · 100% lead · 0% subagent\n');
   const ship = last(sb.rows(), 'ship');
-  assert.equal(ship.untracked, 0);
-  assert.deepEqual(ship.commits.map((c) => Boolean(c.docs)), [false, true]);
-  assert.match(sb.ledger(dir, 's1', 'report'), /\n1 ship · 1 commit · /);
+  assert.equal(ship.untracked, 1);
+  assert.deepEqual(ship.commits.map((c) => Boolean(c.docs)), [false, false]);
 });
 
 test('patch ids survive color.ui=always in the user\'s git config', (t) => {
