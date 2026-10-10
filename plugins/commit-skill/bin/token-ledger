@@ -1,0 +1,543 @@
+#!/usr/bin/env node
+'use strict';
+
+// Records what a commit and a ship cost, in estimated API dollars, from the
+// token usage Claude Code writes to its session transcripts. The /commit and
+// /ship skills call this and paste its stdout into their summary; a failure
+// prints to stderr and leaves stdout empty, so the summary loses a line and
+// nothing else.
+//
+// Subcommands: commit, ship-begin, ship, report, stats.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const readline = require('readline');
+const { execFileSync } = require('child_process');
+
+const HOME = os.homedir();
+const LEDGER = process.env.TOKEN_LEDGER_FILE || path.join(HOME, '.claude', 'token-ledger.jsonl');
+const MARKERS = process.env.TOKEN_LEDGER_MARKERS || path.join(HOME, '.claude', 'token-ledger-ship-markers.json');
+const PROJECTS = path.join(HOME, '.claude', 'projects');
+const PRICES = JSON.parse(fs.readFileSync(path.join(__dirname, 'prices.json'), 'utf8'));
+
+// ---------- small helpers ----------
+
+function parseArgs(argv) {
+  const out = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith('--')) { out._.push(a); continue; }
+    const eq = a.indexOf('=');
+    if (eq > -1) out[a.slice(2, eq)] = a.slice(eq + 1);
+    else if (argv[i + 1] && !argv[i + 1].startsWith('--')) out[a.slice(2)] = argv[++i];
+    else out[a.slice(2)] = true;
+  }
+  return out;
+}
+
+function git(args, opts = {}) {
+  return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...opts }).trim();
+}
+
+function gitSafe(args, opts) {
+  // A null answer is the expected outcome here, so git's own error text is noise.
+  try { return git(args, { stdio: ['ignore', 'pipe', 'ignore'], ...opts }); } catch { return null; }
+}
+
+// The main checkout's root. Every worktree of one repository shares it, while
+// --show-toplevel names the worktree, so this is the key a report groups on.
+function projectRoot() {
+  const common = gitSafe(['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return common ? path.dirname(common) : gitSafe(['rev-parse', '--show-toplevel']);
+}
+
+// An entry belongs to a project when it records that root. An entry written
+// before the field existed belongs when its worktree sits inside the root, or
+// beside it as a `<root>-<name>` sibling, the older worktree layout.
+function inProject(r, root) {
+  if (r.project) return r.project === root;
+  if (typeof r.repo !== 'string') return false;
+  return r.repo === root || r.repo.startsWith(root + path.sep) || r.repo.startsWith(root + '-');
+}
+
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'K';
+  return String(n);
+}
+
+function fmtUsd(n) {
+  return '$' + n.toFixed(2);
+}
+
+function pct(part, whole) {
+  if (!whole) return 0;
+  return Math.round((part / whole) * 100);
+}
+
+// ---------- transcripts ----------
+
+function findSession(sessionId) {
+  let dirs;
+  try { dirs = fs.readdirSync(PROJECTS); } catch { return null; }
+  for (const d of dirs) {
+    const file = path.join(PROJECTS, d, sessionId + '.jsonl');
+    if (fs.existsSync(file)) {
+      return { file, subagentDir: path.join(PROJECTS, d, sessionId, 'subagents') };
+    }
+  }
+  return null;
+}
+
+function newBucket() {
+  return { calls: 0, byModel: {} };
+}
+
+function addUsage(bucket, model, u) {
+  bucket.calls++;
+  let m = bucket.byModel[model];
+  if (!m) m = bucket.byModel[model] = { input: 0, cache_w5: 0, cache_w1h: 0, cache_read: 0, output: 0 };
+  m.input += u.input_tokens || 0;
+  const cc = u.cache_creation || {};
+  const w5 = cc.ephemeral_5m_input_tokens || 0;
+  const w1h = cc.ephemeral_1h_input_tokens || 0;
+  // Older records carry only the total; bill those at the 5-minute rate.
+  if (!w5 && !w1h) m.cache_w5 += u.cache_creation_input_tokens || 0;
+  else { m.cache_w5 += w5; m.cache_w1h += w1h; }
+  m.cache_read += u.cache_read_input_tokens || 0;
+  m.output += u.output_tokens || 0;
+}
+
+async function scanFile(file, bucket, seen, startMs, endMs) {
+  let stream;
+  try { stream = fs.createReadStream(file, { encoding: 'utf8' }); } catch { return; }
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line || line[0] !== '{') continue;
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (row.type !== 'assistant' || !row.message || !row.message.usage) continue;
+    const model = row.message.model;
+    if (!model || model === '<synthetic>') continue;
+    const ts = Date.parse(row.timestamp);
+    if (!Number.isFinite(ts) || ts <= startMs || ts > endMs) continue;
+    // One API call is written to several lines; the message id de-duplicates it.
+    const id = row.message.id || (row.requestId && row.requestId + ':' + model);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    addUsage(bucket, model, row.message.usage);
+  }
+}
+
+async function collect(sess, startMs, endMs) {
+  const lead = newBucket();
+  const sub = newBucket();
+  const seen = new Set();
+  await scanFile(sess.file, lead, seen, startMs, endMs);
+  let subFiles = [];
+  try {
+    subFiles = fs.readdirSync(sess.subagentDir).filter((f) => f.endsWith('.jsonl'));
+  } catch { /* a session with no subagents has no directory */ }
+  for (const f of subFiles) await scanFile(path.join(sess.subagentDir, f), sub, seen, startMs, endMs);
+  return { lead, sub };
+}
+
+async function firstTimestamp(file) {
+  const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line || line[0] !== '{') continue;
+    try {
+      const ts = Date.parse(JSON.parse(line).timestamp);
+      if (Number.isFinite(ts)) { rl.close(); return ts; }
+    } catch { /* keep looking */ }
+  }
+  return Date.now();
+}
+
+// ---------- cost ----------
+
+function costOf(bucket, unknown) {
+  let usd = 0;
+  for (const [model, t] of Object.entries(bucket.byModel)) {
+    // A transcript can name a dated snapshot (claude-haiku-4-5-20251001); price it as its alias.
+    const p = PRICES.models[model] || PRICES.models[model.replace(/-\d{8}$/, '')];
+    if (!p) { unknown.add(model); continue; }
+    usd += (t.input * p.input
+      + t.cache_w5 * p.cache_write_5m
+      + t.cache_w1h * p.cache_write_1h
+      + t.cache_read * p.cache_read
+      + t.output * p.output) / 1e6;
+  }
+  return usd;
+}
+
+function totalsOf(bucket) {
+  const t = { input: 0, cache_w5: 0, cache_w1h: 0, cache_read: 0, output: 0 };
+  for (const m of Object.values(bucket.byModel)) {
+    for (const k of Object.keys(t)) t[k] += m[k];
+  }
+  return t;
+}
+
+function summarise(lead, sub) {
+  const unknown = new Set();
+  const leadUsd = costOf(lead, unknown);
+  const subUsd = costOf(sub, unknown);
+  const lt = totalsOf(lead);
+  const st = totalsOf(sub);
+  return {
+    leadUsd, subUsd, usd: leadUsd + subUsd,
+    calls: lead.calls + sub.calls, subCalls: sub.calls,
+    cacheRead: lt.cache_read + st.cache_read,
+    cacheWrite: lt.cache_w5 + lt.cache_w1h + st.cache_w5 + st.cache_w1h,
+    output: lt.output + st.output,
+    unknown: [...unknown],
+  };
+}
+
+function costLine(s) {
+  const dollars = fmtUsd(s.usd) + (s.unknown.length ? '+' : '');
+  let line = `**Cost:** ${dollars} · ${s.calls} calls (${s.subCalls} subagent)`
+    + ` · ${pct(s.leadUsd, s.usd)}% lead · ${pct(s.subUsd, s.usd)}% subagent`
+    + ` · ${fmtTokens(s.cacheRead)} cache read · ${fmtTokens(s.cacheWrite)} cache write · ${fmtTokens(s.output)} out`;
+  if (s.unknown.length) line += `\n  unpriced model, cost is a floor: ${s.unknown.join(', ')}`;
+  return line;
+}
+
+// ---------- ledger ----------
+
+function readLedger() {
+  let raw;
+  try { raw = fs.readFileSync(LEDGER, 'utf8'); } catch { return []; }
+  const rows = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try { rows.push(JSON.parse(line)); } catch { /* skip a torn line */ }
+  }
+  return rows;
+}
+
+function appendLedger(entry) {
+  fs.mkdirSync(path.dirname(LEDGER), { recursive: true });
+  fs.appendFileSync(LEDGER, JSON.stringify(entry) + '\n');
+}
+
+// Windows are contiguous: a commit starts where this session's last entry ended,
+// so summing entries never counts a token twice.
+function lastEndForSession(rows, sessionId) {
+  let last = null;
+  for (const r of rows) {
+    if (r.session !== sessionId || !r.window || !r.window.end) continue;
+    const ts = Date.parse(r.window.end);
+    if (Number.isFinite(ts) && (last === null || ts > last)) last = ts;
+  }
+  return last;
+}
+
+function readMarkers() {
+  try { return JSON.parse(fs.readFileSync(MARKERS, 'utf8')); } catch { return {}; }
+}
+
+function writeMarkers(m) {
+  fs.mkdirSync(path.dirname(MARKERS), { recursive: true });
+  fs.writeFileSync(MARKERS, JSON.stringify(m, null, 2));
+}
+
+// ---------- git ----------
+
+function patchIdOf(sha) {
+  try {
+    const show = execFileSync('git', ['show', sha], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    const out = execFileSync('git', ['patch-id', '--stable'], { input: show, encoding: 'utf8' }).trim();
+    return out ? out.split(/\s+/)[0] : null;
+  } catch { return null; }
+}
+
+function diffStat(sha) {
+  const out = gitSafe(['show', '--numstat', '--format=', sha]);
+  const stat = { files: 0, insertions: 0, deletions: 0 };
+  if (!out) return stat;
+  for (const line of out.split('\n')) {
+    const parts = line.split('\t');
+    if (parts.length < 3) continue;
+    stat.files++;
+    if (parts[0] !== '-') stat.insertions += Number(parts[0]) || 0;
+    if (parts[1] !== '-') stat.deletions += Number(parts[1]) || 0;
+  }
+  return stat;
+}
+
+function sessionId() {
+  const id = process.env.CLAUDE_CODE_SESSION_ID;
+  if (!id) throw new Error('CLAUDE_CODE_SESSION_ID is unset; run this from inside a Claude Code session');
+  return id;
+}
+
+async function windowFor(sess, rows, id) {
+  const last = lastEndForSession(rows, id);
+  const start = last === null ? await firstTimestamp(sess.file) - 1 : last;
+  return { startMs: start, endMs: Date.now() };
+}
+
+// ---------- subcommands ----------
+
+async function cmdCommit(args) {
+  const id = sessionId();
+  const sess = findSession(id);
+  if (!sess) throw new Error(`no transcript found for session ${id}`);
+  const repo = git(['rev-parse', '--show-toplevel']);
+  const sha = git(['rev-parse', args.sha || 'HEAD']);
+  const rows = readLedger();
+  const { startMs, endMs } = await windowFor(sess, rows, id);
+  const { lead, sub } = await collect(sess, startMs, endMs);
+  const s = summarise(lead, sub);
+  const stat = diffStat(sha);
+
+  appendLedger({
+    v: 1,
+    kind: 'commit',
+    ts: new Date(endMs).toISOString(),
+    repo,
+    project: projectRoot(),
+    branch: gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']),
+    sha,
+    patch_id: patchIdOf(sha),
+    subject: gitSafe(['log', '-1', '--format=%s', sha]),
+    session: id,
+    window: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
+    lead: { calls: lead.calls, by_model: lead.byModel },
+    sub: { calls: sub.calls, by_model: sub.byModel },
+    cost: {
+      usd: Number(s.usd.toFixed(4)),
+      lead_usd: Number(s.leadUsd.toFixed(4)),
+      sub_usd: Number(s.subUsd.toFixed(4)),
+      prices_version: PRICES.version,
+      partial: s.unknown.length > 0,
+      unpriced_models: s.unknown,
+    },
+    files: stat.files,
+    insertions: stat.insertions,
+    deletions: stat.deletions,
+  });
+
+  process.stdout.write(costLine(s) + '\n');
+}
+
+// The remote-tracking ref a push lands on: the branch's upstream, or the
+// remote's default branch for a worktree branch that has no upstream.
+function shipRef() {
+  return gitSafe(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
+    || gitSafe(['rev-parse', '--abbrev-ref', 'origin/HEAD']);
+}
+
+function cmdShipBegin() {
+  const id = sessionId();
+  const repo = git(['rev-parse', '--show-toplevel']);
+  const markers = readMarkers();
+  const ref = shipRef();
+  markers[repo] = {
+    ref,
+    base: ref ? gitSafe(['rev-parse', ref]) : null,
+    branch: gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']),
+    session: id,
+    ts: new Date().toISOString(),
+  };
+  writeMarkers(markers);
+}
+
+async function cmdShip() {
+  const id = sessionId();
+  const sess = findSession(id);
+  if (!sess) throw new Error(`no transcript found for session ${id}`);
+  const repo = git(['rev-parse', '--show-toplevel']);
+  const markers = readMarkers();
+  const marker = markers[repo];
+  const head = git(['rev-parse', 'HEAD']);
+  // With no marker, a push that moved the tracking ref to HEAD left the
+  // pre-push tip one entry back in that ref's reflog.
+  const ref = (marker && marker.ref) || shipRef();
+  const pushed = ref && gitSafe(['rev-parse', ref]) === head ? gitSafe(['rev-parse', `${ref}@{1}`]) : null;
+  const base = (marker && marker.base) || pushed;
+  if (!base) throw new Error('no ship base: run `token-ledger ship-begin` before pushing');
+  const shas = (gitSafe(['rev-list', '--reverse', `${base}..${head}`]) || '').split('\n').filter(Boolean);
+
+  const rows = readLedger();
+  const byPatch = new Map();
+  const bySha = new Map();
+  for (const r of rows) {
+    if (r.kind !== 'commit') continue;
+    if (r.patch_id) byPatch.set(r.patch_id, r);
+    if (r.sha) bySha.set(r.sha, r);
+  }
+
+  const commits = [];
+  let matchedUsd = 0; let matchedLead = 0; let matchedSub = 0; let untracked = 0;
+  let partial = false;
+  for (const sha of shas) {
+    const pid = patchIdOf(sha);
+    const entry = (pid && byPatch.get(pid)) || bySha.get(sha) || null;
+    if (entry) {
+      matchedUsd += entry.cost.usd;
+      matchedLead += entry.cost.lead_usd;
+      matchedSub += entry.cost.sub_usd;
+      if (entry.cost.partial) partial = true;
+    } else {
+      untracked++;
+    }
+    commits.push({ sha, patch_id: pid, matched: Boolean(entry), usd: entry ? entry.cost.usd : null });
+  }
+
+  // Everything since this session's last ledger entry is the ship's own cost.
+  const { startMs, endMs } = await windowFor(sess, rows, id);
+  const { lead, sub } = await collect(sess, startMs, endMs);
+  const o = summarise(lead, sub);
+  if (o.unknown.length) partial = true;
+
+  const total = matchedUsd + o.usd;
+  const leadUsd = matchedLead + o.leadUsd;
+  const subUsd = matchedSub + o.subUsd;
+  const plus = partial ? '+' : '';
+
+  appendLedger({
+    v: 1,
+    kind: 'ship',
+    ts: new Date(endMs).toISOString(),
+    repo,
+    project: projectRoot(),
+    branch: gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']),
+    range: `${base}..${head}`,
+    session: id,
+    window: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
+    commits,
+    overhead: {
+      lead: { calls: lead.calls, by_model: lead.byModel },
+      sub: { calls: sub.calls, by_model: sub.byModel },
+      usd: Number(o.usd.toFixed(4)),
+    },
+    cost: {
+      usd: Number(total.toFixed(4)),
+      lead_usd: Number(leadUsd.toFixed(4)),
+      sub_usd: Number(subUsd.toFixed(4)),
+      prices_version: PRICES.version,
+      partial,
+    },
+    untracked,
+  });
+
+  if (marker) { delete markers[repo]; writeMarkers(markers); }
+
+  const n = commits.length;
+  let out = `**Ship cost:** ${fmtUsd(total)}${plus} across ${n} commit${n === 1 ? '' : 's'}`
+    + ` (+ ${fmtUsd(o.usd)} ship overhead) · ${pct(leadUsd, total)}% lead · ${pct(subUsd, total)}% subagent`;
+  if (untracked) {
+    out += `\n  ${untracked} commit${untracked === 1 ? '' : 's'} not tracked (committed outside /commit)`;
+  }
+  process.stdout.write(out + '\n');
+}
+
+function sinceMs(spec) {
+  if (!spec) spec = '14d';
+  const m = /^(\d+)([dhw])$/.exec(String(spec));
+  if (m) {
+    const mult = { h: 3600e3, d: 86400e3, w: 7 * 86400e3 }[m[2]];
+    return Date.now() - Number(m[1]) * mult;
+  }
+  const t = Date.parse(spec);
+  return Number.isFinite(t) ? t : Date.now() - 14 * 86400e3;
+}
+
+function cmdReport(args) {
+  const cutoff = sinceMs(args.since);
+  const repo = args.all ? null : projectRoot();
+  const by = args.by === 'commit' ? 'commit' : 'ship';
+  const rows = readLedger().filter((r) => {
+    if (r.kind !== by) return false;
+    if (repo && !inProject(r, repo)) return false;
+    return Date.parse(r.ts) >= cutoff;
+  });
+
+  const scope = repo ? path.basename(repo) : 'all repos';
+  const head = `${by === 'ship' ? 'Ships' : 'Commits'} — ${scope} — since ${new Date(cutoff).toISOString().slice(0, 10)}`;
+  if (!rows.length) { process.stdout.write(head + '\n  (nothing recorded)\n'); return; }
+
+  const lines = [head, ''];
+  let total = 0; let lead = 0; let sub = 0; let units = 0;
+  if (by === 'ship') {
+    lines.push('DATE'.padEnd(10) + 'COMMITS'.padStart(7) + 'TOTAL'.padStart(10) + 'LEAD'.padStart(6) + 'SUB'.padStart(7) + '  BRANCH');
+    for (const r of rows) {
+      const n = r.commits ? r.commits.length : 0;
+      total += r.cost.usd; lead += r.cost.lead_usd; sub += r.cost.sub_usd; units += n;
+      lines.push([
+        r.ts.slice(0, 10),
+        String(n).padStart(7),
+        fmtUsd(r.cost.usd).padStart(10),
+        (pct(r.cost.lead_usd, r.cost.usd) + '%').padStart(6),
+        (pct(r.cost.sub_usd, r.cost.usd) + '%').padStart(7),
+        '  ' + (r.branch || ''),
+      ].join(''));
+    }
+  } else {
+    lines.push('DATE'.padEnd(10) + '  ' + 'SHA'.padEnd(7) + 'COST'.padStart(10) + 'SUB'.padStart(7) + '  SUBJECT');
+    for (const r of rows) {
+      total += r.cost.usd; lead += r.cost.lead_usd; sub += r.cost.sub_usd; units++;
+      lines.push([
+        r.ts.slice(0, 10),
+        '  ' + (r.sha || '').slice(0, 7),
+        fmtUsd(r.cost.usd).padStart(10),
+        (pct(r.cost.sub_usd, r.cost.usd) + '%').padStart(7),
+        '  ' + (r.subject || '').slice(0, 44),
+      ].join(''));
+    }
+  }
+  lines.push('');
+  const mean = units ? total / units : 0;
+  const count = by === 'ship'
+    ? `${rows.length} ship${rows.length === 1 ? '' : 's'} · ${units} commit${units === 1 ? '' : 's'}`
+    : `${units} commit${units === 1 ? '' : 's'}`;
+  lines.push(`${count} · ${fmtUsd(total)} total · ${fmtUsd(mean)} per commit`
+    + ` · ${pct(lead, total)}% lead · ${pct(sub, total)}% subagent`);
+  process.stdout.write(lines.join('\n') + '\n');
+}
+
+// Diagnostic: cost an arbitrary session or window without recording anything.
+async function cmdStats(args) {
+  const id = args.session || sessionId();
+  const sess = findSession(id);
+  if (!sess) throw new Error(`no transcript found for session ${id}`);
+  const startMs = args.from ? Date.parse(args.from) : (await firstTimestamp(sess.file)) - 1;
+  const endMs = args.to ? Date.parse(args.to) : Date.now();
+  const { lead, sub } = await collect(sess, startMs, endMs);
+  const unknown = new Set();
+  process.stdout.write(JSON.stringify({
+    session: id,
+    window: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
+    lead: { calls: lead.calls, totals: totalsOf(lead), usd: Number(costOf(lead, unknown).toFixed(4)), by_model: Object.keys(lead.byModel) },
+    sub: { calls: sub.calls, totals: totalsOf(sub), usd: Number(costOf(sub, unknown).toFixed(4)), by_model: Object.keys(sub.byModel) },
+    unpriced_models: [...unknown],
+    prices_version: PRICES.version,
+  }, null, 2) + '\n');
+}
+
+// ---------- entry ----------
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const cmd = argv[0];
+  const args = parseArgs(argv.slice(1));
+  switch (cmd) {
+    case 'commit': return cmdCommit(args);
+    case 'ship-begin': return cmdShipBegin();
+    case 'ship': return cmdShip();
+    case 'report': return cmdReport(args);
+    case 'stats': return cmdStats(args);
+    default:
+      process.stderr.write('usage: token-ledger <commit|ship-begin|ship|report|stats> [options]\n');
+      process.exitCode = 2;
+  }
+}
+
+main().catch((err) => {
+  process.stderr.write('token-ledger: ' + (err && err.message ? err.message : String(err)) + '\n');
+  process.exitCode = 1;
+});

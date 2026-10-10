@@ -1,0 +1,8 @@
+{
+  "name": "sittings",
+  "version": "1.0.0",
+  "description": "Bookends for a unit of work: /savor audits a spec before implementation, /observations surfaces what review can't reach after it",
+  "author": {
+    "name": "Todd Shaffer"
+  }
+}

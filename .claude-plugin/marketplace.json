@@ -16,14 +16,28 @@
       "category": "development"
     },
     {
-      "name": "excavate",
-      "description": "Code archaeology — reconstruct the why behind a file, symbol, or commit by reading git history, commit bodies, and CLAUDE.md/README evolution. Pairs with LSP plugins.",
-      "source": {
-        "source": "git-subdir",
-        "url": "https://github.com/todd-w-shaffer/excavate.git",
-        "path": "plugins/excavate"
-      },
-      "category": "exploration"
+      "name": "commit-skill",
+      "description": "Structured narrative commit workflow with build validation and recipe distillation",
+      "source": "./plugins/commit-skill",
+      "category": "development"
+    },
+    {
+      "name": "ship-skill",
+      "description": "Post-commit propagation cascade — push, detect stale docs/memory, surgically update, commit docs. Requires commit-skill",
+      "source": "./plugins/ship-skill",
+      "category": "development"
+    },
+    {
+      "name": "sittings",
+      "description": "Bookends for a unit of work: /savor audits a spec before implementation, /observations surfaces what review can't reach after it",
+      "source": "./plugins/sittings",
+      "category": "development"
+    },
+    {
+      "name": "clearmind",
+      "description": "Audit auto-memory for stale, shipped, redundant, or trivial entries, then apply removals after approval",
+      "source": "./plugins/clearmind",
+      "category": "development"
     }
   ]
 }
