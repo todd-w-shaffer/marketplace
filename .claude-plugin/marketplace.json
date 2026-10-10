@@ -23,7 +23,7 @@
     },
     {
       "name": "ship-skill",
-      "description": "Post-commit propagation cascade — push, detect stale docs/memory, surgically update, commit docs. Requires commit-skill",
+      "description": "Post-commit propagation cascade — push, detect stale docs/memory, surgically update, commit docs. Requires commit-skill (for /commit and token-ledger)",
       "source": "./plugins/ship-skill",
       "category": "development"
     },
