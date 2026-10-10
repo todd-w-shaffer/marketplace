@@ -128,7 +128,7 @@ Rules:
 After a successful commit, print ONLY the following (and nothing else before it):
 
 ```
-**Title:** <subject line>
+**Subject:** <subject line>
 
 **Recipe:** <the recipe text>
 
