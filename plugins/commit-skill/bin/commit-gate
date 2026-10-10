@@ -1,0 +1,345 @@
+#!/usr/bin/env node
+'use strict';
+
+// The commit gate: git refuses a commit from a Claude Code session unless a
+// /commit or /ship call made room for it. A session that commits by hand skips
+// /commit's message format and its token-ledger cost line.
+//
+// A repository opts in with `commit-gate install`, run from a terminal, which
+// writes a commit-msg stub carrying MARKER. Without that stub the mint and the
+// guard do nothing, so enabling the plugin changes nothing about how commits
+// work anywhere else.
+//
+//   check <msgfile>  git's commit-msg hook, through the stub
+//   mint             a Claude Code hook on Skill calls and prompts
+//   guard            a Claude Code hook on Bash calls
+//   install          write the stub (from a terminal)
+//   uninstall        remove it (from a terminal)
+//   status           say whether this repository is gated
+//
+// **The token** is an empty file at
+// `$(git rev-parse --git-common-dir)/commit-gate/<session id>.<kind>`. It holds
+// no secret: its name is the grant. The mint writes it and `check` spends it;
+// the model never writes it. The common git directory is shared by every
+// worktree, and the session id keeps parallel sessions apart.
+//
+// - A `commit` token admits one message with a line starting `Recipe:`.
+// - A `ship-docs` token admits one message whose subject is /ship's docs
+//   subject (lib/commit-format.js), the one commit /ship makes itself.
+// - A message that matches neither is refused, and the token stays, so the
+//   session can fix the message and commit again under the same call.
+//
+// **What it does not see.** `git revert`, `cherry-pick` and `rebase` run no
+// commit-msg hook, and `commit-tree` runs no hook at all. A non-fast-forward
+// `merge` runs it, so a session's merge commit is refused. `--no-verify` skips
+// the hook; the guard denies it.
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const { isShipDocs, hasRecipe } = require('../lib/commit-format');
+
+// scripts/gated greps for this line too; change both together.
+const MARKER = '# commit-skill commit gate: written by `commit-gate install`';
+
+// The stub finds the gate on PATH: Claude Code puts the plugin's bin/ on the
+// Bash tool's PATH, and git passes it to the hook. Outside Claude Code it
+// exits 0 before it looks. With the plugin disabled it fails closed.
+const STUB = [
+  '#!/bin/sh',
+  MARKER,
+  '[ -n "${CLAUDECODE:-}" ] || exit 0',
+  'command -v commit-gate >/dev/null 2>&1 || { echo "commit-gate: commit-skill is not enabled, so a Claude Code '
+    + 'session cannot commit in this repository. Enable commit-skill, or remove .git/hooks/commit-msg from a '
+    + 'terminal to ungate it." >&2; exit 1; }',
+  'exec commit-gate check "$@"',
+  '',
+].join('\n');
+
+const SESSION_ID = /^[A-Za-z0-9-]+$/;
+const DAY_MS = 24 * 3600 * 1000;
+
+// Exact names only: a skill name carries no marketplace, so another plugin's
+// `foo:ship` must not mint. A typed `/commit` gives `commit`. `ship-skill:ship`
+// stays until ship-skill is uninstalled where it is used.
+const GRANTS = {
+  commit: new Set(['commit', 'commit-skill:commit']),
+  'ship-docs': new Set(['ship', 'commit-skill:ship', 'ship-skill:ship']),
+};
+
+function git(cwd, args) {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+}
+
+function gitSafe(cwd, args) {
+  try { return git(cwd, args); } catch { return null; }
+}
+
+function hookFile(dir) {
+  const hooks = gitSafe(dir, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']);
+  return hooks && path.join(hooks, 'commit-msg');
+}
+
+/** Whether `dir` is in a repository whose commit-msg hook is the stub. */
+function isGated(dir) {
+  if (!dir) return false;
+  const file = hookFile(dir);
+  try { return fs.readFileSync(file, 'utf8').includes(MARKER); } catch { return false; }
+}
+
+function tokenDir(dir) {
+  const common = gitSafe(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return common && path.join(common, 'commit-gate');
+}
+
+// ---------- check ----------
+
+function refuse(reason) {
+  process.stderr.write(`commit-gate: ${reason}. Commit through /commit (the Skill tool, commit-skill:commit); `
+    + 'a Claude Code session cannot commit by hand.\n');
+  return 1;
+}
+
+// The message file can hold comment lines, so the subject is the first line
+// that is neither blank nor a comment. `#` is fixed, as git's default;
+// core.commentChar is not read.
+function subjectOf(message) {
+  return message.split('\n').find((line) => !line.startsWith('#') && !/^\s*$/.test(line)) || '';
+}
+
+// Spending is an unlink, and only the call that unlinked admits the commit,
+// so two parallel commits in one session cannot both spend one token.
+function claim(token) {
+  try { fs.unlinkSync(token); return true; } catch { return false; }
+}
+
+function check(msgfile) {
+  if (!process.env.CLAUDECODE) return 0;
+  const sid = process.env.CLAUDE_CODE_SESSION_ID || '';
+  if (!SESSION_ID.test(sid)) return refuse('no Claude Code session id in this shell');
+  const dir = tokenDir(process.cwd());
+  if (!dir) return refuse('no git directory');
+  const message = fs.readFileSync(msgfile, 'utf8');
+  const commit = path.join(dir, `${sid}.commit`);
+  const docs = path.join(dir, `${sid}.ship-docs`);
+
+  // The commit token first: /ship calls /commit before its docs step, so a
+  // session can hold both, and a Recipe commit spends the commit token.
+  if (fs.existsSync(commit) && hasRecipe(message) && claim(commit)) return 0;
+  if (fs.existsSync(docs) && isShipDocs(subjectOf(message)) && claim(docs)) return 0;
+  if (fs.existsSync(commit)) return refuse('the message has no line starting with Recipe:');
+  return refuse('no /commit call made room for this commit');
+}
+
+// ---------- mint ----------
+
+// Writes the token on a /commit or /ship Skill call, and on a typed /commit or
+// /ship, which loads its skill with no Skill call. Any other Skill call deletes
+// the commit token and keeps ship-docs, because /ship calls /commit before its
+// docs step; any other prompt deletes both. A subagent's call does nothing: it
+// shares the session id, so it would act on the main thread's token.
+//
+// - The session id is CLAUDE_CODE_SESSION_ID from the environment, not the
+//   payload's: after /clear the payload carries a new id while the Bash shell
+//   keeps the one its process started with. The payload's is the fallback.
+// - The repository is CLAUDE_PROJECT_DIR's, so a session that has moved
+//   elsewhere still mints here; the payload's cwd is the fallback.
+//
+// It prints nothing, because a UserPromptSubmit hook's stdout goes into the
+// session's context, and exits 0 on every path: a fault costs a refused
+// commit, never a blocked prompt or skill.
+function mint(p) {
+  const event = p.hook_event_name;
+  if (event !== 'PreToolUse' && event !== 'UserPromptSubmit') return;
+  if (p.agent_id) return;
+  const sid = process.env.CLAUDE_CODE_SESSION_ID || p.session_id || '';
+  if (!SESSION_ID.test(sid)) return;
+  const project = process.env.CLAUDE_PROJECT_DIR || p.cwd;
+  if (!isGated(project)) return;
+  const dir = tokenDir(project);
+  if (!dir) return;
+
+  const skill = event === 'UserPromptSubmit'
+    ? (/^\/(\S+)(\s|$)/.exec(p.prompt || '') || [])[1] || ''
+    : (p.tool_input && p.tool_input.skill) || '';
+  const kind = Object.keys(GRANTS).find((k) => GRANTS[k].has(skill));
+  if (kind) {
+    fs.mkdirSync(dir, { recursive: true });
+    // Sessions that ended leave tokens behind.
+    for (const name of fs.readdirSync(dir)) {
+      const f = path.join(dir, name);
+      try { if (Date.now() - fs.statSync(f).mtimeMs > DAY_MS) fs.unlinkSync(f); } catch { /* gone already */ }
+    }
+    fs.writeFileSync(path.join(dir, `${sid}.${kind}`), '');
+    return;
+  }
+  for (const k of event === 'UserPromptSubmit' ? ['commit', 'ship-docs'] : ['commit']) {
+    try { fs.unlinkSync(path.join(dir, `${sid}.${k}`)); } catch { /* none to delete */ }
+  }
+}
+
+// ---------- guard ----------
+
+// Denies a Bash command that would skip the gate:
+// - `--no-verify`, an abbreviation of it, or `-n` on a `git commit`, which skip
+//   commit-msg;
+// - `core.hooksPath` anywhere, which points git at another hooks directory;
+// - a path component `commit-gate/`, the token directory;
+// - `CLAUDECODE` or `CLAUDE_CODE_SESSION_ID` anywhere, which the stub and
+//   `check` read, and `env -i`, which clears both without naming them;
+// - this script's mint, guard, install and uninstall, which are on the
+//   session's PATH;
+// - a PATH assignment on a line with a `git commit`, which would put a fake
+//   commit-gate ahead of this one for the stub to find.
+//
+// **The guard is defence in depth, not the gate.** A script file, an alias or a
+// flag spelled at run time passes it. It reads the command without heredoc
+// bodies and without quoted strings that hold whitespace, so a commit message
+// may name any of the above; a quoted word with no whitespace is still read.
+
+const SP = '[^\\S\\n]';
+const COMMITS = new RegExp(`(^|[^A-Za-z0-9_-])git(${SP}[^|;&\\n]*)?${SP}commit(${SP}[^|;&\\n]*)?`, 'gm');
+const SKIP_FLAG = /(^|\s)["']?(--no-ve[a-z]*|-[A-Za-z]*n[A-Za-z]*)["']?(\s|=|$)/m;
+// What `env` reads before its command: an option that takes a separate
+// argument, any other option, or a NAME=value assignment.
+const ENV_WORD = `(?:-[CPSu]|--(?:chdir|split-string|unset))${SP}+\\S+|-\\S*|[A-Za-z_][A-Za-z0-9_]*=\\S*`;
+const ENV_CLEAR = new RegExp(
+  `(^|[^A-Za-z0-9_])env(?:${SP}+(?:${ENV_WORD}))*${SP}+(?:-[A-Za-z0-9]*i[A-Za-z0-9]*|-|--ignore-environment)(?:${SP}|$)`,
+  'm');
+
+// The command as the checks read it: each backslash-newline joined, each
+// heredoc body dropped, and each quoted string that holds whitespace emptied.
+// The quoted strings are read in one pass from left to right, so the text
+// between two of them is never taken for a third.
+function readable(command) {
+  return command
+    .replace(/\\\n/g, ' ')
+    .replace(/(<<-?[ \t]*["']?(\w+)["']?[^\n]*\n)(?:[\s\S]*?\n)?[ \t]*\2[ \t]*(?:\n|$)/g, '$1')
+    .replace(/"[^"]*"|'[^']*'/g, (q) => (/\s/.test(q) ? q[0] + q[0] : q));
+}
+
+function denial(command) {
+  const shell = readable(command);
+  // Each `git … commit` up to the next `|`, `;` or `&`, so another command's
+  // flag on the same line is not read as the commit's.
+  const commits = (shell.match(COMMITS) || []).join('\n');
+  if (commits && SKIP_FLAG.test(commits)) return '--no-verify and -n skip the git hook';
+  if (/core\.hookspath/i.test(shell)) return 'core.hooksPath moves the git hooks';
+  if (/(^|[^A-Za-z0-9_.-])commit-gate\//m.test(shell)) return "the token directory is the hooks' alone";
+  if (/(^|[^A-Za-z0-9_])(CLAUDECODE|CLAUDE_CODE_SESSION_ID)([^A-Za-z0-9_]|$)/m.test(shell)) {
+    return 'the git hook reads CLAUDECODE and CLAUDE_CODE_SESSION_ID';
+  }
+  if (ENV_CLEAR.test(shell)) return 'env -i clears CLAUDECODE, which the git hook reads';
+  if (new RegExp(`(^|[^A-Za-z0-9_.-])commit-gate${SP}+(mint|guard|install|uninstall)(${SP}|$)`, 'm').test(shell)) {
+    return "commit-gate's mint and guard are Claude Code's, and install and uninstall run from a terminal";
+  }
+  if (commits && new RegExp(`(^|[^A-Za-z0-9_])(PATH\\+?=|export${SP}+PATH([^A-Za-z0-9_]|$))`, 'm').test(shell)) {
+    return 'a PATH set on a git commit line can stand in for commit-gate';
+  }
+  return null;
+}
+
+function guard(p) {
+  const command = (p.tool_input && p.tool_input.command) || '';
+  // Every denied form contains one of these, so a command with none is let
+  // through without starting git.
+  if (!/commit|CLAUDE|env|hookspath|PATH/i.test(command)) return;
+  // Gated when the project or the cwd is: a session that cd-ed into an ungated
+  // directory still commits in the project with `git -C`.
+  if (!isGated(process.env.CLAUDE_PROJECT_DIR) && !isGated(p.cwd)) return;
+  const reason = denial(command);
+  if (!reason) return;
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: `commit-gate: ${reason}. Commit through /commit (the Skill tool, commit-skill:commit).`,
+    },
+  }) + '\n');
+}
+
+// ---------- install, uninstall, status ----------
+
+function fail(message) {
+  process.stderr.write(`commit-gate: ${message}\n`);
+  return 1;
+}
+
+// Both refuse in a Claude Code shell: they are on the session's PATH, and
+// whether a repository is gated is the person's call. From a terminal, where
+// bin/ is not on PATH, run `node <plugin dir>/bin/commit-gate install`.
+function fromTerminal(what) {
+  return process.env.CLAUDECODE
+    ? fail(`${what} runs from a terminal, not a Claude Code session`)
+    : 0;
+}
+
+function install() {
+  if (fromTerminal('install')) return 1;
+  const cwd = process.cwd();
+  if (!gitSafe(cwd, ['rev-parse', '--git-dir'])) return fail('not in a git repository');
+  // git would not run a stub in .git/hooks, and scripts/gated would not find
+  // one anywhere else.
+  if (gitSafe(cwd, ['config', '--get', 'core.hooksPath'])) {
+    return fail('core.hooksPath is set; the gate needs the commit-msg hook in .git/hooks');
+  }
+  const file = hookFile(cwd);
+  if (fs.existsSync(file) && !fs.readFileSync(file, 'utf8').includes(MARKER)) {
+    return fail(`${file} exists and was not written by commit-gate; leaving it alone`);
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, STUB);
+  fs.chmodSync(file, 0o755);
+  process.stdout.write(`commit-gate: installed ${file}\n`);
+  return 0;
+}
+
+function uninstall() {
+  if (fromTerminal('uninstall')) return 1;
+  const file = hookFile(process.cwd());
+  if (!file) return fail('not in a git repository');
+  if (!fs.existsSync(file)) {
+    process.stdout.write('commit-gate: no commit-msg hook; nothing to remove\n');
+    return 0;
+  }
+  if (!fs.readFileSync(file, 'utf8').includes(MARKER)) {
+    return fail(`${file} was not written by commit-gate; leaving it alone`);
+  }
+  fs.unlinkSync(file);
+  process.stdout.write(`commit-gate: removed ${file}\n`);
+  return 0;
+}
+
+function status() {
+  const cwd = process.cwd();
+  process.stdout.write(isGated(cwd) ? `commit-gate: gated (${hookFile(cwd)})\n` : 'commit-gate: not gated\n');
+  return 0;
+}
+
+// ---------- main ----------
+
+function payload() {
+  try { return JSON.parse(fs.readFileSync(0, 'utf8')); } catch { return null; }
+}
+
+function main() {
+  const [sub, arg] = process.argv.slice(2);
+  switch (sub) {
+    case 'check': return check(arg);
+    case 'mint':
+    case 'guard': {
+      // Hooks exit 0 on every path: a fault costs a refused commit or an
+      // unguarded command, never a blocked prompt, skill or Bash call.
+      try { const p = payload(); if (p) (sub === 'mint' ? mint : guard)(p); } catch { /* see above */ }
+      return 0;
+    }
+    case 'install': return install();
+    case 'uninstall': return uninstall();
+    case 'status': return status();
+    default:
+      process.stderr.write('usage: commit-gate check <msgfile> | mint | guard | install | uninstall | status\n');
+      return 2;
+  }
+}
+
+process.exitCode = main();

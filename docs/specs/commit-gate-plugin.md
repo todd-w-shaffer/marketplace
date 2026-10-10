@@ -1,6 +1,6 @@
 # Move the commit gate into the plugin
 
-**Status:** draft, 2026-10-09. Savored 2026-10-09; D1 and D3 settled with Todd.
+**Status:** step 2 built, 2026-10-09 (commit-skill 2.0.0). Savored 2026-10-09; D1 and D3 settled with Todd.
 
 ## Problem
 
@@ -121,11 +121,13 @@ The gate, mint and guard are bash with `jq` and `perl`. As plugin code, they'd m
 `status`. A shared `lib/commit-format.js` exports `isShipDocs(subject)` and `hasRecipe(message)`, and
 `token-ledger` requires it in place of its own `DOCS_SUBJECT`.
 
-**The matcher's contract.** One matcher must not loosen the gate:
+**The matcher's contract.**
 
-- `isShipDocs(subject)` takes a subject that has already been extracted, and is **case-sensitive**: `Update docs to
-  reflect:` (and, from step 4, `docs(<scope>)!?: sync with `). Today's `DOCS_SUBJECT` ignores case. Nothing tests
-  that, and `/ship` writes the exact case, so the ledger loses nothing.
+- `isShipDocs(subject)` takes a subject that has already been extracted, and is today's `DOCS_SUBJECT`: loose on
+  case, spacing, a breaking-change `!` and nested parentheses in the scope, because a model writes the subject.
+  `token-ledger.test.js` pins those slips. **The gate loosens to match (Todd, 2026-10-09):** under a `ship-docs`
+  token it admits what the ledger counts, typed form included. Only a `/ship` call mints that token, so a capital
+  letter shouldn't refuse its docs commit.
 - Each caller keeps its own way of extracting the subject. The gate reads the raw message file: the first line
   that is neither blank nor starts with `#`. `#` is fixed, as today; `core.commentChar` is not read. The ledger
   reads git's cleaned `%s`.
@@ -148,7 +150,9 @@ over budget, so the `sh` front tests in plain shell first:
 - `grep` takes the hook file as an argument, never stdin, because stdin carries the hook's JSON. Errors go to
   `/dev/null`, and the front prints nothing.
 
-Measure it: under 10 ms on an ungated repository and outside any repository.
+Measure it: under 10 ms on an ungated repository and outside any repository. **Measured 2026-10-09:** 8.4 ms
+median on an ungated repository, against 3.4 ms for a bare `sh -c true` spawned the same way. The front skips
+`grep` when there is no `commit-msg` hook at all.
 
 ### D5. Hooks ship in the plugin
 
@@ -158,8 +162,9 @@ Measure it: under 10 ms on an ungated repository and outside any repository.
 - `UserPromptSubmit`: `commit-gate mint`
 - `PreToolUse` on `Bash`: `commit-gate guard`
 
-Each command calls `"${CLAUDE_PLUGIN_ROOT}/bin/commit-gate"`, quoted, never the bare name: the docs don't say
-whether `bin/` is on PATH for hook commands. Each hook sets `"timeout": 5` (the defaults are 600 s and 30 s).
+Each command calls `"${CLAUDE_PLUGIN_ROOT}/scripts/gated" mint|guard`, quoted, never a bare name: the docs don't say
+whether `bin/` is on PATH for hook commands. `scripts/gated` is D4's `sh` front; it lives outside `bin/` so it isn't
+on the session's PATH, and it runs `node "${0%/*}/../bin/commit-gate"`. Each hook sets `"timeout": 5` (the defaults are 600 s and 30 s).
 
 The mint keeps today's rules unchanged:
 
@@ -190,7 +195,10 @@ Ordered so that no step leaves shoots.film unable to commit.
    - whether a session's own write of `enabledPlugins: false` takes effect mid-session. If it does, the guard
      disappears while the stub refuses, and `--no-verify` then skips the stub: add that to the residues.
 2. **commit-skill 2.0.0.**
-   - Add `lib/commit-format.js`, `bin/commit-gate`, `hooks/hooks.json` and `skills/ship/`, and point `token-ledger`
+   - **Built 2026-10-09.** 157 tests pass. All 26 mutations (S103's eleven that port, plus one per new rule)
+     each turned their named test red. The one that first survived, the mint ignoring the gate, was masked by the
+     front; the test "the mint writes no token into an ungated project when only the cwd is gated" catches it.
+   - Add `lib/commit-format.js`, `bin/commit-gate`, `scripts/gated`, `hooks/hooks.json` and `skills/ship/`, and point `token-ledger`
      at the shared matcher. `/ship` still writes `Update docs to reflect:`; the matcher accepts both forms.
    - Port both shoots.film test files to `node:test` (see Testing). CI runs `node --test plugins/commit-skill/test/`
      in place of the one hardcoded file.
@@ -309,7 +317,7 @@ These rows don't port; they stay in shoots.film with what they test:
   - `hasRecipe` has no caller in the ledger, so its rows run against the gate only.
 - **The drift test, gate side:** ship's `SKILL.md` subject template (`../skills/ship/SKILL.md`) passes `check` under
   a `ship-docs` token.
-- **The guard's fast path.** The test builds a bin directory holding only `sh`, `git` and `grep`, plus a fake `node`
+- **The guard's fast path.** The test builds a bin directory holding only `git`, `grep` and `cat` (the front's tools), plus a fake `node`
   that writes a sentinel file. The sentinel must be written in a gated repository and not in an ungated one, so
   a missing `git` can't pass the test by reading as "ungated".
 - **If step 1 forces the D3 fallback**, a stub test for the launcher path.

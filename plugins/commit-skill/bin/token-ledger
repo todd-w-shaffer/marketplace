@@ -5,8 +5,8 @@
 // token usage Claude Code writes to its session transcripts. /commit calls
 // `commit` and /ship calls `ship-begin` (silent) and `ship`, pasting stdout
 // into their summary; a failure prints to stderr and leaves stdout empty, so
-// the summary loses a line and nothing else. ship-skill ships no copy of its
-// own and finds this one on PATH, which is why it requires commit-skill.
+// the summary loses a line and nothing else. /ship lives in this plugin too,
+// and finds this script on PATH.
 //
 // Subcommands: commit, ship-begin, ship, and report and stats, which are run
 // by hand to read the ledger back.
@@ -16,6 +16,7 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { execFileSync } = require('child_process');
+const { isShipDocs } = require('../lib/commit-format');
 
 const HOME = os.homedir();
 const LEDGER = process.env.TOKEN_LEDGER_FILE || path.join(HOME, '.claude', 'token-ledger.jsonl');
@@ -339,11 +340,9 @@ function shipRef() {
     || ['origin/main', 'origin/master'].find((r) => gitSafe(['rev-parse', '--verify', '--quiet', r])) || null;
 }
 
-// /ship's doc step commits under this subject without going through /commit.
-// The legacy prefix stays recognised so older ships still read the same.
-// Loose on case, spacing, a breaking-change "!" and nested parens in the
-// scope, since a model writes it; a ledger entry still wins (see cmdShip).
-const DOCS_SUBJECT = /^(docs(\(.*\))?!?:\s*sync\s+with\s|update docs to reflect:)/i;
+// /ship's doc step commits without going through /commit, under the subject
+// lib/commit-format.js recognises, which the commit gate admits by too. A
+// ledger entry still wins over the subject (see cmdShip).
 
 function cmdShipBegin() {
   const id = sessionId();
@@ -416,7 +415,7 @@ async function cmdShip() {
     if (entry && claimed.has(entry)) entry = null;
     // A ledger entry wins over the subject: /commit can write a docs commit
     // that reads like /ship's own.
-    if (!entry && DOCS_SUBJECT.test(subjects.get(sha) || '')) {
+    if (!entry && isShipDocs(subjects.get(sha))) {
       commits.push({ sha, patch_id: pid, matched: false, usd: null, docs: true });
       continue;
     }

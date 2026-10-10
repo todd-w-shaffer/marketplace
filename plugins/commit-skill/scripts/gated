@@ -1,0 +1,44 @@
+#!/bin/sh
+# Front for the commit gate's Claude Code hooks: `gated mint` and `gated guard`
+# (hooks/hooks.json). The guard runs before every Bash call in every project
+# the plugin is enabled in, so this decides in plain shell whether the project
+# or the hook's cwd could be gated, and starts Node only then. `commit-gate`
+# itself makes the authoritative check; this front may start it needlessly,
+# but must never skip a gated repository.
+#
+# A repository is gated when its commit-msg hook carries MARKER. In an ordinary
+# checkout that is a file test and one grep; git runs only for a linked
+# worktree, whose .git is a file. A core.hooksPath set after `commit-gate
+# install` is not followed: git then runs no stub in .git/hooks either.
+#
+# It prints nothing of its own and exits 0.
+
+marker='# commit-skill commit gate: written by `commit-gate install`'
+
+input=$(cat)
+
+# The payload's cwd, read without a JSON parser. Claude Code writes compact
+# JSON; a cwd this misses falls back to the hook's own directory.
+rest=${input#*\"cwd\":\"}
+if [ "$rest" != "$input" ]; then cwd=${rest%%\"*}; else cwd=$PWD; fi
+
+# Whether $1, or a directory above it, is a checkout whose commit-msg is the stub.
+gated() {
+  d=$1
+  while [ -n "$d" ]; do
+    if [ -d "$d/.git" ]; then
+      hook="$d/.git/hooks/commit-msg"
+      break
+    elif [ -f "$d/.git" ]; then
+      hook="$(git -C "$d" rev-parse --path-format=absolute --git-path hooks 2>/dev/null)/commit-msg"
+      break
+    fi
+    d=${d%/*}
+  done
+  [ -n "$d" ] && [ -f "$hook" ] && grep -qF -- "$marker" "$hook" 2>/dev/null
+}
+
+if gated "${CLAUDE_PROJECT_DIR:-}" || { [ "$cwd" != "${CLAUDE_PROJECT_DIR:-}" ] && gated "$cwd"; }; then
+  printf '%s' "$input" | node "${0%/*}/../bin/commit-gate" "$1"
+fi
+exit 0

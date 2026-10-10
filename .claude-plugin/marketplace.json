@@ -17,7 +17,7 @@
     },
     {
       "name": "commit-skill",
-      "description": "Structured narrative commit workflow with build validation and recipe distillation",
+      "description": "Structured narrative commits (/commit) and the post-commit propagation cascade (/ship), with a per-commit cost line and an opt-in git gate that admits a Claude Code session's commits only through /commit or /ship",
       "source": "./plugins/commit-skill",
       "category": "development"
     },

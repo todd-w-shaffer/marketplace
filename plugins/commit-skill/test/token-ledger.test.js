@@ -14,6 +14,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const BIN = path.join(__dirname, '..', 'bin', 'token-ledger');
+const { SHIP_DOCS, shipDocsSubjects } = require('./cases');
 
 // ---------- sandbox ----------
 
@@ -390,35 +391,7 @@ test('a branch stacked on a shipped branch claims only its own commits', (t) => 
   assert.match(out, /^\*\*Ship cost:\*\* \$1\.00 across 1 commit /);
 });
 
-// The docs subject /ship is told to write, read from its SKILL.md, so the
-// template there and the ledger's matcher cannot drift apart unnoticed.
-function shipDocsSubjects() {
-  const skill = fs.readFileSync(
-    path.join(__dirname, '..', '..', 'ship-skill', 'skills', 'ship', 'SKILL.md'), 'utf8');
-  // The subject is the first line of the code block after step 6's
-  // "Commit with the message format:".
-  const after = skill.slice(skill.indexOf('Commit with the message format:'));
-  const template = /```\n(.+)\n/.exec(after)?.[1];
-  assert.ok(template, 'ship SKILL.md step 6 shows no docs commit subject');
-  const filled = template.replace(/<[^>]+>$/, 'add a.txt');
-  if (!filled.includes('(<scope>)')) return [filled];
-  return [filled.replace('<scope>', 'a'), filled.replace('(<scope>)', '')];
-}
-
-for (const subject of new Set([
-  ...shipDocsSubjects(),
-  'Update docs to reflect: add a.txt',
-  // The typed subject /ship is to move to once the commit gate shares this
-  // matcher; the ledger accepts it already.
-  'docs(a): sync with add a.txt',
-  'docs: sync with add a.txt',
-  // Slips a model can make copying the code commit's prefix or the phrase.
-  'docs!: sync with add a.txt',
-  'docs(a)!: sync with add a.txt',
-  'docs(a(b)): sync with add a.txt',
-  'Docs: Sync With add a.txt',
-  'docs(a):  sync  with add a.txt',
-])) {
+for (const subject of new Set([...shipDocsSubjects(), ...SHIP_DOCS])) {
   test(`/ship's own docs commit is not reported as untracked: "${subject}"`, (t) => {
     const sb = sandbox(t);
     const dir = sb.repo();

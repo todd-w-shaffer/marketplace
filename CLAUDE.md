@@ -17,7 +17,7 @@ Small skill plugins live here under `plugins/<name>/`, listed with a relative so
 (`"source": "./plugins/<name>"`). Larger plugins with their own code and tests (coolant) live in
 their own repos and are listed by URL. No submodules.
 
-Tests: `node --test plugins/commit-skill/test/token-ledger.test.js`. CI (`.github/workflows/ci.yml`)
+Tests: `node --test plugins/commit-skill/test/*.test.js`. CI (`.github/workflows/ci.yml`)
 runs them and `claude plugin validate` on every push to `main`.
 
 Work goes straight to `main`; no PRs. Commit with `/commit`: subjects are `<type>(<scope>): <subject>`
