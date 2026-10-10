@@ -23,7 +23,7 @@
     },
     {
       "name": "ship-skill",
-      "description": "Post-commit propagation cascade — push, detect stale docs/memory, surgically update, commit docs. Requires commit-skill (for /commit and token-ledger)",
+      "description": "Moved to commit-skill: install commit-skill 2.1.0+ and use /commit-skill:ship. This copy still works but is no longer updated, and comes off the marketplace in a later release",
       "source": "./plugins/ship-skill",
       "category": "development"
     },

@@ -1,11 +1,13 @@
 ---
 name: ship
-description: Post-commit propagation cascade. Use when the user says "ship", "ship it", "push", "push it", "push and update docs", "propagate", "commit and ship", or any variation of wanting to push code and cascade documentation updates. Handles uncommitted changes automatically by invoking /commit first. Do NOT use for commit-only requests (those go to /commit).
+description: Deprecated copy of /ship, which moved to commit-skill. When commit-skill:ship is available, use that instead of this skill. Post-commit propagation cascade. Use when the user says "ship", "ship it", "push", "push it", "push and update docs", "propagate", "commit and ship", or any variation of wanting to push code and cascade documentation updates. Handles uncommitted changes automatically by invoking /commit first. Do NOT use for commit-only requests (those go to /commit).
 ---
 
 # Ship Skill
 
 Push committed code and propagate all downstream documentation changes.
+
+**This skill moved to commit-skill.** If `commit-skill:ship` is available, stop and run that instead. Otherwise run this one, and end the summary with one line: "ship-skill is deprecated: install commit-skill 2.1.0+ and use `/commit-skill:ship`."
 
 ## Execution style
 
@@ -103,7 +105,7 @@ Changes:
   <file> — <what was updated and why>
 ```
 
-   - Keep `Update docs to reflect:` word for word. token-ledger recognises /ship's own docs commit by it, and a project with a commit gate (shoots.film's `scripts/commit-gate.sh`) admits /ship's docs commit only under that subject.
+   - Keep `Update docs to reflect:` word for word. token-ledger recognises /ship's own docs commit by it, and a repository with commit-skill's commit gate installed admits /ship's docs commit under it.
    - Never include `Co-Authored-By` lines, the same rule /commit follows.
 
 3. Push the documentation commit.

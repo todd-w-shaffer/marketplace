@@ -1,7 +1,8 @@
 # Move the commit gate into the plugin
 
 **Status:** steps 1–4 done, 2026-10-10. Step 2: commit-skill 2.0.0. Step 3: shoots.film `00bb077e` and `db4a6767`, live
-proof passed. Step 4: shoots.film `faed905e`, commit-skill 2.1.0. Step 5 open. Savored 2026-10-09; D1 and D3 settled with Todd.
+proof passed. Step 4: shoots.film `faed905e`, commit-skill 2.1.0. Step 5: ship-skill 1.3.0 is the
+deprecation release; delisting it is still to do. Savored 2026-10-09; D1 and D3 settled with Todd.
 
 ## Problem
 
