@@ -390,11 +390,35 @@ test('a branch stacked on a shipped branch claims only its own commits', (t) => 
   assert.match(out, /^\*\*Ship cost:\*\* \$1\.00 across 1 commit /);
 });
 
-for (const subject of [
+// The docs subject /ship is told to write, read from its SKILL.md, so the
+// template there and the ledger's matcher cannot drift apart unnoticed.
+function shipDocsSubjects() {
+  const skill = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'ship-skill', 'skills', 'ship', 'SKILL.md'), 'utf8');
+  // The subject is the first line of the code block after step 6's
+  // "Commit with the message format:".
+  const after = skill.slice(skill.indexOf('Commit with the message format:'));
+  const template = /```\n(.+)\n/.exec(after)?.[1];
+  assert.ok(template, 'ship SKILL.md step 6 shows no docs commit subject');
+  const filled = template.replace(/<[^>]+>$/, 'add a.txt');
+  if (!filled.includes('(<scope>)')) return [filled];
+  return [filled.replace('<scope>', 'a'), filled.replace('(<scope>)', '')];
+}
+
+for (const subject of new Set([
+  ...shipDocsSubjects(),
+  'Update docs to reflect: add a.txt',
+  // The typed subject /ship is to move to once the commit gate shares this
+  // matcher; the ledger accepts it already.
   'docs(a): sync with add a.txt',
   'docs: sync with add a.txt',
-  'Update docs to reflect: add a.txt',
-]) {
+  // Slips a model can make copying the code commit's prefix or the phrase.
+  'docs!: sync with add a.txt',
+  'docs(a)!: sync with add a.txt',
+  'docs(a(b)): sync with add a.txt',
+  'Docs: Sync With add a.txt',
+  'docs(a):  sync  with add a.txt',
+])) {
   test(`/ship's own docs commit is not reported as untracked: "${subject}"`, (t) => {
     const sb = sandbox(t);
     const dir = sb.repo();
@@ -414,6 +438,25 @@ for (const subject of [
     assert.match(sb.ledger(dir, 's1', 'report'), /\n1 ship · 1 commit · /);
   });
 }
+
+test('a /commit docs commit that says "sync with" is still paid for, not taken as /ship\'s', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+
+  sb.spend('s1', { input_tokens: 1e6 });
+  fs.writeFileSync(path.join(dir, 'README'), 'synced\n');
+  sb.git(dir, 'add', 'README');
+  sb.git(dir, 'commit', '-q', '-m', 'docs(readme): sync with upstream API');
+  sb.ledger(dir, 's1', 'commit', '--sha', sb.git(dir, 'rev-parse', 'HEAD'));
+  sb.ledger(dir, 's1', 'ship-begin');
+  sb.git(dir, 'push', '-q');
+  const out = sb.ledger(dir, 's1', 'ship');
+
+  assert.match(out, /^\*\*Ship cost:\*\* \$1\.00 across 1 commit /);
+  const ship = last(sb.rows(), 'ship');
+  assert.equal(ship.untracked, 0);
+  assert.deepEqual(ship.commits.map((c) => [c.matched, Boolean(c.docs)]), [[true, false]]);
+});
 
 test('a docs commit that is not /ship\'s sync is still untracked', (t) => {
   const sb = sandbox(t);

@@ -2,12 +2,14 @@
 'use strict';
 
 // Records what a commit and a ship cost, in estimated API dollars, from the
-// token usage Claude Code writes to its session transcripts. The /commit and
-// /ship skills call this and paste its stdout into their summary; a failure
-// prints to stderr and leaves stdout empty, so the summary loses a line and
-// nothing else.
+// token usage Claude Code writes to its session transcripts. /commit calls
+// `commit` and /ship calls `ship-begin` (silent) and `ship`, pasting stdout
+// into their summary; a failure prints to stderr and leaves stdout empty, so
+// the summary loses a line and nothing else. ship-skill ships no copy of its
+// own and finds this one on PATH, which is why it requires commit-skill.
 //
-// Subcommands: commit, ship-begin, ship, report, stats.
+// Subcommands: commit, ship-begin, ship, and report and stats, which are run
+// by hand to read the ledger back.
 
 const fs = require('fs');
 const os = require('os');
@@ -339,7 +341,9 @@ function shipRef() {
 
 // /ship's doc step commits under this subject without going through /commit.
 // The legacy prefix stays recognised so older ships still read the same.
-const DOCS_SUBJECT = /^(docs(\([^)]*\))?: sync with |Update docs to reflect:)/;
+// Loose on case, spacing, a breaking-change "!" and nested parens in the
+// scope, since a model writes it; a ledger entry still wins (see cmdShip).
+const DOCS_SUBJECT = /^(docs(\(.*\))?!?:\s*sync\s+with\s|update docs to reflect:)/i;
 
 function cmdShipBegin() {
   const id = sessionId();
@@ -407,13 +411,15 @@ async function cmdShip() {
   for (const sha of shas) {
     const pid = patchIdOf(sha);
     if (shipped.has(sha) || (pid && shipped.has(pid))) { skipped++; continue; }
-    if (DOCS_SUBJECT.test(subjects.get(sha) || '')) {
-      commits.push({ sha, patch_id: pid, matched: false, usd: null, docs: true });
-      continue;
-    }
     // Each entry pays once: a later commit that repeats its patch is untracked.
     let entry = (pid && byPatch.get(pid)) || bySha.get(sha) || null;
     if (entry && claimed.has(entry)) entry = null;
+    // A ledger entry wins over the subject: /commit can write a docs commit
+    // that reads like /ship's own.
+    if (!entry && DOCS_SUBJECT.test(subjects.get(sha) || '')) {
+      commits.push({ sha, patch_id: pid, matched: false, usd: null, docs: true });
+      continue;
+    }
     if (entry) {
       claimed.add(entry);
       matchedUsd += entry.cost.usd;
