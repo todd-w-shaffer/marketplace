@@ -1,0 +1,8 @@
+{
+  "name": "clearmind",
+  "version": "1.0.0",
+  "description": "Audit auto-memory for stale, shipped, redundant, or trivial entries, then apply removals after approval",
+  "author": {
+    "name": "Todd Shaffer"
+  }
+}

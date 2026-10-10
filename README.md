@@ -15,6 +15,10 @@ claude plugin marketplace add todd-w-shaffer/marketplace
 | Plugin | Description |
 |--------|-------------|
 | [coolant](https://github.com/todd-w-shaffer/coolant) | Thermal management for Claude Code — caps test runner concurrency, suppresses build tools during parallel mode |
+| [commit-skill](plugins/commit-skill) | `/commit`: structured narrative commits with build validation, plus a per-commit cost line |
+| [ship-skill](plugins/ship-skill) | `/ship`: push, then find and update the docs the push made stale. Requires commit-skill |
+| [sittings](plugins/sittings) | `/savor` audits a spec before you build it; `/observations` surfaces test gaps, stale docs and architecture notes after |
+| [clearmind](plugins/clearmind) | `/clearmind`: audit auto-memory for stale, shipped or redundant entries |
 
 Install any plugin with:
 
@@ -31,8 +35,13 @@ claude plugin install coolant@todd-w-shaffer
 ## Structure
 
 ```
-.claude-plugin/marketplace.json   # plugin manifest
-plugins/<name>/                   # git submodules, one per plugin
+.claude-plugin/marketplace.json   # the plugin list
+plugins/<name>/                   # skill plugins that live in this repo
 ```
 
-Each plugin lives in its own repository and is included here as a git submodule. The plugin's own configuration is managed in its respective repo.
+Larger plugins with their own code and tests, like coolant, live in their own repositories and are
+listed here by URL.
+
+## License
+
+MIT, except where a plugin's own repository says otherwise.
