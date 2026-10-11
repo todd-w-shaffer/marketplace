@@ -31,7 +31,7 @@ Build a mental model of: what the spec changes, what code it touches, what tests
 
 ### Staleness check
 
-Before launching reviewers, verify that the spec's key claims match the current codebase. Grep for every function, type, method, constant, and event name the spec references. Flag mismatches immediately — don't burn reviewer tokens on stale premises. Common staleness patterns:
+Before launching reviewers, verify that the spec's key claims match the current codebase. Grep for every function, type, method, constant, and event name the spec references, unless the repo has `docs/savor-checks.md`: its report already covers those searches, so skip the grep and work from the report (see Repo checks) instead of running the same search twice. Flag mismatches immediately — don't burn reviewer tokens on stale premises. Common staleness patterns:
 
 - Spec says "Add `FooHelper`" but `FooHelper` already exists (shipped in an earlier cycle)
 - Spec references `EventX` but the event was renamed or removed
@@ -48,6 +48,11 @@ If the repo has `docs/savor-checks.md`, read it now and follow it before Phase 2
 mechanical checks (usually a script that prints a report), what to clear in the spec before reviewers launch,
 and the lines each reviewer adds to its prompt. Hand each reviewer that report, so it judges what the report
 flags instead of re-running the searches.
+
+When writing a repo's checks script: it reports raw search hits, and the differences between those hits and
+what the spec's own tables list. It never parses the spec's prose to infer intent, such as whether a file is
+"mentioned" or a symbol is "deleted". Intent belongs in a table column the planner fills. A hit the tables
+don't account for goes to a reviewer as a raw hit.
 
 ## Phase 2: Structural Review
 
