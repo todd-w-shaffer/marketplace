@@ -50,9 +50,10 @@ and the lines each reviewer adds to its prompt. Hand each reviewer that report, 
 flags instead of re-running the searches.
 
 When writing a repo's checks script: it reports raw search hits, and the differences between those hits and
-what the spec's own tables list. It never parses the spec's prose to infer intent, such as whether a file is
-"mentioned" or a symbol is "deleted". Intent belongs in a table column the planner fills. A hit the tables
-don't account for goes to a reviewer as a raw hit.
+the paths the spec names. It never parses the spec's prose to infer intent, such as whether a file is
+"mentioned" or a symbol is "deleted". A file counts as named only by its exact path, or a directory that holds
+it. A symbol counts as deleted only by a list the spec keeps for that purpose. A hit the spec doesn't account
+for goes to a reviewer as a raw hit.
 
 ## Phase 2: Structural Review
 
