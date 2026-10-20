@@ -17,20 +17,30 @@ Run silently — do NOT output intermediate progress, tool results, or commentar
 
 Run `token-ledger ship-begin` before anything else. It records the pre-push upstream sha that step 8 measures the rollup from, and prints nothing. `token-ledger` ships in this plugin beside `/commit`; if it isn't on PATH, the cost lines drop out and the ship carries on.
 
+**Find the target**, the remote branch this ship pushes to. Run `git fetch origin` first.
+
+- **The branch has an upstream** (`git rev-parse --abbrev-ref @{u}` succeeds): the target is `@{u}`.
+- **No upstream, and the repo's CLAUDE.md says work goes straight to the default branch:** read the default from `git symbolic-ref refs/remotes/origin/HEAD` (never assume `main`). The target is `origin/<default>`.
+- **No upstream otherwise:** this is a new branch. The target is `origin/<branch>`, and the push will publish it.
+
+Note the target's current sha, if the target exists. Step 2 diffs from it.
+
 Check `git status` for uncommitted changes.
 
 - If there are **uncommitted changes**: invoke the `/commit` skill first. Wait for it to complete before proceeding. If the commit fails, STOP.
-- If the working tree is clean with **unpushed commits**: proceed to step 1.
-- If there is **nothing to push** (up to date with remote): say so and stop.
+- If the working tree is clean and `git log <target>..HEAD` lists commits, or the target doesn't exist yet: proceed to step 1.
+- If `git log <target>..HEAD` is empty: nothing to push. Say so and stop.
 
 ### 1. Push
 
-**Pick the push command.** If the branch has an upstream (`git rev-parse --abbrev-ref @{u}`
-succeeds), the command is `git push`. If it has none, as on a worktree branch, read the default
-branch from `git symbolic-ref refs/remotes/origin/HEAD` (never assume `main`), run
-`git fetch origin <default>`, and check `git merge-base --is-ancestor origin/<default> HEAD`. If
-`origin/<default>` is not an ancestor, run `git pull --rebase origin <default>` once; a conflict
-STOPs the ship. The command is then `git push origin HEAD:<default>`.
+**Pick the push command** for the target from step 0.
+
+- **Upstream:** `git push`.
+- **Straight to the default branch:** check `git merge-base --is-ancestor origin/<default> HEAD`.
+  If it fails, run `git pull --rebase origin <default>` once; a conflict STOPs the ship. Then
+  `git push origin HEAD:<default>`.
+- **New branch:** `git push -u origin HEAD`. This publishes the branch and sets its upstream. It
+  never touches the default branch, and opening a PR is left to the user.
 
 **Run it in the background.** Run the push with the Bash tool's `run_in_background: true`, then
 wait for its completion notification. Do not poll or sleep. A pre-push hook that runs the full
@@ -38,8 +48,7 @@ check can take ten minutes or more, and it may first wait behind another worktre
 A foreground timeout would make a working push read as a failed one. When the notification
 arrives, read the output. A backgrounded command can exit 0 through a pipe even when the push was
 refused, so the exit code decides nothing. Decide every attempt's outcome by `git fetch`: the
-push succeeded only if the pushed ref (`@{u}`, or `origin/<default>` with no upstream) now equals
-HEAD. The output says why an attempt failed, not whether it did.
+push succeeded only if the target now equals HEAD. The output says why an attempt failed, not whether it did.
 
 **If the hook refuses the push**, never retry with `--no-verify`. If the refusal names failing
 tests, rerun those files alone before deciding. A file that passes alone, in an area the pushed
@@ -48,8 +57,8 @@ report the hook's output.
 
 **If it fails with a non-fast-forward / "fetch first" rejection**, the remote has
 moved since your last fetch — commonly a CI job or bot that writes back to the
-branch. Run `git pull --rebase` (`git pull --rebase origin <default>` with no upstream) and push
-again, once. If the rebase hits conflicts, or the second push also fails, STOP and report — do
+branch. Run `git pull --rebase` (`git pull --rebase origin <default>` when pushing straight to the
+default branch) and push again, once. If the rebase hits conflicts, or the second push also fails, STOP and report — do
 not keep retrying and never force-push.
 
 **Transport failures are retryable.** `RPC failed`, `curl 56`, `curl 22` with HTTP 408 or 5xx,
@@ -62,7 +71,7 @@ Only a hook refusal or a non-transport error stops the ship.
 
 ### 2. Determine the blast radius
 
-Run `git diff <remote-tracking-branch>@{1}..HEAD` (i.e., the diff of everything that was just pushed). If this is not available, use `git log --oneline -1` and `git diff HEAD~1` as fallback.
+Run `git diff <pre-push sha>..HEAD`, using the sha step 0 noted (i.e., the diff of everything that was just pushed). For a branch that was just published, which had no sha, use `git diff origin/<default>...HEAD`.
 
 Read the diff and classify each changed file by what *kind* of change it represents (new route, changed middleware, new template, altered data model, added/removed source files, test count change, feature shipped/removed, etc.).
 
