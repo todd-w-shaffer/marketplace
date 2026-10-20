@@ -65,6 +65,8 @@ not keep retrying and never force-push.
 `the remote end hung up`, and `unexpected disconnect` are transport failures, not refusals. Retry
 the push up to 3 times, adding `-c http.postBuffer=157286400` on the retries, and decide each
 attempt by the fetch-and-compare above. If the third retry still fails, STOP and report.
+The same applies to every `git fetch` in this skill, the one in step 0 and the one that decides
+whether a push landed: retry a transport failure up to 3 times before treating it as a failure.
 
 For any other push failure (auth, protected branch), STOP and report the error without retrying.
 Only a hook refusal or a non-transport error stops the ship.
