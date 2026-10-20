@@ -42,6 +42,13 @@ Check `git status` for uncommitted changes.
 - **New branch:** `git push -u origin HEAD`. This publishes the branch and sets its upstream. It
   never touches the default branch, and opening a PR is left to the user.
 
+**Check before connecting.** If `package.json` defines a `check:push` script, run
+`npm run check:push` before the push, in the background like the push itself. Git opens its
+connection to the remote before the pre-push hook runs, so a hook that runs the whole check holds
+an idle connection for minutes, and a network that cuts idle connections fails the push. A green
+`check:push` records the commit as checked, and the hook then skips the check. A red one is a hook
+refusal: apply the refusal rules below to its output, and push nothing until it is green.
+
 **Run it in the background.** Run the push with the Bash tool's `run_in_background: true`, then
 wait for its completion notification. Do not poll or sleep. A pre-push hook that runs the full
 check can take ten minutes or more, and it may first wait behind another worktree's push lock.
