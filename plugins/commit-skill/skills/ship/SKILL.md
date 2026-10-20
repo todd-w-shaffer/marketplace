@@ -25,20 +25,40 @@ Check `git status` for uncommitted changes.
 
 ### 1. Push
 
-Run `git push` with the Bash tool's `timeout` set to 600000 (ten minutes). A
-repository with a pre-push hook that runs its checks (a hook that runs the
-full test suite, say) takes longer than the 120 s
-default, and a timed-out push reads as a failed one. If the hook refuses the
-push, STOP and report its output; never retry with `--no-verify`.
+**Pick the push command.** If the branch has an upstream (`git rev-parse --abbrev-ref @{u}`
+succeeds), the command is `git push`. If it has none, as on a worktree branch, read the default
+branch from `git symbolic-ref refs/remotes/origin/HEAD` (never assume `main`), run
+`git fetch origin <default>`, and check `git merge-base --is-ancestor origin/<default> HEAD`. If
+`origin/<default>` is not an ancestor, run `git pull --rebase origin <default>` once; a conflict
+STOPs the ship. The command is then `git push origin HEAD:<default>`.
+
+**Run it in the background.** Run the push with the Bash tool's `run_in_background: true`, then
+wait for its completion notification. Do not poll or sleep. A pre-push hook that runs the full
+check can take ten minutes or more, and it may first wait behind another worktree's push lock.
+A foreground timeout would make a working push read as a failed one. When the notification
+arrives, read the output. A backgrounded command can exit 0 through a pipe even when the push was
+refused, so the exit code decides nothing. Decide every attempt's outcome by `git fetch`: the
+push succeeded only if the pushed ref (`@{u}`, or `origin/<default>` with no upstream) now equals
+HEAD. The output says why an attempt failed, not whether it did.
+
+**If the hook refuses the push**, never retry with `--no-verify`. If the refusal names failing
+tests, rerun those files alone before deciding. A file that passes alone, in an area the pushed
+commits don't touch, is a flake: retry the push once. Otherwise, or on a second refusal, STOP and
+report the hook's output.
 
 **If it fails with a non-fast-forward / "fetch first" rejection**, the remote has
 moved since your last fetch — commonly a CI job or bot that writes back to the
-branch. Run `git pull --rebase` and push again, once. If the rebase hits
-conflicts, or the second push also fails, STOP and report — do not keep retrying
-and never force-push.
+branch. Run `git pull --rebase` (`git pull --rebase origin <default>` with no upstream) and push
+again, once. If the rebase hits conflicts, or the second push also fails, STOP and report — do
+not keep retrying and never force-push.
 
-For any other push failure (auth, network, protected branch), STOP and report the
-error without retrying.
+**Transport failures are retryable.** `RPC failed`, `curl 56`, `curl 22` with HTTP 408 or 5xx,
+`the remote end hung up`, and `unexpected disconnect` are transport failures, not refusals. Retry
+the push up to 3 times, adding `-c http.postBuffer=157286400` on the retries, and decide each
+attempt by the fetch-and-compare above. If the third retry still fails, STOP and report.
+
+For any other push failure (auth, protected branch), STOP and report the error without retrying.
+Only a hook refusal or a non-transport error stops the ship.
 
 ### 2. Determine the blast radius
 
