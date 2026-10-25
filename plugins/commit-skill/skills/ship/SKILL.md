@@ -49,6 +49,14 @@ an idle connection for minutes, and a network that cuts idle connections fails t
 `check:push` records the commit as checked, and the hook then skips the check. A red one is a hook
 refusal: apply the refusal rules below to its output, and push nothing until it is green.
 
+**A project that defines `push:checked` checks and pushes in one command.** When `package.json`
+defines a `push:checked` script, run `npm run push:checked -- origin <refspec>` in place of
+`check:push` and the push, where `<refspec>` is what the push command above would push
+(`HEAD:<default>`, or the branch's own name). It holds the project's push lock from the check
+through the push, so no other push lands between them. A branch with no upstream still sets
+one afterwards with `git branch --set-upstream-to origin/<branch>`. Run it in the background,
+and decide its outcome, refusals and retries exactly as for a push.
+
 **Run it in the background.** Run the push with the Bash tool's `run_in_background: true`, then
 wait for its completion notification. Do not poll or sleep. A pre-push hook that runs the full
 check can take ten minutes or more, and it may first wait behind another worktree's push lock.
