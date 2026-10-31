@@ -32,6 +32,12 @@
       "description": "Audit auto-memory for stale, shipped, redundant, or trivial entries, then apply removals after approval",
       "source": "./plugins/clearmind",
       "category": "development"
+    },
+    {
+      "name": "run-board",
+      "description": "Autopilot run status for shoots.film beside the chat: a summary on the prompt hint line, a /runs pane, and a toast when a run ends",
+      "source": "./plugins/run-board",
+      "category": "productivity"
     }
   ]
 }

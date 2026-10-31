@@ -18,6 +18,7 @@ claude plugin marketplace add todd-w-shaffer/marketplace
 | [commit-skill](plugins/commit-skill) | `/commit`: structured narrative commits with build validation, plus a per-commit cost line. `/ship`: push, then update the docs the push made stale. `commit-gate install` (from a terminal) makes git refuse a Claude Code session's commits outside `/commit` and `/ship` in that repository |
 | [sittings](plugins/sittings) | `/savor` audits a spec before you build it; `/observations` surfaces test gaps, stale docs and architecture notes after |
 | [clearmind](plugins/clearmind) | `/clearmind`: audit auto-memory for stale, shipped or redundant entries |
+| [run-board](plugins/run-board) | Autopilot run status for shoots.film beside the chat: a summary on the prompt hint line, `/runs` for a pane, a toast when a run ends. Reads the dispatcher's files and never starts a model turn |
 
 Install any plugin with:
 
