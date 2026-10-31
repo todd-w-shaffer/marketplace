@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/gated\" mint"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/gated\" mint",
+            "timeout": 86400
           }
         ]
       },
@@ -15,7 +16,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/gated\" guard"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/gated\" guard",
+            "timeout": 86400
           }
         ]
       }
@@ -25,7 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/gated\" mint"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/gated\" mint",
+            "timeout": 86400
           }
         ]
       }

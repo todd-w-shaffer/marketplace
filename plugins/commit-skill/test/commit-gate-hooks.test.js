@@ -452,10 +452,10 @@ describe('hooks.json wires the three hooks', () => {
     ['UserPromptSubmit', '', 'mint'],
     ['PreToolUse', 'Bash', 'guard'],
   ]) {
-    test(`runs ${sub} on ${event}${matcher ? ` ${matcher}` : ''}, through the plugin root, with Claude Code's default timeout`, () => {
+    test(`runs ${sub} on ${event}${matcher ? ` ${matcher}` : ''}, through the plugin root, with a timeout that never binds`, () => {
       assert.deepEqual(hookCommands(event, matcher), [`"\${CLAUDE_PLUGIN_ROOT}/scripts/gated" ${sub}`]);
       const hooks = (cfg().hooks[event] || []).filter((e) => (e.matcher ?? '') === matcher).flatMap((e) => e.hooks);
-      assert.equal(hooks[0].timeout, undefined);
+      assert.equal(hooks[0].timeout, 86400);
     });
   }
 });

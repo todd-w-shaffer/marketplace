@@ -167,7 +167,7 @@ median on an ungated repository, against 3.4 ms for a bare `sh -c true` spawned 
 
 Each command calls `"${CLAUDE_PLUGIN_ROOT}/scripts/gated" mint|guard`, quoted, never a bare name: the docs don't say
 whether `bin/` is on PATH for hook commands. `scripts/gated` is D4's `sh` front; it lives outside `bin/` so it isn't
-on the session's PATH, and it runs `node "${0%/*}/../bin/commit-gate"`. No hook sets `"timeout"`, so each takes Claude Code's default. A short timeout fires on a loaded machine, where starting Node alone can take longer: a timed-out mint grants no `/commit`, and a timed-out guard's refusal is discarded.
+on the session's PATH, and it runs `node "${0%/*}/../bin/commit-gate"`. Each hook sets `"timeout": 86400`, one day, so that no timeout fires on a hook that is still running. Claude Code always applies a timeout, and its default fires on a loaded machine: a `UserPromptSubmit` mint timed out at the 30 s default. A timed-out mint grants no `/commit`, and a timed-out guard's refusal is discarded.
 
 The mint keeps today's rules unchanged:
 
