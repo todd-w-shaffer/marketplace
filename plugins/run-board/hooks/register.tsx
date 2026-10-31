@@ -76,7 +76,7 @@ export const register: Register = on => {
     // an earlier version, which the engine marks with a warning sign.
     $.ui.status(undefined)
     await $.command.register({
-      name: 'runs',
+      name: 'autopilot',
       description: 'Open or close the autopilot run board',
     })
     void poll($).catch(() => undefined)
@@ -85,7 +85,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'runs' }, async $ => {
+  on('command.run', { command: 'autopilot' }, async $ => {
     const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
     if (isOpen) {
       await $.ui.close({ id: PANE })
@@ -93,7 +93,7 @@ export const register: Register = on => {
     }
     await poll($).catch(() => undefined)
     await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Run board opened. /runs again closes it.' }
+    return { text: 'Run board opened. /autopilot again closes it.' }
   })
 
   // The one-line summary, drawn dim at the end of the hint line under the
