@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { buildBoard, finishedToast, parseStatus, stageOf, statusLine } from '../hooks/board'
+import { buildBoard, finishedToast, lanesOf, parseStatus, stageOf, statusLine } from '../hooks/board'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -57,7 +57,7 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
   expect(finishedToast(first)).toBe(
     '✓ S298 shipped; production is live (run 41212658012). ($27.53, 158 min)',
   )
-  expect(statusLine(b)).toBe('✗ S299 launcher gone  ● S300 pushing 1h37m  ○ 1 queued  $17.72 in flight')
+  expect(statusLine(b)).toBe('✗ S299 launcher gone · ● S300 pushing 1h37m · ○ 1 queued · $17.72 in flight')
 })
 
 test('nothing running or queued clears the status line', async () => {
@@ -68,4 +68,13 @@ test('nothing running or queued clears the status line', async () => {
 test('a file that is not the status shape reads as none', async () => {
   expect(parseStatus('not json')).toBe(null)
   expect(parseStatus('[]')).toBe(null)
+})
+
+test('an empty lane reads as idle on the hint line and in the lane list', async () => {
+  const raw = parseStatus(STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  const oneRun = { ...raw, running: raw.running.filter(r => r.lane === 'epic'), queued: [] }
+  const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
+  expect(statusLine(b)).toBe('● S299 starting 1h06m · fix lane idle · $7.65 in flight')
+  expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1', 'fix:0'])
 })

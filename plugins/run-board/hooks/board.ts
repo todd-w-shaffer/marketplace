@@ -157,18 +157,34 @@ export function elapsed(fromMs: number, toMs: number): string {
 
 export const money = (n: number): string => `$${n.toFixed(2)}`
 
-/** One line for the status bar, or undefined when nothing runs or waits. */
+// The dispatcher's lanes, one run each (scripts/dispatch.sh § lanes).
+export const LANES: readonly string[] = ['epic', 'fix']
+
+/** Every lane in order, the dispatcher's two first, each with its runs. */
+export function lanesOf(b: Board): { lane: string; runs: Run[] }[] {
+  const names = [...LANES, ...b.running.map(r => r.lane).filter(l => !LANES.includes(l))]
+  return [...new Set(names)].map(lane => ({ lane, runs: b.running.filter(r => r.lane === lane) }))
+}
+
+/**
+ * One line for the hint line: each lane's run, or that the lane is idle, then
+ * the queue and the cost in flight. Undefined when nothing runs or waits.
+ */
 export function statusLine(b: Board): string | undefined {
   if (b.running.length === 0 && b.queued.length === 0) return undefined
-  const parts = b.running.map(r =>
-    r.isAlive
-      ? `● ${r.sitting} ${r.stage} ${elapsed(r.startedMs, b.checkedAt).replace(' ', '')}`
-      : `✗ ${r.sitting} launcher gone`,
+  const parts = lanesOf(b).flatMap(({ lane, runs }) =>
+    runs.length === 0
+      ? [`${lane} lane idle`]
+      : runs.map(r =>
+          r.isAlive
+            ? `● ${r.sitting} ${r.stage} ${elapsed(r.startedMs, b.checkedAt).replace(' ', '')}`
+            : `✗ ${r.sitting} launcher gone`,
+        ),
   )
   if (b.queued.length > 0) parts.push(`○ ${b.queued.length} queued`)
   const cost = b.running.reduce((sum, r) => sum + r.cost, 0)
   if (cost > 0) parts.push(`${money(cost)} in flight`)
-  return parts.join('  ')
+  return parts.join(' · ')
 }
 
 /** The toast for a run that finished since the last look. */

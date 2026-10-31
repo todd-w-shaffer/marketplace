@@ -9,6 +9,7 @@ import {
   finishedToast,
   money,
   parseStatus,
+  lanesOf,
   statusLine,
 } from './board'
 
@@ -133,28 +134,30 @@ export const register: Register = on => {
           </Text>
         </Text>
 
-        {b.running.length === 0 && (
-          <Text dimColor>{'\n'}Nothing running.</Text>
-        )}
-        {b.running.map(r => (
+        {lanesOf(b).map(({ lane, runs }) => (
           <Box flexDirection="column" marginTop={1}>
-            <Text>
-              <Text color={r.isAlive ? 'warning' : 'error'}>{r.isAlive ? '●' : '✗'} </Text>
-              <Text bold>{r.sitting}</Text> {r.slug}
-              <Text dimColor>  {r.lane}</Text>
-            </Text>
-            <Text>
-              {'  '}
-              {r.isAlive ? r.stage : 'launcher gone, no finished line'}
-              <Text dimColor>
-                {' '}· {elapsed(r.startedMs, b.checkedAt)} · {money(r.cost)}
-              </Text>
-            </Text>
-            {r.note !== '' && (
-              <Box paddingLeft={2}>
-                <Text dimColor>{r.note}</Text>
+            <Text dimColor>{lane.toUpperCase()}</Text>
+            {runs.length === 0 && <Text dimColor>  idle</Text>}
+            {runs.map(r => (
+              <Box flexDirection="column">
+                <Text>
+                  <Text color={r.isAlive ? 'warning' : 'error'}>{r.isAlive ? '●' : '✗'} </Text>
+                  <Text bold>{r.sitting}</Text> {r.slug}
+                </Text>
+                <Text>
+                  {'  '}
+                  {r.isAlive ? r.stage : 'launcher gone, no finished line'}
+                  <Text dimColor>
+                    {' '}· {elapsed(r.startedMs, b.checkedAt)} · {money(r.cost)}
+                  </Text>
+                </Text>
+                {r.note !== '' && (
+                  <Box paddingLeft={2}>
+                    <Text dimColor>{r.note}</Text>
+                  </Box>
+                )}
               </Box>
-            )}
+            ))}
           </Box>
         ))}
 
