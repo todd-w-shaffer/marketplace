@@ -1,6 +1,18 @@
 import { expect, test } from 'claude-code/testing'
 
-import { buildBoard, finishedToast, lanesOf, parseStatus, stageOf, statusLine } from '../hooks/board'
+import {
+  buildBoard,
+  buildLoop,
+  finishedToast,
+  lanesOf,
+  loopCostOf,
+  loopStageOf,
+  newestRunDir,
+  parseStatus,
+  runStartedMs,
+  stageOf,
+  statusLine,
+} from '../hooks/board'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -77,4 +89,68 @@ test('an empty lane reads as idle on the hint line and in the lane list', async 
   const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
   expect(statusLine(b)).toBe('● S299 starting 1h06m · fix lane idle · $7.65 in flight')
   expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1', 'fix:0'])
+})
+
+// A loop run's progress, copied from run 2026-10-28-0730 up to its first landing.
+const LOOP_PROGRESS = [
+  'turn ended: success, 9 turns, $7.49 so far',
+  'stage: p1/review exited 0 ($7.49)',
+  'stage: p1/verify-01 exited 0 ($0.51)',
+  'stage: p1/plan-01 exited 0 ($2.28)',
+  'autopilot: docs/briefs/kickoff-sitting-s276-app-code-length.md exited 0 ($8.91)',
+  'turn ended: success, 2 turns, $0.30 so far',
+].join('\n')
+
+const file = (path: string, mtimeMs: number) => ({ path, mtimeMs })
+
+test('the newest loop run directory is picked by name, and canary and residue dirs are skipped', async () => {
+  expect(
+    newestRunDir(['canary-2026-10-31-1509', '2026-10-28-0415-residues', '2026-10-28-0730', 's297', '2026-11-01-1417', '2026-11-01-1417-2']),
+  ).toBe('2026-11-01-1417-2')
+  expect(newestRunDir(['canary-2026-10-31-1509', 's297'])).toBe(null)
+  expect(runStartedMs('2026-11-01-1417')).toBe(Date.parse('2026-11-01T14:17:00Z'))
+})
+
+test('the loop stage is the newest session log or landing output', async () => {
+  expect(loopStageOf([], '')).toBe('starting')
+  expect(loopStageOf([file('p1/review.log', 1), file('p1/review.log.err', 9)], '')).toBe('review p1')
+  expect(loopStageOf([file('p1/review.log', 1), file('p1/verify-01.log', 2), file('p1/card-01.json', 9)], '')).toBe('verify 01')
+  expect(loopStageOf([file('p1/verify-01.log', 2), file('p1/plan-01.log', 3)], '')).toBe('plan 01')
+  expect(loopStageOf([file('p1/plan-01.log', 3), file('p1/plan-01.autopilot', 4)], '')).toBe('landing 01')
+  expect(loopStageOf([file('p1/plan-residues.log', 3), file('p1/plan-residues.autopilot', 4)], '')).toBe('landing residues')
+  expect(loopStageOf([file('p2/review.log', 5), file('p1/plan-01.autopilot', 4)], '')).toBe('review p2')
+  expect(loopStageOf([file('p1/review.log', 1)], 'finished: ended: the cap ($54.44, 200 min)')).toBe('finishing')
+})
+
+test('the loop cost adds finished stages and landings, and the session in flight', async () => {
+  expect(loopCostOf(LOOP_PROGRESS).toFixed(2)).toBe('19.49')
+  // A finished stage carries its session's spend, so the so-far line before it is not counted twice.
+  expect(loopCostOf('turn ended: success, 9 turns, $7.49 so far\nstage: p1/review exited 0 ($7.49)').toFixed(2)).toBe('7.49')
+  expect(loopCostOf('')).toBe(0)
+})
+
+test('a live loop replaces fix lane idle, and tags a landing of its own', async () => {
+  const at = Date.parse('2026-11-01T14:31:00Z')
+  const idle = buildBoard(
+    { dispatcher: null, running: [], queued: [], finished: [] },
+    {},
+    new Set(),
+    at,
+    buildLoop('2026-11-01-1417', [file('p1/review.log', 1)], 'turn ended: success, 3 turns, $3.20 so far', at),
+  )
+  expect(statusLine(idle)).toBe('epic lane idle · ◐ loop review p1 14m · $3.20 in flight')
+
+  const landing = buildBoard(
+    {
+      dispatcher: 1,
+      running: [{ entry: 20, brief: 'docs/briefs/kickoff-sitting-s316-x.md', lane: 'fix', pid: 7, started: '2026-11-01T14:21:00Z', cost: 2 }],
+      queued: [],
+      finished: [],
+    },
+    {},
+    new Set([1, 7]),
+    at,
+    buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at),
+  )
+  expect(statusLine(landing)).toBe('epic lane idle · ● S316 starting 10m (loop) · $21.49 in flight')
 })

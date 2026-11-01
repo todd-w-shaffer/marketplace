@@ -26,9 +26,18 @@ export type Done = {
   text: string
 }
 
+/** The architecture loop while its lock names a live process. */
+export type Loop = {
+  name: string
+  stage: string
+  startedMs: number
+  cost: number
+}
+
 export type Board = {
   checkedAt: number
   isDispatcherLive: boolean
+  loop: Loop | null
   running: Run[]
   queued: Waiting[]
   finished: Done[]

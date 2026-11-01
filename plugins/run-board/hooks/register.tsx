@@ -1,27 +1,34 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board } from '../types'
+import type { Board, Loop } from '../types'
 import {
+  LOOP_LANE,
   baseName,
   buildBoard,
+  buildLoop,
   elapsed,
   finishedToast,
+  isLoopLanding,
   money,
+  newestRunDir,
   parseStatus,
   lanesOf,
   statusLine,
 } from './board'
+import type { LoopFile } from './board'
 
 const PANE = 'run-board'
 const TITLE = 'Autopilot runs'
 const POLL_MS = 5000
 // scripts/dispatch.sh's default LOG_DIR, under $HOME.
 const LOG_DIR = 'Library/Logs/shootsfilm-autopilot'
+// scripts/archloop.sh's default ARCHLOOP_LOG_DIR, under $HOME.
+const LOOP_DIR = 'Library/Logs/shootsfilm-archloop'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-2' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-3' })
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -34,6 +41,29 @@ async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number
   )
 }
 
+/**
+ * The loop while its lock names a live process, else null. The stage in
+ * flight is read from the newest file in the run directory and its pass
+ * directories, by listing alone: a session log can pass the 4 MiB read cap.
+ */
+async function readLoop($: EngineInterface, home: string): Promise<Loop | null> {
+  const dir = `${home}/${LOOP_DIR}`
+  const pid = Number((await $.fs.read(`${dir}/.lock/pid`).catch(() => '')).trim())
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  if (!(await alivePids($, [pid]).catch(() => new Set<number>())).has(pid)) return null
+  const name = newestRunDir((await $.fs.list(dir).catch(() => [])).filter(e => e.kind === 'dir').map(e => e.name))
+  if (name === null) return null
+  const run = `${dir}/${name}`
+  const files: LoopFile[] = []
+  for (const pass of (await $.fs.list(run).catch(() => [])).filter(e => e.kind === 'dir' && /^p\d+$/.test(e.name))) {
+    for (const f of await $.fs.list(`${run}/${pass.name}`).catch(() => [])) {
+      if (f.kind === 'file') files.push({ path: `${pass.name}/${f.name}`, mtimeMs: f.mtimeMs })
+    }
+  }
+  const progress = await $.fs.read(`${run}/progress`).catch(() => '')
+  return buildLoop(name, files, progress, await $.clock.now())
+}
+
 // Finished entries already seen; null until the first read, which only
 // seeds it, so loading the mod raises no toast for old runs.
 let seen: Set<number> | null = null
@@ -43,11 +73,13 @@ async function poll($: EngineInterface): Promise<void> {
   if (!home) return
   const dir = `${home}/${LOG_DIR}`
   const text = await $.fs.read(`${dir}/status.json`).catch(() => undefined)
-  const raw = text === undefined ? null : parseStatus(text)
-  if (raw === null) {
+  const status = text === undefined ? null : parseStatus(text)
+  const loop = await readLoop($, home).catch(() => null)
+  if (status === null && loop === null) {
     await update($, board, () => null)
     return
   }
+  const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
 
   const progress: Record<string, string> = {}
   for (const run of raw.running) {
@@ -55,7 +87,7 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const next = buildBoard(raw, progress, alive, await $.clock.now())
+  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop)
 
   await update($, board, () => next)
 
@@ -137,12 +169,28 @@ export const register: Register = on => {
         {lanesOf(b).map(({ lane, runs }) => (
           <Box flexDirection="column" marginTop={1}>
             <Text dimColor>{lane.toUpperCase()}</Text>
-            {runs.length === 0 && <Text dimColor>  idle</Text>}
+            {lane === LOOP_LANE && b.loop !== null && (
+              <Box flexDirection="column">
+                <Text>
+                  <Text color="suggestion">◐ </Text>
+                  <Text bold>loop</Text> {b.loop.name}
+                </Text>
+                <Text>
+                  {'  '}
+                  {b.loop.stage}
+                  <Text dimColor>
+                    {' '}· {elapsed(b.loop.startedMs, b.checkedAt)} · {money(b.loop.cost)}
+                  </Text>
+                </Text>
+              </Box>
+            )}
+            {runs.length === 0 && (lane !== LOOP_LANE || b.loop === null) && <Text dimColor>  idle</Text>}
             {runs.map(r => (
               <Box flexDirection="column">
                 <Text>
                   <Text color={r.isAlive ? 'warning' : 'error'}>{r.isAlive ? '●' : '✗'} </Text>
                   <Text bold>{r.sitting}</Text> {r.slug}
+                  {isLoopLanding(b, r) && <Text dimColor> (loop landing)</Text>}
                 </Text>
                 <Text>
                   {'  '}
