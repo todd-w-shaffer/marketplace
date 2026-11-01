@@ -6,7 +6,7 @@ export type RawStatus = {
   dispatcher: number | null
   running: { entry: number; brief: string; lane: string; pid: number | null; started: string; cost: number }[]
   queued: { entry: number; brief: string; lane: string; reason: string }[]
-  finished: { entry: number; brief: string; status: number; outcome: string }[]
+  finished: { entry: number; brief: string; lane: string; status: number; outcome: string }[]
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -42,6 +42,7 @@ export function parseStatus(text: string): RawStatus | null {
     finished: list(d.finished).map(f => ({
       entry: num(f.entry) ?? 0,
       brief: str(f.brief),
+      lane: str(f.lane),
       status: num(f.status) ?? 1,
       outcome: str(f.outcome),
     })),
@@ -219,7 +220,7 @@ export function buildBoard(
       const detail = outcomeDetail(f.outcome.replace(/^autopilot: /, '').replace(`${base} `, ''))
       const isShipped = f.status === 0
       const isSuperseded = !isShipped && (shippedAt.get(f.brief) ?? 0) > f.entry
-      return { entry: f.entry, ...sittingOf(f.brief), isShipped, isSuperseded, detail }
+      return { entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped, isSuperseded, detail }
     })
   return {
     checkedAt: now,
@@ -307,7 +308,10 @@ export function statusLine(b: Board): string | undefined {
   return parts.join(' · ')
 }
 
+/** A finished run's lane as a tag, ` (fix)`, or nothing when the dispatcher wrote none. */
+export const laneTag = (d: Done): string => (d.lane === '' ? '' : ` (${d.lane})`)
+
 /** The toast for a run that finished since the last look. */
 export function finishedToast(d: Done): string {
-  return `${d.isShipped ? '✓' : '✗'} ${d.sitting} ${d.slug} · ${d.detail}`
+  return `${d.isShipped ? '✓' : '✗'} ${d.sitting} ${d.slug}${laneTag(d)} · ${d.detail}`
 }

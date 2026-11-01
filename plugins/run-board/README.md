@@ -11,7 +11,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `(loop)`. The loop's spend counts toward the cost in flight.
 - **`/autopilot`** opens a pane with a section per lane (`epic`, `fix`): its run's stage, time, cost and last
   sentence, or `idle`. Below them come the queue with what each
-  entry waits for, and recent outcomes. A finished run reads like a lane's run: the sitting and its name,
+  entry waits for, and recent outcomes. A finished run reads like a lane's run: the sitting, its name and its lane (`(fix)`),
   then `shipped · 3h43m · $26.11 · peak 385k · run 41303865474`.
   A refusal that a later run of the same sitting shipped past is
   dimmed. `/autopilot` again closes it.

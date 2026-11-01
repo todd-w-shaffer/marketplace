@@ -22,6 +22,8 @@ export type Done = {
   entry: number
   sitting: string
   slug: string
+  /** The lane the run held, or empty when the dispatcher wrote none. */
+  lane: string
   isShipped: boolean
   isSuperseded: boolean
   /** The outcome, then its time as `2h38m`, cost, peak context and run, as one line. */

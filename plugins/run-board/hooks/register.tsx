@@ -9,6 +9,7 @@ import {
   buildLoop,
   elapsed,
   finishedToast,
+  laneTag,
   isLoopLanding,
   money,
   newestRunDir,
@@ -230,13 +231,14 @@ export const register: Register = on => {
             {b.finished.map(d =>
               d.isSuperseded ? (
                 <Text dimColor wrap="truncate-end">
-                  ✗ {d.sitting} {d.slug} · {d.detail}
+                  ✗ {d.sitting} {d.slug}{laneTag(d)} · {d.detail}
                 </Text>
               ) : (
                 <Box flexDirection="column">
                   <Text>
                     <Text color={d.isShipped ? 'success' : 'error'}>{d.isShipped ? '✓' : '✗'} </Text>
                     <Text bold>{d.sitting}</Text> {d.slug}
+                    <Text dimColor>{laneTag(d)}</Text>
                   </Text>
                   <Box paddingLeft={2}>
                     <Text dimColor>{d.detail}</Text>

@@ -4,6 +4,7 @@ import {
   buildBoard,
   buildLoop,
   finishedToast,
+  laneTag,
   lanesOf,
   loopCostOf,
   loopStageOf,
@@ -25,7 +26,7 @@ const STATUS = JSON.stringify({
   queued: [{ entry: 7, brief: 'docs/briefs/kickoff-sitting-s301-time-limit-record.md', lane: 'epic', reason: 'S299' }],
   finished: [
     { entry: 2, brief: 'docs/briefs/kickoff-sitting-s298-tool-paths-by-default.md', status: 1, outcome: 'autopilot: main has commits origin/main does not. Push or drop them first.' },
-    { entry: 4, brief: 'docs/briefs/kickoff-sitting-s298-tool-paths-by-default.md', status: 0, outcome: 'autopilot: kickoff-sitting-s298-tool-paths-by-default shipped; production is live (run 41212658012). ($27.53, 158 min)' },
+    { entry: 4, brief: 'docs/briefs/kickoff-sitting-s298-tool-paths-by-default.md', lane: 'fix', status: 0, outcome: 'autopilot: kickoff-sitting-s298-tool-paths-by-default shipped; production is live (run 41212658012). ($27.53, 158 min)' },
   ],
 })
 
@@ -65,10 +66,12 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
   expect(b.running[1]?.cost).toBe(10.07)
   expect(b.running[1]?.note).toBe('The archive commit is pushing.')
   expect(b.finished.map(d => `${d.entry}:${d.isSuperseded}`)).toEqual(['4:false', '2:true'])
+  // An entry the dispatcher wrote without a lane carries no tag.
+  expect(b.finished.map(d => `${d.entry}:${laneTag(d)}`)).toEqual(['4: (fix)', '2:'])
   const first = b.finished[0]
   if (first === undefined) throw new Error('no finished entry')
   expect(finishedToast(first)).toBe(
-    '✓ S298 tool-paths-by-default · shipped · 2h38m · $27.53 · run 41212658012',
+    '✓ S298 tool-paths-by-default (fix) · shipped · 2h38m · $27.53 · run 41212658012',
   )
   expect(statusLine(b)).toBe('✗ S299 launcher gone · ● S300 pushing 1h37m · ○ 1 queued · $17.72 in flight')
 })
