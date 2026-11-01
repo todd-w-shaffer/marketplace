@@ -230,18 +230,16 @@ export const register: Register = on => {
             {b.finished.map(d =>
               d.isSuperseded ? (
                 <Text dimColor wrap="truncate-end">
-                  ✗ {d.sitting} {d.text}
+                  ✗ {d.sitting} {d.slug} · {d.detail}
                 </Text>
               ) : (
-                <Box flexDirection="row">
-                  <Box flexShrink={0}>
-                    <Text>
-                      <Text color={d.isShipped ? 'success' : 'error'}>{d.isShipped ? '✓' : '✗'} </Text>
-                      <Text bold>{d.sitting}</Text>{' '}
-                    </Text>
-                  </Box>
-                  <Box flexShrink={1}>
-                    <Text dimColor>{d.text}</Text>
+                <Box flexDirection="column">
+                  <Text>
+                    <Text color={d.isShipped ? 'success' : 'error'}>{d.isShipped ? '✓' : '✗'} </Text>
+                    <Text bold>{d.sitting}</Text> {d.slug}
+                  </Text>
+                  <Box paddingLeft={2}>
+                    <Text dimColor>{d.detail}</Text>
                   </Box>
                 </Box>
               ),

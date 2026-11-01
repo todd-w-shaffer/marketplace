@@ -21,9 +21,11 @@ export type Waiting = {
 export type Done = {
   entry: number
   sitting: string
+  slug: string
   isShipped: boolean
   isSuperseded: boolean
-  text: string
+  /** The outcome, then its time as `2h38m`, cost, peak context and run, as one line. */
+  detail: string
 }
 
 /** The architecture loop while its lock names a live process. */

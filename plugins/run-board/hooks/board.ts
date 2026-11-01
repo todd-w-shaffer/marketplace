@@ -216,10 +216,10 @@ export function buildBoard(
     .sort((a, b) => b.entry - a.entry)
     .map(f => {
       const base = baseName(f.brief)
-      const text = f.outcome.replace(/^autopilot: /, '').replace(`${base} `, '')
+      const detail = outcomeDetail(f.outcome.replace(/^autopilot: /, '').replace(`${base} `, ''))
       const isShipped = f.status === 0
       const isSuperseded = !isShipped && (shippedAt.get(f.brief) ?? 0) > f.entry
-      return { entry: f.entry, sitting: sittingOf(f.brief).sitting, isShipped, isSuperseded, text }
+      return { entry: f.entry, ...sittingOf(f.brief), isShipped, isSuperseded, detail }
     })
   return {
     checkedAt: now,
@@ -231,11 +231,36 @@ export function buildBoard(
   }
 }
 
-export function elapsed(fromMs: number, toMs: number): string {
-  const minutes = Math.max(0, Math.floor((toMs - fromMs) / 60000))
-  if (minutes < 60) return `${minutes}m`
-  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`
+// The totals `scripts/autopilot.sh` ends an outcome with:
+// ` ($27.53, 158 min)`, or ` ($27.53, 158 min, peak 385k context)`.
+const TOTALS = /\s*\(\$([0-9]+(?:\.[0-9]+)?), ([0-9]+) min(?:, peak ([0-9]+k) context)?\)$/
+const SHIPPED = /^shipped; production is live \(run ([0-9]+)\)\.$/
+
+/** Minutes as hours and minutes: 158 reads as `2h38m`, 24 as `24m`. */
+export const hoursMinutes = (minutes: number): string =>
+  minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`
+
+/**
+ * An outcome as one detail line in the lanes' order, outcome then time then
+ * cost: `shipped · 2h38m · $27.53 · peak 385k · run 41212658012`. An outcome
+ * the dispatcher wrote without totals reads as its sentence alone.
+ */
+export function outcomeDetail(outcome: string): string {
+  const m = TOTALS.exec(outcome)
+  const sentence = m === null ? outcome : outcome.slice(0, m.index)
+  const run = SHIPPED.exec(sentence)
+  const parts = [run === null ? sentence : 'shipped']
+  if (m !== null) {
+    parts.push(hoursMinutes(Number(m[2])), `$${m[1]}`)
+    if (m[3] !== undefined) parts.push(`peak ${m[3]}`)
+  }
+  if (run !== null) parts.push(`run ${run[1]}`)
+  return parts.join(' · ')
 }
+
+/** The time between two instants: `2h38m`, or `24m` under an hour. */
+export const elapsed = (fromMs: number, toMs: number): string =>
+  hoursMinutes(Math.max(0, Math.floor((toMs - fromMs) / 60000)))
 
 export const money = (n: number): string => `$${n.toFixed(2)}`
 
@@ -257,7 +282,7 @@ export const isLoopLanding = (b: Board, r: Run): boolean =>
 
 /** The loop's hint-line part while no landing runs: `◐ loop review p1 14m`. */
 export const loopPart = (loop: Loop, now: number): string =>
-  `◐ loop ${loop.stage} ${elapsed(loop.startedMs, now).replace(' ', '')}`
+  `◐ loop ${loop.stage} ${elapsed(loop.startedMs, now)}`
 
 /**
  * One line for the hint line: each lane's run, or that the lane is idle, then
@@ -272,7 +297,7 @@ export function statusLine(b: Board): string | undefined {
       ? [lane === LOOP_LANE && b.loop !== null ? loopPart(b.loop, b.checkedAt) : `${lane} lane idle`]
       : runs.map(r =>
           r.isAlive
-            ? `● ${r.sitting} ${r.stage} ${elapsed(r.startedMs, b.checkedAt).replace(' ', '')}${isLoopLanding(b, r) ? ' (loop)' : ''}`
+            ? `● ${r.sitting} ${r.stage} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
             : `✗ ${r.sitting} launcher gone`,
         ),
   )
@@ -284,5 +309,5 @@ export function statusLine(b: Board): string | undefined {
 
 /** The toast for a run that finished since the last look. */
 export function finishedToast(d: Done): string {
-  return `${d.isShipped ? '✓' : '✗'} ${d.sitting} ${d.text}`
+  return `${d.isShipped ? '✓' : '✗'} ${d.sitting} ${d.slug} · ${d.detail}`
 }

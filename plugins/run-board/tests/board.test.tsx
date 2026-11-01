@@ -8,6 +8,7 @@ import {
   loopCostOf,
   loopStageOf,
   newestRunDir,
+  outcomeDetail,
   parseStatus,
   runStartedMs,
   stageOf,
@@ -67,7 +68,7 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
   const first = b.finished[0]
   if (first === undefined) throw new Error('no finished entry')
   expect(finishedToast(first)).toBe(
-    '✓ S298 shipped; production is live (run 41212658012). ($27.53, 158 min)',
+    '✓ S298 tool-paths-by-default · shipped · 2h38m · $27.53 · run 41212658012',
   )
   expect(statusLine(b)).toBe('✗ S299 launcher gone · ● S300 pushing 1h37m · ○ 1 queued · $17.72 in flight')
 })
@@ -153,4 +154,14 @@ test('a live loop replaces fix lane idle, and tags a landing of its own', async 
     buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at),
   )
   expect(statusLine(landing)).toBe('epic lane idle · ● S316 starting 10m (loop) · $21.49 in flight')
+})
+
+test('an outcome reads as one detail line, outcome then time then cost', async () => {
+  expect(outcomeDetail('shipped; production is live (run 41303865474). ($26.11, 223 min, peak 385k context)')).toBe(
+    'shipped · 3h43m · $26.11 · peak 385k · run 41303865474',
+  )
+  expect(outcomeDetail('stopped at review. ($4.10, 7 min)')).toBe('stopped at review. · 7m · $4.10')
+  expect(outcomeDetail('main has commits origin/main does not. Push or drop them first.')).toBe(
+    'main has commits origin/main does not. Push or drop them first.',
+  )
 })
