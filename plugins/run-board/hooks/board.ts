@@ -1,4 +1,4 @@
-import type { Board, Done, Ended, Loop, Run, Waiting } from '../types'
+import type { Board, Deck, Done, Ended, Loop, Run, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
@@ -187,6 +187,7 @@ export function buildBoard(
   now: number,
   loop: Loop | null = null,
   recent: Ended[] = [],
+  onDeck: Deck[] = [],
 ): Board {
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
@@ -224,7 +225,89 @@ export function buildBoard(
     queued,
     finished,
     recent,
+    onDeck,
   }
+}
+
+/** A brief file in `git ls-tree -r origin/main docs/briefs/`: its path and blob. */
+export type BriefFile = { path: string; sha: string }
+
+// A brief at the top of docs/briefs/, or a directory brief's entry file. The
+// README, `rules/` and `sittings.json` are not briefs.
+const FILE_BRIEF = /^docs\/briefs\/(kickoff-[^/]+)\.md$/
+const DIR_BRIEF = /^docs\/briefs\/([^/]+)\/README\.md$/
+
+/** The briefs in an `ls-tree -r` listing: top-level `kickoff-*.md` files and directory briefs' READMEs. */
+export function briefFiles(lsTree: string): BriefFile[] {
+  const out: BriefFile[] = []
+  for (const line of lsTree.split('\n')) {
+    const m = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line)
+    if (!m) continue
+    const path = m[2] ?? ''
+    const dir = DIR_BRIEF.exec(path)
+    if (FILE_BRIEF.test(path) || (dir && dir[1] !== 'rules')) out.push({ path, sha: m[1] ?? '' })
+  }
+  return out
+}
+
+/**
+ * A brief path as the queue would name it, from `docs/briefs/` on: a file
+ * brief keeps its path, a directory brief is its directory.
+ */
+export function briefKey(path: string): string {
+  const at = path.indexOf('docs/briefs/')
+  const rel = at === -1 ? path : path.slice(at)
+  return rel.replace(/\/README\.md$/, '').replace(/\/$/, '')
+}
+
+/** The header lines above a brief's first `## ` heading that the board reads. */
+export function briefHeader(text: string): { epic: string; after: string; isAutopilot: boolean } {
+  let epic = ''
+  let after = ''
+  let isAutopilot = false
+  for (const line of text.split('\n')) {
+    if (line.startsWith('## ')) break
+    const e = /^Epic: (.+)$/.exec(line)
+    if (e) epic = (e[1] ?? '').trim()
+    const a = /^After: (.+)$/.exec(line)
+    if (a) after = (a[1] ?? '').trim()
+    if (line.includes('**Mode: autopilot.**')) isAutopilot = true
+  }
+  return { epic, after, isAutopilot }
+}
+
+/** A sitting's number for ordering, or none for an issue brief. */
+const sittingNumber = (sitting: string): number => {
+  const m = /^S(\d+)$/.exec(sitting)
+  return m ? Number(m[1]) : Number.POSITIVE_INFINITY
+}
+
+/**
+ * The briefs on deck, lowest sitting first: every brief on `origin/main` that
+ * no run holds and the queue does not list. A brief with an `Epic:` line runs
+ * on the epic lane; one without runs on fix.
+ */
+export function onDeckOf(briefs: readonly (BriefFile & { text: string })[], held: readonly string[]): Deck[] {
+  const taken = new Set(held.map(briefKey))
+  return briefs
+    .filter(b => !taken.has(briefKey(b.path)))
+    .map(b => {
+      const { epic, after, isAutopilot } = briefHeader(b.text)
+      const key = briefKey(b.path)
+      const issue = /^kickoff-(\d+)-(.+)$/.exec(baseName(key))
+      const name = issue ? { sitting: `#${issue[1] ?? ''}`, slug: issue[2] ?? '' } : sittingOf(key)
+      return { ...name, lane: epic === '' ? 'fix' : 'epic', epic, after, isAutopilot }
+    })
+    .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
+}
+
+/** A brief's lane, epic and wait as one detail line: `epic · minisite/E4 · after S340`. */
+export function deckDetail(d: Deck): string {
+  const parts = [d.lane]
+  if (d.epic !== '') parts.push(d.epic)
+  if (d.after !== '') parts.push(`after ${d.after}`)
+  if (!d.isAutopilot) parts.push('interactive')
+  return parts.join(' · ')
 }
 
 // How many finished sittings the pane lists under RECENT.

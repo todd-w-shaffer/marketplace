@@ -1,19 +1,22 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board, Ended, Loop } from '../types'
+import type { Board, Deck, Ended, Loop } from '../types'
 import {
   LOOP_LANE,
   ago,
   baseName,
   buildBoard,
+  briefFiles,
   buildLoop,
+  deckDetail,
   elapsed,
   finishedToast,
   laneTag,
   isLoopLanding,
   money,
   newestRunDir,
+  onDeckOf,
   parseStatus,
   lanesOf,
   recentCandidates,
@@ -32,9 +35,13 @@ const LOG_DIR = 'Library/Logs/shootsfilm-autopilot'
 // scripts/archloop.sh's default ARCHLOOP_LOG_DIR, under $HOME.
 const LOOP_DIR = 'Library/Logs/shootsfilm-archloop'
 
+// The shoots.film checkout, under $HOME. Its `origin/main` holds the briefs;
+// every worktree's push moves that ref, so the board reads it without a fetch.
+const REPO = 'Desktop/apps/shootsfilm'
+
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-4' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-5' })
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -90,6 +97,29 @@ async function readRecent($: EngineInterface, dir: string, raw: RawStatus): Prom
   return recentOf(texts, raw.finished)
 }
 
+// Brief texts by blob id; a blob's text never changes.
+let deckCache = new Map<string, string>()
+
+/** The briefs on `origin/main` that no run holds and the queue does not list. */
+async function readDeck($: EngineInterface, home: string, raw: RawStatus): Promise<Deck[]> {
+  const cwd = `${home}/${REPO}`
+  const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/'], { cwd, timeoutMs: 5000 })
+  if (ls.exitCode !== 0) return []
+  const next = new Map<string, string>()
+  const briefs: { path: string; sha: string; text: string }[] = []
+  for (const f of briefFiles(ls.stdout)) {
+    let text = deckCache.get(f.sha)
+    if (text === undefined) {
+      const blob = await $.process.run(['git', 'cat-file', 'blob', f.sha], { cwd, timeoutMs: 5000 })
+      text = blob.exitCode === 0 ? blob.stdout : ''
+    }
+    next.set(f.sha, text)
+    briefs.push({ ...f, text })
+  }
+  deckCache = next
+  return onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief))
+}
+
 // Finished entries already seen; null until the first read, which only
 // seeds it, so loading the mod raises no toast for old runs.
 let seen: Set<number> | null = null
@@ -101,11 +131,12 @@ async function poll($: EngineInterface): Promise<void> {
   const text = await $.fs.read(`${dir}/status.json`).catch(() => undefined)
   const status = text === undefined ? null : parseStatus(text)
   const loop = await readLoop($, home).catch(() => null)
-  if (status === null && loop === null) {
+  const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
+  const onDeck = await readDeck($, home, raw).catch(() => [])
+  if (status === null && loop === null && onDeck.length === 0) {
     await update($, board, () => null)
     return
   }
-  const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
 
   const progress: Record<string, string> = {}
   for (const run of raw.running) {
@@ -114,7 +145,7 @@ async function poll($: EngineInterface): Promise<void> {
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
   const recent = await readRecent($, dir, raw).catch(() => [])
-  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop, recent)
+  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop, recent, onDeck)
 
   await update($, board, () => next)
 
@@ -190,7 +221,7 @@ export const register: Register = on => {
         <Text color={b.isDispatcherLive ? 'success' : 'warning'}>
           {b.isDispatcherLive ? 'dispatcher live' : 'no dispatcher running'}
           <Text dimColor>
-            {' '}· {b.running.length} running · {b.queued.length} queued
+            {' '}· {b.running.length} running · {b.queued.length} queued · {b.onDeck.length} on deck
           </Text>
         </Text>
 
@@ -246,6 +277,21 @@ export const register: Register = on => {
                 <Text bold>{q.sitting}</Text> {q.slug}
                 <Text dimColor>
                   {'  '}{q.lane}{q.reason !== '' ? ` · waits for ${q.reason}` : ''}
+                </Text>
+              </Text>
+            ))}
+          </Box>
+        )}
+
+        {b.onDeck.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text dimColor>ON DECK</Text>
+            {b.onDeck.map(d => (
+              <Text>
+                <Text color="suggestion">◇ </Text>
+                <Text bold>{d.sitting}</Text> {d.slug}
+                <Text dimColor>
+                  {'  '}{deckDetail(d)}
                 </Text>
               </Text>
             ))}

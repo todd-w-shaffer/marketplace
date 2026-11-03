@@ -15,13 +15,21 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   a lane's run: the sitting, its name, its lane (`(fix)`) while the dispatcher still lists it, and how long ago
   it ended, then `shipped · 3h43m · $26.11 · peak 385k · run 41303865474`. RECENT comes from each sitting's
   `.progress` file, whose last `finished:` line is its latest outcome, so it survives a dispatcher restart,
-  which empties status.json's finished list. `/board` again closes it.
+  which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
+  `origin/main` in `docs/briefs/` that no run holds and the queue does not list, lowest sitting first:
+  `◇ S342 gallery-pass-keeps-stars  epic · minisite/E4 · after S340, S341`. A brief with an `Epic:` header
+  line is on the epic lane and one without is on fix; a brief not marked `**Mode: autopilot.**` reads
+  `interactive`. `/board` again closes it.
 - **Toast.** A run that finishes while the session is open raises a toast with its outcome.
 
 Every 5 seconds it reads `~/Library/Logs/shootsfilm-autopilot/status.json` (written by
 `scripts/dispatch.sh` in the shoots.film repo) and each running sitting's `.progress` file, and runs `ps`
 to check that the dispatcher and each run are alive. A run whose process is gone without a finished
 line shows as `launcher gone`.
+
+For ON DECK it runs `git ls-tree -r origin/main docs/briefs/` in `~/Desktop/apps/shootsfilm` and reads each
+brief's header with `git cat-file`, once per blob. It never fetches: a push from any worktree of the checkout
+moves `origin/main`, and a brief pushed from another machine shows after the next fetch.
 
 For the loop it reads `~/Library/Logs/shootsfilm-archloop/.lock/pid`, and lists the newest run directory
 (`<UTC date>-<HHMM>`) and its `p<n>/` pass directories. The loop's `progress` file logs a stage only when it

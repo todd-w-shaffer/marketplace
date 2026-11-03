@@ -2,14 +2,19 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   ago,
+  briefFiles,
+  briefHeader,
+  briefKey,
   buildBoard,
   buildLoop,
+  deckDetail,
   finishedToast,
   laneTag,
   lanesOf,
   loopCostOf,
   loopStageOf,
   newestRunDir,
+  onDeckOf,
   outcomeDetail,
   parseStatus,
   recentCandidates,
@@ -208,4 +213,63 @@ test('ago reads in hours and minutes for two days, then in days', async () => {
   expect(ago(0, 24 * m)).toBe('24m ago')
   expect(ago(0, 312 * m)).toBe('5h12m ago')
   expect(ago(0, 3 * 24 * 60 * m)).toBe('3d ago')
+})
+
+const LS_TREE = [
+  '100644 blob aaa111\tdocs/briefs/README.md',
+  '100644 blob bbb222\tdocs/briefs/kickoff-sitting-s342-gallery-pass-keeps-stars.md',
+  '100644 blob ccc333\tdocs/briefs/kickoff-sitting-s340-e8-help-pages.md',
+  '100644 blob ddd444\tdocs/briefs/rules/README.md',
+  '100644 blob eee555\tdocs/briefs/rules/autopilot.md',
+  '100644 blob fff666\tdocs/briefs/s350-split-work/README.md',
+  '100644 blob 000777\tdocs/briefs/s350-split-work/session-1.md',
+  '100644 blob 111888\tdocs/briefs/sittings.json',
+  '100644 blob 222999\tdocs/briefs/kickoff-527-gallery-race.md',
+].join('\n')
+
+const S342 = [
+  '# S342: a sync pass never undoes a star',
+  '',
+  '**Mode: autopilot.** `docs/briefs/rules/autopilot.md` governs this run.',
+  '',
+  'Epic: minisite/E4',
+  'Finishes: issue 527',
+  'After: S340, S341',
+  'Touches: src/utils/gallery-pass.ts',
+  '',
+  '## What this delivers',
+  'Epic: not/this',
+].join('\n')
+
+test('brief files are top-level kickoffs and directory READMEs, not rules or the index', async () => {
+  expect(briefFiles(LS_TREE).map(f => f.path)).toEqual([
+    'docs/briefs/kickoff-sitting-s342-gallery-pass-keeps-stars.md',
+    'docs/briefs/kickoff-sitting-s340-e8-help-pages.md',
+    'docs/briefs/s350-split-work/README.md',
+    'docs/briefs/kickoff-527-gallery-race.md',
+  ])
+  expect(briefFiles(LS_TREE)[0]?.sha).toBe('bbb222')
+})
+
+test('a brief key is the queue path, and a directory brief is its directory', async () => {
+  expect(briefKey('docs/briefs/s350-split-work/README.md')).toBe('docs/briefs/s350-split-work')
+  expect(briefKey('/Users/x/repo/docs/briefs/s350-split-work/')).toBe('docs/briefs/s350-split-work')
+  expect(briefKey('docs/briefs/kickoff-sitting-s342-x.md')).toBe('docs/briefs/kickoff-sitting-s342-x.md')
+})
+
+test('the header stops at the first heading', async () => {
+  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', isAutopilot: true })
+  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', isAutopilot: false })
+})
+
+test('on deck lists unheld briefs by sitting, epic lane from the Epic line', async () => {
+  const texts: Record<string, string> = { bbb222: S342, ccc333: '**Mode: autopilot.**\nEpic: account-basics/E8\n## a', fff666: '**Mode: autopilot.**\n## a', '222999': '# issue\n## a' }
+  const briefs = briefFiles(LS_TREE).map(f => ({ ...f, text: texts[f.sha] ?? '' }))
+  const deck = onDeckOf(briefs, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
+  expect(deck.map(d => `${d.sitting} ${d.slug} ${deckDetail(d)}`)).toEqual([
+    'S342 gallery-pass-keeps-stars epic · minisite/E4 · after S340, S341',
+    'S350 split-work fix',
+    '#527 gallery-race fix · interactive',
+  ])
+  expect(onDeckOf(briefs, ['docs/briefs/s350-split-work/README.md']).some(d => d.sitting === 'S350')).toBe(false)
 })

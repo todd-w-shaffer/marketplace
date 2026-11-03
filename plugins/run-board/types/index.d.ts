@@ -49,6 +49,20 @@ export type Loop = {
   cost: number
 }
 
+/** A brief on `origin/main` in `docs/briefs/` that no run holds and the queue does not list. */
+export type Deck = {
+  sitting: string
+  slug: string
+  /** `epic` when the brief has an `Epic:` header line, else `fix`. */
+  lane: string
+  /** The `Epic:` line's value, such as `minisite/E4`, or empty. */
+  epic: string
+  /** The `After:` line's value, such as `S340, S341`, or empty. */
+  after: string
+  /** Whether the brief is marked `**Mode: autopilot.**`. */
+  isAutopilot: boolean
+}
+
 export type Board = {
   checkedAt: number
   isDispatcherLive: boolean
@@ -57,6 +71,7 @@ export type Board = {
   queued: Waiting[]
   finished: Done[]
   recent: Ended[]
+  onDeck: Deck[]
 }
 
 declare module 'claude-code' {
