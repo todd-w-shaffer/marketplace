@@ -1,9 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board, Loop } from '../types'
+import type { Board, Ended, Loop } from '../types'
 import {
   LOOP_LANE,
+  ago,
   baseName,
   buildBoard,
   buildLoop,
@@ -15,9 +16,11 @@ import {
   newestRunDir,
   parseStatus,
   lanesOf,
+  recentCandidates,
+  recentOf,
   statusLine,
 } from './board'
-import type { LoopFile } from './board'
+import type { LoopFile, RawStatus } from './board'
 
 const PANE = 'run-board'
 const TITLE = 'Autopilot runs'
@@ -29,7 +32,7 @@ const LOOP_DIR = 'Library/Logs/shootsfilm-archloop'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-3' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-4' })
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -65,6 +68,26 @@ async function readLoop($: EngineInterface, home: string): Promise<Loop | null> 
   return buildLoop(name, files, progress, await $.clock.now())
 }
 
+// Progress files read for RECENT, by name, kept while their mtime holds.
+const recentCache = new Map<string, { mtimeMs: number; text: string }>()
+
+/** The newest finished sittings, from the progress files in `dir`. */
+async function readRecent($: EngineInterface, dir: string, raw: RawStatus): Promise<Ended[]> {
+  const files = (await $.fs.list(dir).catch(() => []))
+    .filter(e => e.kind === 'file')
+    .map(e => ({ name: e.name, mtimeMs: e.mtimeMs }))
+  const texts: { name: string; mtimeMs: number; text: string }[] = []
+  for (const f of recentCandidates(files, raw.running.map(r => r.brief))) {
+    let hit = recentCache.get(f.name)
+    if (hit === undefined || hit.mtimeMs !== f.mtimeMs) {
+      hit = { mtimeMs: f.mtimeMs, text: await $.fs.read(`${dir}/${f.name}`).catch(() => '') }
+      recentCache.set(f.name, hit)
+    }
+    texts.push({ ...f, text: hit.text })
+  }
+  return recentOf(texts, raw.finished)
+}
+
 // Finished entries already seen; null until the first read, which only
 // seeds it, so loading the mod raises no toast for old runs.
 let seen: Set<number> | null = null
@@ -88,7 +111,8 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop)
+  const recent = await readRecent($, dir, raw).catch(() => [])
+  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop, recent)
 
   await update($, board, () => next)
 
@@ -225,27 +249,23 @@ export const register: Register = on => {
           </Box>
         )}
 
-        {b.finished.length > 0 && (
+        {b.recent.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             <Text dimColor>RECENT</Text>
-            {b.finished.map(d =>
-              d.isSuperseded ? (
-                <Text dimColor wrap="truncate-end">
-                  ✗ {d.sitting} {d.slug}{laneTag(d)} · {d.detail}
-                </Text>
-              ) : (
-                <Box flexDirection="column">
-                  <Text>
-                    <Text color={d.isShipped ? 'success' : 'error'}>{d.isShipped ? '✓' : '✗'} </Text>
-                    <Text bold>{d.sitting}</Text> {d.slug}
-                    <Text dimColor>{laneTag(d)}</Text>
+            {b.recent.map(d => (
+              <Box flexDirection="column">
+                <Text>
+                  <Text color={d.isShipped ? 'success' : 'error'}>{d.isShipped ? '✓' : '✗'} </Text>
+                  <Text bold>{d.sitting}</Text> {d.slug}
+                  <Text dimColor>
+                    {laneTag(d)} · {ago(d.endedMs, b.checkedAt)}
                   </Text>
-                  <Box paddingLeft={2}>
-                    <Text dimColor>{d.detail}</Text>
-                  </Box>
+                </Text>
+                <Box paddingLeft={2}>
+                  <Text dimColor wrap="truncate-end">{d.detail}</Text>
                 </Box>
-              ),
-            )}
+              </Box>
+            ))}
           </Box>
         )}
       </Box>

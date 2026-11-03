@@ -1,4 +1,4 @@
-import type { Board, Done, Loop, Run, Waiting } from '../types'
+import type { Board, Done, Ended, Loop, Run, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
@@ -186,6 +186,7 @@ export function buildBoard(
   alive: ReadonlySet<number>,
   now: number,
   loop: Loop | null = null,
+  recent: Ended[] = [],
 ): Board {
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
@@ -208,19 +209,12 @@ export function buildBoard(
     lane: q.lane,
     reason: q.reason,
   }))
-  // A refusal is superseded once a later entry of the same brief shipped.
-  const shippedAt = new Map<string, number>()
-  for (const f of raw.finished) {
-    if (f.status === 0) shippedAt.set(f.brief, Math.max(shippedAt.get(f.brief) ?? 0, f.entry))
-  }
   const finished: Done[] = [...raw.finished]
     .sort((a, b) => b.entry - a.entry)
     .map(f => {
       const base = baseName(f.brief)
       const detail = outcomeDetail(f.outcome.replace(/^autopilot: /, '').replace(`${base} `, ''))
-      const isShipped = f.status === 0
-      const isSuperseded = !isShipped && (shippedAt.get(f.brief) ?? 0) > f.entry
-      return { entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped, isSuperseded, detail }
+      return { entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped: f.status === 0, detail }
     })
   return {
     checkedAt: now,
@@ -229,7 +223,73 @@ export function buildBoard(
     running,
     queued,
     finished,
+    recent,
   }
+}
+
+// How many finished sittings the pane lists under RECENT.
+export const RECENT_LIMIT = 10
+
+/** A progress file in the log directory: `<brief name>.progress`. */
+export type ProgressFile = { name: string; mtimeMs: number }
+
+// A sitting's progress file. `README.progress` and other strays are not.
+const SITTING_PROGRESS = /^(.*s\d+-.+)\.progress$/
+
+/**
+ * The progress files to read for RECENT, newest first: sittings only, none
+ * that is running. A run truncates its file when it starts, so a running
+ * sitting's file holds no outcome yet. Twice the limit leaves room for files
+ * that end on no `finished:` line.
+ */
+export function recentCandidates(files: readonly ProgressFile[], running: readonly string[]): ProgressFile[] {
+  const live = new Set(running.map(baseName))
+  return files
+    .filter(f => {
+      const m = SITTING_PROGRESS.exec(f.name)
+      return m !== null && !live.has(m[1] ?? '')
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, RECENT_LIMIT * 2)
+}
+
+/**
+ * The newest finished sittings, one each, from their progress files' last
+ * `finished:` line. These files outlive the dispatcher, whose finished list
+ * starts empty each time one starts. The lane comes from that list while it
+ * still holds the run.
+ */
+export function recentOf(
+  files: readonly (ProgressFile & { text: string })[],
+  finished: RawStatus['finished'],
+): Ended[] {
+  const laneOf = new Map<string, string>()
+  for (const f of [...finished].sort((a, b) => a.entry - b.entry)) laneOf.set(baseName(f.brief), f.lane)
+  const out: Ended[] = []
+  for (const f of [...files].sort((a, b) => b.mtimeMs - a.mtimeMs)) {
+    const line = f.text
+      .split('\n')
+      .reverse()
+      .find(l => l.startsWith('finished: '))
+    if (line === undefined) continue
+    const outcome = line.slice('finished: '.length)
+    const base = f.name.replace(/\.progress$/, '')
+    out.push({
+      ...sittingOf(base),
+      lane: laneOf.get(base) ?? '',
+      isShipped: outcome.startsWith('shipped'),
+      detail: outcomeDetail(outcome),
+      endedMs: f.mtimeMs,
+    })
+    if (out.length === RECENT_LIMIT) break
+  }
+  return out
+}
+
+/** How long ago an instant was: `24m ago`, `5h12m ago`, `3d ago` past two days. */
+export function ago(fromMs: number, toMs: number): string {
+  const minutes = Math.max(0, Math.floor((toMs - fromMs) / 60000))
+  return minutes < 48 * 60 ? `${hoursMinutes(minutes)} ago` : `${Math.floor(minutes / (24 * 60))}d ago`
 }
 
 // The totals `scripts/autopilot.sh` ends an outcome with:
@@ -309,7 +369,7 @@ export function statusLine(b: Board): string | undefined {
 }
 
 /** A finished run's lane as a tag, ` (fix)`, or nothing when the dispatcher wrote none. */
-export const laneTag = (d: Done): string => (d.lane === '' ? '' : ` (${d.lane})`)
+export const laneTag = (d: Done | Ended): string => (d.lane === '' ? '' : ` (${d.lane})`)
 
 /** The toast for a run that finished since the last look. */
 export function finishedToast(d: Done): string {

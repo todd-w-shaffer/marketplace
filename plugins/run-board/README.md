@@ -11,10 +11,11 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `(loop)`. The loop's spend counts toward the cost in flight.
 - **`/autopilot`** opens a pane with a section per lane (`epic`, `fix`): its run's stage, time, cost and last
   sentence, or `idle`. Below them come the queue with what each
-  entry waits for, and recent outcomes. A finished run reads like a lane's run: the sitting, its name and its lane (`(fix)`),
-  then `shipped · 3h43m · $26.11 · peak 385k · run 41303865474`.
-  A refusal that a later run of the same sitting shipped past is
-  dimmed. `/autopilot` again closes it.
+  entry waits for, and RECENT: the last 10 sittings that finished, newest first, one row each. A row reads like
+  a lane's run: the sitting, its name, its lane (`(fix)`) while the dispatcher still lists it, and how long ago
+  it ended, then `shipped · 3h43m · $26.11 · peak 385k · run 41303865474`. RECENT comes from each sitting's
+  `.progress` file, whose last `finished:` line is its latest outcome, so it survives a dispatcher restart,
+  which empties status.json's finished list. `/autopilot` again closes it.
 - **Toast.** A run that finishes while the session is open raises a toast with its outcome.
 
 Every 5 seconds it reads `~/Library/Logs/shootsfilm-autopilot/status.json` (written by

@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
+  ago,
   buildBoard,
   buildLoop,
   finishedToast,
@@ -11,6 +12,8 @@ import {
   newestRunDir,
   outcomeDetail,
   parseStatus,
+  recentCandidates,
+  recentOf,
   runStartedMs,
   stageOf,
   statusLine,
@@ -65,7 +68,6 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
   ])
   expect(b.running[1]?.cost).toBe(10.07)
   expect(b.running[1]?.note).toBe('The archive commit is pushing.')
-  expect(b.finished.map(d => `${d.entry}:${d.isSuperseded}`)).toEqual(['4:false', '2:true'])
   // An entry the dispatcher wrote without a lane carries no tag.
   expect(b.finished.map(d => `${d.entry}:${laneTag(d)}`)).toEqual(['4: (fix)', '2:'])
   const first = b.finished[0]
@@ -167,4 +169,43 @@ test('an outcome reads as one detail line, outcome then time then cost', async (
   expect(outcomeDetail('main has commits origin/main does not. Push or drop them first.')).toBe(
     'main has commits origin/main does not. Push or drop them first.',
   )
+})
+
+test('recent reads the last finished line of each sitting, newest first, and skips what runs', async () => {
+  const files = [
+    { name: 'README.progress', mtimeMs: 99 },
+    { name: 'kickoff-sitting-s340-e8-help-pages.progress', mtimeMs: 50 },
+    { name: 'kickoff-sitting-s337-gallery-arrange-page.progress', mtimeMs: 40 },
+    { name: 'kickoff-sitting-s339-background-suite.progress', mtimeMs: 30 },
+    { name: 'kickoff-sitting-s336-no-outcome.progress', mtimeMs: 20 },
+    { name: 'kickoff-sitting-s340-e8-help-pages.log', mtimeMs: 60 },
+  ]
+  const picked = recentCandidates(files, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
+  expect(picked.map(f => f.name)).toEqual([
+    'kickoff-sitting-s337-gallery-arrange-page.progress',
+    'kickoff-sitting-s339-background-suite.progress',
+    'kickoff-sitting-s336-no-outcome.progress',
+  ])
+  const text: Record<string, string> = {
+    'kickoff-sitting-s337-gallery-arrange-page.progress':
+      'commit: x\nfinished: shipped; production is live (run 41585826609). ($32.71, 108 min, peak 360k context)',
+    // A refusal appended after an earlier ship is the sitting's last outcome.
+    'kickoff-sitting-s339-background-suite.progress':
+      'finished: shipped; production is live (run 1). ($1.00, 5 min)\nfinished: stopped: the brief is still in docs/briefs. Read the handoff.',
+    'kickoff-sitting-s336-no-outcome.progress': 'skill: simplify x',
+  }
+  const recent = recentOf(
+    picked.map(f => ({ ...f, text: text[f.name] ?? '' })),
+    [{ entry: 51, brief: 'docs/briefs/kickoff-sitting-s337-gallery-arrange-page.md', lane: 'epic', status: 0, outcome: '' }],
+  )
+  expect(recent.map(d => `${d.sitting}:${d.isShipped}${laneTag(d)}:${d.endedMs}`)).toEqual(['S337:true (epic):40', 'S339:false:30'])
+  expect(recent[0]?.detail).toBe('shipped · 1h48m · $32.71 · peak 360k · run 41585826609')
+  expect(recent[1]?.detail).toBe('stopped: the brief is still in docs/briefs. Read the handoff.')
+})
+
+test('ago reads in hours and minutes for two days, then in days', async () => {
+  const m = 60000
+  expect(ago(0, 24 * m)).toBe('24m ago')
+  expect(ago(0, 312 * m)).toBe('5h12m ago')
+  expect(ago(0, 3 * 24 * 60 * m)).toBe('3d ago')
 })
