@@ -1,7 +1,7 @@
 {
   "name": "run-board",
-  "version": "0.5.0",
-  "description": "Autopilot run status for shoots.film beside the chat: a summary on the prompt hint line, an /autopilot pane, and a toast when a run ends",
+  "version": "0.6.0",
+  "description": "Autopilot run status for shoots.film beside the chat: a summary on the prompt hint line, a /board pane, and a toast when a run ends",
   "author": {
     "name": "Todd Shaffer"
   },

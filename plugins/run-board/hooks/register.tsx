@@ -23,6 +23,8 @@ import {
 import type { LoopFile, RawStatus } from './board'
 
 const PANE = 'run-board'
+// A name Claude Code does not reserve: `claude plugin validate` warns on one it does.
+const COMMAND = 'board'
 const TITLE = 'Autopilot runs'
 const POLL_MS = 5000
 // scripts/dispatch.sh's default LOG_DIR, under $HOME.
@@ -132,17 +134,18 @@ export const register: Register = on => {
     // The summary rides on the prompt hint line; clear any status pinned by
     // an earlier version, which the engine marks with a warning sign.
     $.ui.status(undefined)
-    await $.command.register({
-      name: 'autopilot',
-      description: 'Open or close the autopilot run board',
-    })
+    // The poll starts before the command registers: a refused command name
+    // costs only the slash command, and the hint line keeps updating.
     void poll($).catch(() => undefined)
     $.clock.every(POLL_MS, () => poll($).catch(() => undefined))
+    await $.command
+      .register({ name: COMMAND, description: 'Open or close the autopilot run board' })
+      .catch(() => undefined)
 
     return next(e)
   })
 
-  on('command.run', { command: 'autopilot' }, async $ => {
+  on('command.run', { command: COMMAND }, async $ => {
     const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
     if (isOpen) {
       await $.ui.close({ id: PANE })
@@ -150,7 +153,7 @@ export const register: Register = on => {
     }
     await poll($).catch(() => undefined)
     await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Run board opened. /autopilot again closes it.' }
+    return { text: `Run board opened. /${COMMAND} again closes it.` }
   })
 
   // The one-line summary, drawn dim at the end of the hint line under the
