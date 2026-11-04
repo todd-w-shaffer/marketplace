@@ -170,6 +170,11 @@ test('an outcome reads as one detail line, outcome then time then cost', async (
   expect(outcomeDetail('shipped; production is live (run 41303865474). ($26.11, 223 min, peak 385k context)')).toBe(
     'shipped · 3h43m · $26.11 · peak 385k · run 41303865474',
   )
+  expect(
+    outcomeDetail(
+      'shipped; production is live (run 41751690490); Migrate Production applied migrations/0050_gallery-skip-not-copied.sql (run 41751863985). ($13.98, 63 min, peak 194k context)',
+    ),
+  ).toBe('shipped · 1h03m · $13.98 · peak 194k · run 41751690490 · migrated 0050')
   expect(outcomeDetail('stopped at review. ($4.10, 7 min)')).toBe('stopped at review. · 7m · $4.10')
   expect(outcomeDetail('main has commits origin/main does not. Push or drop them first.')).toBe(
     'main has commits origin/main does not. Push or drop them first.',

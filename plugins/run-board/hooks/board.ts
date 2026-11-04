@@ -378,7 +378,10 @@ export function ago(fromMs: number, toMs: number): string {
 // The totals `scripts/autopilot.sh` ends an outcome with:
 // ` ($27.53, 158 min)`, or ` ($27.53, 158 min, peak 385k context)`.
 const TOTALS = /\s*\(\$([0-9]+(?:\.[0-9]+)?), ([0-9]+) min(?:, peak ([0-9]+k) context)?\)$/
-const SHIPPED = /^shipped; production is live \(run ([0-9]+)\)\.$/
+// A ship, and the launcher's migration clause when it applied a brief's one
+// migration: `; Migrate Production applied migrations/0050_<slug>.sql (run N)`.
+const SHIPPED =
+  /^shipped; production is live \(run ([0-9]+)\)(?:; Migrate Production applied migrations\/([0-9]+)_[^ ]+\.sql \(run [0-9]+\))?\.$/
 
 /** Minutes as hours and minutes: 158 reads as `2h38m`, 24 as `24m`. */
 export const hoursMinutes = (minutes: number): string =>
@@ -399,6 +402,7 @@ export function outcomeDetail(outcome: string): string {
     if (m[3] !== undefined) parts.push(`peak ${m[3]}`)
   }
   if (run !== null) parts.push(`run ${run[1]}`)
+  if (run?.[2] !== undefined) parts.push(`migrated ${run[2]}`)
   return parts.join(' · ')
 }
 
