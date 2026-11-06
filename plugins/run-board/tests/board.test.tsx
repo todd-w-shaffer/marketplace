@@ -11,6 +11,7 @@ import {
   finishedToast,
   laneTag,
   lanesOf,
+  lastToolOf,
   loopCostOf,
   loopStageOf,
   newestRunDir,
@@ -100,6 +101,52 @@ test('an empty lane reads as idle on the hint line and in the lane list', async 
   const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
   expect(statusLine(b)).toBe('● S299 starting 1h06m · fix lane idle · $7.65 in flight')
   expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1', 'fix:0'])
+})
+
+const toolUse = (name: string, input: Record<string, unknown>): string =>
+  JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'x' }, { type: 'tool_use', name, input }] } })
+
+test('the newest tool call in a log tail names the tool and what it acts on', async () => {
+  const tail = [
+    '"partial line cut by tail -c"}]}}',
+    toolUse('Read', { file_path: '/w/src/components/dashboard/ImagesPanel.tsx' }),
+    toolUse('Bash', { command: 'npm run check:cycle > /tmp/x.log 2>&1', description: 'Run the focused check' }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }),
+    '',
+  ].join('\n')
+  expect(lastToolOf(tail)).toBe('Bash: Run the focused check')
+  expect(lastToolOf(toolUse('Bash', { command: 'git   status\n --short' }))).toBe('Bash: git status --short')
+  expect(lastToolOf(toolUse('Edit', { file_path: '/w/test/a/b.test.ts', old_string: 'a', new_string: 'b' }))).toBe('Edit: b.test.ts')
+  expect(lastToolOf(toolUse('Skill', { skill: 'commit-skill:commit', args: 'S393 cycle 1' }))).toBe('Skill: commit-skill:commit')
+  expect(lastToolOf(toolUse('Grep', { pattern: 'FeedbackLines' }))).toBe('Grep: FeedbackLines')
+  expect(lastToolOf(toolUse('TaskStop', { task_id: 'x' }))).toBe('TaskStop')
+  expect(lastToolOf(toolUse('Bash', { description: 'x'.repeat(80) })).length).toBe(48)
+  expect(lastToolOf('not json\n')).toBe('')
+})
+
+test('a run with no step line yet shows its newest tool call in place of starting', async () => {
+  const raw = parseStatus(STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  const tools = {
+    'docs/briefs/kickoff-sitting-s299-one-full-check.md': 'Bash: Run the focused check',
+    'docs/briefs/kickoff-sitting-s300-loop-run-record.md': 'Read: a.ts',
+  }
+  const b = buildBoard(
+    { ...raw, queued: [] },
+    { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 },
+    new Set([5147, 79762, 21491]),
+    NOW,
+    null,
+    [],
+    [],
+    tools,
+  )
+  // A run past its first step line keeps the stage the progress file names.
+  expect(b.running.map(r => `${r.sitting}:${r.stage}:${r.tool}`)).toEqual([
+    'S299:starting:Bash: Run the focused check',
+    'S300:pushing:',
+  ])
+  expect(statusLine(b)).toBe('● S299 Bash: Run the focused check 1h06m · ● S300 pushing 1h37m · $17.72 in flight')
 })
 
 // A loop run's progress, copied from run 2026-10-28-0730 up to its first landing.

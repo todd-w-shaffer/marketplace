@@ -6,6 +6,10 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **Hint line.** The end of the dim line under the prompt shows each lane's running sitting with its stage
   and how long it has run, or that the lane is idle, then how many briefs wait and the cost so far:
   `● S301 review low 46m · fix lane idle · $8.58 in flight`. It is empty when nothing runs or waits.
+- **First steps.** Until a run writes its first step line (a skill, a commit, a push), its stage reads as
+  its newest tool call, `● S393 Bash: Run the focused check 22m`, in place of `starting`. The call comes
+  from the end of the run's stream-json `.log`: the log can pass the 4 MiB read cap, so the board reads
+  its last 256 KiB with `tail -c`, and only for a run with no step line yet.
 - **The architecture loop.** While `scripts/archloop.sh` holds its lock, the fix lane shows the loop's stage
   in place of idle, `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
   `(loop)`. The loop's spend counts toward the cost in flight.

@@ -6,6 +6,8 @@ export type Run = {
   startedMs: number
   cost: number
   stage: string
+  /** The newest tool call in the run's log while its progress file has no step line, else empty. */
+  tool: string
   note: string
   isAlive: boolean
 }

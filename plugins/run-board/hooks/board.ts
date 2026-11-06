@@ -91,6 +91,54 @@ export function stageOf(progress: string): string {
   return 'starting'
 }
 
+// How much of a run's stream-json log the board reads for its newest tool
+// call. A log passes the 4 MiB read cap within hours, so the board reads its
+// end with `tail -c`; one event line rarely passes 256 KiB.
+export const LOG_TAIL_BYTES = 262144
+
+// The longest tool summary the board draws, ellipsis included.
+const TOOL_SUMMARY_MAX = 48
+
+/** What a tool call acts on, in a few words: a Bash call's description, an edit's file name. */
+function toolDetail(name: string, input: Record<string, unknown>): string {
+  const field = (k: string): string => (typeof input[k] === 'string' ? (input[k] as string) : '')
+  if (name === 'Bash') return field('description') || field('command')
+  if (name === 'Skill') return field('skill')
+  if (name === 'Agent' || name === 'Task') return field('description')
+  if (name === 'Grep' || name === 'Glob') return field('pattern')
+  return field('file_path').replace(/^.*\//, '') || field('notebook_path').replace(/^.*\//, '')
+}
+
+/**
+ * The newest tool call in the tail of a run's stream-json log, as
+ * `Bash: Run the focused check`, or empty when the tail holds none. The
+ * tail's first line is cut by `tail -c` and fails to parse, so it is skipped.
+ */
+export function lastToolOf(tail: string): string {
+  const lines = tail.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? ''
+    if (!line.includes('"tool_use"')) continue
+    let event: unknown
+    try {
+      event = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const e = event as { type?: unknown; message?: { content?: unknown } }
+    if (e.type !== 'assistant' || !Array.isArray(e.message?.content)) continue
+    const uses = list(e.message.content).filter(c => c.type === 'tool_use' && typeof c.name === 'string')
+    const use = uses[uses.length - 1]
+    if (use === undefined) continue
+    const name = use.name as string
+    const input = typeof use.input === 'object' && use.input !== null ? (use.input as Record<string, unknown>) : {}
+    const detail = toolDetail(name, input).replace(/\s+/g, ' ').trim()
+    const text = detail === '' ? name : `${name}: ${detail}`
+    return text.length > TOOL_SUMMARY_MAX ? `${text.slice(0, TOOL_SUMMARY_MAX - 1)}…` : text
+  }
+  return ''
+}
+
 /** The run's own last sentence and cost, from its newest `… $N so far: text` line. */
 export function noteOf(progress: string): { note: string; cost: number | null } {
   for (const line of progress.split('\n').reverse()) {
@@ -188,18 +236,21 @@ export function buildBoard(
   loop: Loop | null = null,
   recent: Ended[] = [],
   onDeck: Deck[] = [],
+  tools: Readonly<Record<string, string>> = {},
 ): Board {
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { note, cost } = noteOf(text)
     const started = Date.parse(r.started)
+    const stage = stageOf(text)
     return {
       entry: r.entry,
       ...sittingOf(r.brief),
       lane: r.lane,
       startedMs: Number.isFinite(started) ? started : now,
       cost: Math.max(r.cost, cost ?? 0),
-      stage: stageOf(text),
+      stage,
+      tool: stage === 'starting' ? (tools[r.brief] ?? '') : '',
       note,
       isAlive: r.pid !== null && alive.has(r.pid),
     }
@@ -428,6 +479,9 @@ export const LOOP_LANE = 'fix'
 export const isLoopLanding = (b: Board, r: Run): boolean =>
   b.loop !== null && r.lane === LOOP_LANE && b.loop.stage.startsWith('landing ')
 
+/** What a run is doing: its newest tool call while it has no step line, else its stage. */
+export const doingOf = (r: Run): string => (r.tool === '' ? r.stage : r.tool)
+
 /** The loop's hint-line part while no landing runs: `◐ loop review p1 14m`. */
 export const loopPart = (loop: Loop, now: number): string =>
   `◐ loop ${loop.stage} ${elapsed(loop.startedMs, now)}`
@@ -445,7 +499,7 @@ export function statusLine(b: Board): string | undefined {
       ? [lane === LOOP_LANE && b.loop !== null ? loopPart(b.loop, b.checkedAt) : `${lane} lane idle`]
       : runs.map(r =>
           r.isAlive
-            ? `● ${r.sitting} ${r.stage} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
+            ? `● ${r.sitting} ${doingOf(r)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
             : `✗ ${r.sitting} launcher gone`,
         ),
   )

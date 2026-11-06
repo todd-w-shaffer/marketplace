@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Board, Deck, Ended, Loop } from '../types'
 import {
+  LOG_TAIL_BYTES,
   LOOP_LANE,
   ago,
   baseName,
@@ -10,10 +11,12 @@ import {
   briefFiles,
   buildLoop,
   deckDetail,
+  doingOf,
   elapsed,
   finishedToast,
   laneTag,
   isLoopLanding,
+  lastToolOf,
   money,
   newestRunDir,
   onDeckOf,
@@ -21,6 +24,7 @@ import {
   lanesOf,
   recentCandidates,
   recentOf,
+  stageOf,
   statusLine,
 } from './board'
 import type { LoopFile, RawStatus } from './board'
@@ -41,7 +45,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-5' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-6' })
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -75,6 +79,18 @@ async function readLoop($: EngineInterface, home: string): Promise<Loop | null> 
   }
   const progress = await $.fs.read(`${run}/progress`).catch(() => '')
   return buildLoop(name, files, progress, await $.clock.now())
+}
+
+/**
+ * A run's newest tool call, from the end of its stream-json log. The log can
+ * pass the 4 MiB read cap, and `$.fs.read` reads a whole file, so `tail -c`
+ * reads its last LOG_TAIL_BYTES.
+ */
+async function readLastTool($: EngineInterface, log: string): Promise<string> {
+  const tail = await $.process
+    .run(['tail', '-c', String(LOG_TAIL_BYTES), log], { timeoutMs: 5000 })
+    .catch(() => ({ exitCode: 1, stdout: '' }))
+  return tail.exitCode === 0 ? lastToolOf(tail.stdout) : ''
 }
 
 // Progress files read for RECENT, by name, kept while their mtime holds.
@@ -139,13 +155,16 @@ async function poll($: EngineInterface): Promise<void> {
   }
 
   const progress: Record<string, string> = {}
+  const tools: Record<string, string> = {}
   for (const run of raw.running) {
-    progress[run.brief] = await $.fs.read(`${dir}/${baseName(run.brief)}.progress`).catch(() => '')
+    const text = await $.fs.read(`${dir}/${baseName(run.brief)}.progress`).catch(() => '')
+    progress[run.brief] = text
+    if (stageOf(text) === 'starting') tools[run.brief] = await readLastTool($, `${dir}/${baseName(run.brief)}.log`)
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
   const recent = await readRecent($, dir, raw).catch(() => [])
-  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop, recent, onDeck)
+  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop, recent, onDeck, tools)
 
   await update($, board, () => next)
 
@@ -253,7 +272,7 @@ export const register: Register = on => {
                 </Text>
                 <Text>
                   {'  '}
-                  {r.isAlive ? r.stage : 'launcher gone, no finished line'}
+                  {r.isAlive ? doingOf(r) : 'launcher gone, no finished line'}
                   <Text dimColor>
                     {' '}· {elapsed(r.startedMs, b.checkedAt)} · {money(r.cost)}
                   </Text>
