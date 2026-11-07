@@ -6,10 +6,23 @@ export type Run = {
   startedMs: number
   cost: number
   stage: string
-  /** The newest tool call in the run's log while its progress file has no step line, else empty. */
+  /** The newest tool call in the run's log, or empty. */
   tool: string
+  /** The chain's phases in order, each done, in flight or still to come. */
+  phases: Phase[]
   note: string
   isAlive: boolean
+}
+
+export type PhaseState = 'done' | 'live' | 'todo'
+
+/** One step of the fixed autopilot chain: a cycle, simplify, the xhigh review, the ship or the archive. */
+export type Phase = {
+  /** `cycle 2`, `simplify`, `review xhigh`, `shipping`, `archiving`. */
+  label: string
+  /** The bar's label: `c2`, `simpl`, `xhigh`, `ship`, `arch`. */
+  short: string
+  state: PhaseState
 }
 
 export type Waiting = {

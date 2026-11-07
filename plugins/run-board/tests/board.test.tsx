@@ -5,6 +5,8 @@ import {
   briefFiles,
   briefHeader,
   briefKey,
+  cycleBlobs,
+  cycleCount,
   buildBoard,
   buildLoop,
   deckDetail,
@@ -17,9 +19,12 @@ import {
   newestRunDir,
   onDeckOf,
   outcomeDetail,
+  phaseLine,
+  phasesOf,
   parseStatus,
   recentCandidates,
   recentOf,
+  segmentWidth,
   runStartedMs,
   stageOf,
   statusLine,
@@ -81,7 +86,7 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
   expect(finishedToast(first)).toBe(
     '✓ S298 tool-paths-by-default (fix) · shipped · 2h38m · $27.53 · run 41212658012',
   )
-  expect(statusLine(b)).toBe('✗ S299 launcher gone · ● S300 pushing 1h37m · ○ 1 queued · $17.72 in flight')
+  expect(statusLine(b)).toBe('✗ S299 launcher gone · ● S300 ███▓░ ship 1h37m · ○ 1 queued · $17.72 in flight')
 })
 
 test('nothing running or queued clears the status line', async () => {
@@ -99,7 +104,7 @@ test('an empty lane reads as idle on the hint line and in the lane list', async 
   if (raw === null) throw new Error('status did not parse')
   const oneRun = { ...raw, running: raw.running.filter(r => r.lane === 'epic'), queued: [] }
   const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
-  expect(statusLine(b)).toBe('● S299 starting 1h06m · fix lane idle · $7.65 in flight')
+  expect(statusLine(b)).toBe('● S299 ▓░░░░ c1 1h06m · fix lane idle · $7.65 in flight')
   expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1', 'fix:0'])
 })
 
@@ -124,29 +129,118 @@ test('the newest tool call in a log tail names the tool and what it acts on', as
   expect(lastToolOf('not json\n')).toBe('')
 })
 
-test('a run with no step line yet shows its newest tool call in place of starting', async () => {
+// S395's progress up to its xhigh review, and S393's in cycle 2, as their runs wrote them.
+const S395 = [
+  'skill: commit-skill:commit S395 cycle 1: test/migrations/username-keys.test.ts (new)',
+  'commit: (no subject in the command)',
+  'skill: code-review low git diff 99c79e1c 0970cf2c',
+  'turn ended: success, 112 turns, $5.27 so far: Cycle 2 is building.',
+  'skill: commit-skill:commit S395 cycle 2. Scope: test/sweeps/step-up-door.test.ts (new)',
+  'commit: (no subject in the command)',
+  'skill: code-review low git diff 0970cf2c 3fc618dc',
+  "woke for a background task: success, 14 turns, $6.06 so far: Waiting for cycle 3's build.",
+  'skill: commit-skill:commit S395 cycle 3: the auth edges, tests only',
+  'commit: (no subject in the command)',
+  'skill: code-review low git diff 3fc618dc 8370c5b4',
+  'cut: session 1 handed over in /x.cut; session 2 starts at /simplify in /w',
+  'skill: simplify Changed paths over 99c79e1c..HEAD: docs/auth.md',
+  'skill: commit-skill:commit The /simplify pass for S395 over the changed test paths',
+  'commit: (no subject in the command)',
+  'skill: code-review xhigh git diff 99c79e1c f8420e3a',
+].join('\n')
+const S393 = [
+  "turn ended: success, 96 turns, $6.07 so far: Rebuild is still running.",
+  'skill: commit-skill:commit S393 cycle 1: the Images panel draws the arrangement',
+  'commit: (no subject in the command)',
+  'skill: code-review low 99c79e1c..250176e4',
+  'skill: code-review low git diff 99c79e1c 250176e4',
+  "woke for a background task: success, 65 turns, $10.62 so far: Cycle 2's build is running.",
+].join('\n')
+
+const states = (progress: string, cycles?: number): string =>
+  phasesOf(progress, cycles)
+    .map(p => `${p.short}:${p.state}`)
+    .join(' ')
+
+test('phases follow the chain: each cycle closes on its low review, then simplify, xhigh, ship, archive', async () => {
+  expect(states(S393, 2)).toBe('c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
+  expect(states(S395, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:live ship:todo arch:todo')
+  // A /commit inside /ship comes before its push, so the run is still shipping.
+  const shipping = `${S395}\nskill: commit-skill:ship\nskill: commit-skill:commit uncommitted docs`
+  expect(states(shipping, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:live arch:todo')
+  // The archive's /commit comes after the ship's push.
+  const archiving = `${shipping}\nbash: npm run push:checked -- origin HEAD:main 2>&1 | tail\nskill: commit-skill:commit archive S395`
+  expect(states(archiving, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live')
+  expect(states(`${archiving}\npushes: 1a2b\nfinished: shipped; production is live (run 1).`, 3)).toBe(
+    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:done',
+  )
+})
+
+test('bar blocks fit the pane, between 3 and 7 columns', async () => {
+  expect(segmentWidth(60, 7)).toBe(7)
+  expect(segmentWidth(40, 7)).toBe(4)
+  expect(segmentWidth(12, 9)).toBe(3)
+  expect(segmentWidth(200, 5)).toBe(7)
+})
+
+test('phases fall back when the cycle count or the cycle number is missing', async () => {
+  expect(states('')).toBe('c1:live simpl:todo xhigh:todo ship:todo arch:todo')
+  expect(states('skill: commit-skill:commit the panel draws\nskill: code-review low a b', 2)).toBe(
+    'c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo',
+  )
+  // A fix to cycle 1 after its low review names cycle 1, so cycle 2 is still in flight.
+  const fix = 'skill: commit-skill:commit S1 cycle 1\nskill: code-review low a b\nskill: commit-skill:commit S1 cycle 1 review fixes\nskill: code-review low b c'
+  expect(states(fix, 2)).toBe('c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
+  // A later step implies the earlier ones, whatever the count says.
+  expect(states('skill: code-review xhigh a b')).toBe('c1:done simpl:done xhigh:live ship:todo arch:todo')
+  // Session 1 ended its cycles: the run waits on the cut, headed for simplify.
+  expect(states(S393 + '\nskill: commit-skill:commit S393 cycle 2\nskill: code-review low c d', 2)).toBe(
+    'c1:done c2:done simpl:live xhigh:todo ship:todo arch:todo',
+  )
+})
+
+test('a brief counts its cycles by heading or bold line, and a directory brief reads every file', async () => {
+  expect(cycleCount('### Cycle 1: a\ntext\n### Cycle 2: b\n### Cycles in general')).toBe(2)
+  expect(cycleCount('**Cycle 1.** a\n**Cycle 2.** b\n**Cycle 3.** c\n### Cycle 1: x')).toBe(3)
+  expect(cycleCount('no cycles')).toBe(0)
+  const ls = [
+    '100644 blob aaa\tdocs/briefs/kickoff-sitting-s393-images-panel.md',
+    '100644 blob bbb\tdocs/briefs/s410-big/README.md',
+    '100644 blob ccc\tdocs/briefs/s410-big/cycles.md',
+    '100644 blob ddd\tdocs/briefs/s410-big/notes/deep.md',
+    '100644 blob eee\tdocs/briefs/s410-big/data.json',
+  ].join('\n')
+  expect(cycleBlobs(ls, 'docs/briefs/kickoff-sitting-s393-images-panel.md')).toEqual(['aaa'])
+  expect(cycleBlobs(ls, 'docs/briefs/s410-big')).toEqual(['bbb', 'ccc'])
+  expect(cycleBlobs(ls, 'docs/briefs/gone.md')).toEqual([])
+})
+
+test('a running card and the hint line show the phase, the stage and the newest tool call', async () => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
-  const tools = {
-    'docs/briefs/kickoff-sitting-s299-one-full-check.md': 'Bash: Run the focused check',
-    'docs/briefs/kickoff-sitting-s300-loop-run-record.md': 'Read: a.ts',
-  }
+  const s393 = 'docs/briefs/kickoff-sitting-s393-images-panel.md'
+  const s395 = 'docs/briefs/kickoff-sitting-s395-test-guards.md'
   const b = buildBoard(
-    { ...raw, queued: [] },
-    { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 },
+    {
+      ...raw,
+      queued: [],
+      running: [
+        { entry: 1, brief: s393, lane: 'epic', pid: 79762, started: '2026-10-31T15:43:24Z', cost: 0 },
+        { entry: 5, brief: s395, lane: 'fix', pid: 21491, started: '2026-10-31T15:11:36Z', cost: 0 },
+      ],
+    },
+    { [s393]: S393, [s395]: S395 },
     new Set([5147, 79762, 21491]),
     NOW,
-    null,
-    [],
-    [],
-    tools,
+    { tools: { [s393]: 'Bash: Run the focused check' }, cycles: { [s393]: 2, [s395]: 3 } },
   )
-  // A run past its first step line keeps the stage the progress file names.
-  expect(b.running.map(r => `${r.sitting}:${r.stage}:${r.tool}`)).toEqual([
-    'S299:starting:Bash: Run the focused check',
-    'S300:pushing:',
-  ])
-  expect(statusLine(b)).toBe('● S299 Bash: Run the focused check 1h06m · ● S300 pushing 1h37m · $17.72 in flight')
+  const [epic, fix] = b.running
+  if (epic === undefined || fix === undefined) throw new Error('runs missing')
+  expect(phaseLine(epic)).toBe('cycle 2 of 2 · Bash: Run the focused check')
+  expect(phaseLine(fix)).toBe('review xhigh')
+  expect(phaseLine({ ...epic, stage: 'committing', tool: '' })).toBe('cycle 2 of 2 · committing')
+  expect(phaseLine({ ...epic, stage: 'review low', tool: '' })).toBe('cycle 2 of 2')
+  expect(statusLine(b)).toBe('● S393 █▓░░░░ c2 1h06m · ● S395 ████▓░░ xhigh 1h37m · $16.68 in flight')
 })
 
 // A loop run's progress, copied from run 2026-10-28-0730 up to its first landing.
@@ -194,7 +288,7 @@ test('a live loop replaces fix lane idle, and tags a landing of its own', async 
     {},
     new Set(),
     at,
-    buildLoop('2026-11-01-1417', [file('p1/review.log', 1)], 'turn ended: success, 3 turns, $3.20 so far', at),
+    { loop: buildLoop('2026-11-01-1417', [file('p1/review.log', 1)], 'turn ended: success, 3 turns, $3.20 so far', at) },
   )
   expect(statusLine(idle)).toBe('epic lane idle · ◐ loop review p1 14m · $3.20 in flight')
 
@@ -208,9 +302,9 @@ test('a live loop replaces fix lane idle, and tags a landing of its own', async 
     {},
     new Set([1, 7]),
     at,
-    buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at),
+    { loop: buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at) },
   )
-  expect(statusLine(landing)).toBe('epic lane idle · ● S316 starting 10m (loop) · $21.49 in flight')
+  expect(statusLine(landing)).toBe('epic lane idle · ● S316 ▓░░░░ c1 10m (loop) · $21.49 in flight')
 })
 
 test('an outcome reads as one detail line, outcome then time then cost', async () => {

@@ -1,4 +1,4 @@
-import type { Board, Deck, Done, Ended, Loop, Run, Waiting } from '../types'
+import type { Board, Deck, Done, Ended, Loop, Phase, PhaseState, Run, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
@@ -139,6 +139,136 @@ export function lastToolOf(tail: string): string {
   return ''
 }
 
+/**
+ * How many cycles a brief plans: its `### Cycle N` headings or its
+ * `**Cycle N` lines, whichever there are more of, as scripts/autopilot.sh
+ * counts them.
+ */
+export function cycleCount(text: string): number {
+  const lines = text.split('\n')
+  const headings = lines.filter(l => /^### Cycle [0-9]/.test(l)).length
+  const bold = lines.filter(l => /^\*\*Cycle [0-9]/.test(l)).length
+  return Math.max(headings, bold)
+}
+
+/**
+ * The blobs that hold a brief's cycles in an `ls-tree -r` listing: a file
+ * brief's own blob, or every `.md` file directly in a directory brief, the
+ * files scripts/autopilot.sh reads.
+ */
+export function cycleBlobs(lsTree: string, key: string): string[] {
+  const out: string[] = []
+  for (const line of lsTree.split('\n')) {
+    const m = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line)
+    if (!m) continue
+    const path = m[2] ?? ''
+    const inDir = path.startsWith(`${key}/`) && /^[^/]+\.md$/.test(path.slice(key.length + 1))
+    if (path === key || inDir) out.push(m[1] ?? '')
+  }
+  return out
+}
+
+/**
+ * Where a run is in the fixed chain, from its progress file: each cycle, then
+ * simplify, the xhigh review, the ship and the archive.
+ *
+ * Cycle k is done when a `/commit` naming `cycle k` (or, naming none, the
+ * next cycle) is followed by a `code-review low` line. The ship starts at
+ * `/ship` or a push, and the archive at the first `/commit` after the ship's
+ * push. A later step marks every earlier one done. `cycles` is the brief's
+ * count; without it the count is the highest cycle the progress file names.
+ */
+export function phasesOf(progress: string, cycles?: number): Phase[] {
+  let done = 0
+  let pending: number | null = null
+  let named = 0
+  let cut = false
+  let simplify = false
+  let xhigh = false
+  let ship = false
+  let shipPushed = false
+  let archive = false
+  let finished = false
+  for (const line of progress.split('\n')) {
+    const commit = /^skill: commit-skill:commit\b(.*)$/.exec(line)
+    if (commit) {
+      if (shipPushed) archive = true
+      else if (!simplify && !ship) {
+        const k = /\bcycle (\d+)/i.exec(commit[1] ?? '')
+        pending = k ? Number(k[1]) : done + 1
+        named = Math.max(named, pending)
+      }
+    } else if (/^skill: code-review low\b/.test(line)) {
+      if (pending !== null) done = Math.max(done, pending)
+      pending = null
+    } else if (line.startsWith('cut: ')) cut = true
+    else if (/^skill: simplify\b/.test(line)) simplify = true
+    else if (/^skill: code-review xhigh\b/.test(line)) xhigh = true
+    else if (/^skill: commit-skill:ship\b/.test(line)) ship = true
+    else if (line.startsWith('bash: ') && line.includes('push:checked')) {
+      if (ship) shipPushed = true
+      ship = true
+    } else if (line.startsWith('finished: shipped')) finished = true
+  }
+  const n = cycles !== undefined && cycles > 0 ? cycles : Math.max(named, done + 1, 1)
+  const live = finished
+    ? n + 4
+    : archive
+      ? n + 3
+      : ship
+        ? n + 2
+        : xhigh
+          ? n + 1
+          : simplify || cut || done >= n
+            ? n
+            : done
+  const names: [string, string][] = [
+    ...Array.from({ length: n }, (_, i): [string, string] => [`cycle ${i + 1}`, `c${i + 1}`]),
+    ['simplify', 'simpl'],
+    ['review xhigh', 'xhigh'],
+    ['shipping', 'ship'],
+    ['archiving', 'arch'],
+  ]
+  return names.map(([label, short], i) => {
+    const state: PhaseState = i < live ? 'done' : i === live ? 'live' : 'todo'
+    return { label, short, state }
+  })
+}
+
+// Stages the phase line leaves out: those that say no more than the phase,
+// and `review low`, which stays the last step line through the next
+// cycle's build, so it reads as the cycle before the one in flight.
+const QUIET_STAGES = new Set(['starting', 'working', 'review low', 'simplify', 'review xhigh', 'shipping'])
+
+/**
+ * A running card's phase line: the phase in flight, `cycle 2 of 2` for a
+ * cycle, then the stage when it adds to the phase, then the newest tool call.
+ */
+export function phaseLine(r: Run): string {
+  const cycles = r.phases.filter(p => p.label.startsWith('cycle ')).length
+  const live = r.phases.find(p => p.state === 'live')
+  const phase = live === undefined ? 'finishing' : live.label.startsWith('cycle ') ? `${live.label} of ${cycles}` : live.label
+  const parts = [phase]
+  if (!QUIET_STAGES.has(r.stage)) parts.push(r.stage)
+  if (r.tool !== '') parts.push(r.tool)
+  return parts.join(' · ')
+}
+
+/** One character per phase for the hint line: `█` done, `▓` in flight, `░` to come. */
+export const miniBar = (phases: readonly Phase[]): string =>
+  phases.map(p => (p.state === 'done' ? '█' : p.state === 'live' ? '▓' : '░')).join('')
+
+/**
+ * Columns per bar block in a pane `bodyColumns` wide: the card's border and
+ * padding take four, the session marker two, and each block keeps a gap.
+ * Between 3 and 7, so a short label still fits and a wide pane stays calm.
+ */
+export const segmentWidth = (bodyColumns: number, phases: number): number =>
+  Math.max(3, Math.min(7, Math.floor((bodyColumns - 6) / Math.max(1, phases))))
+
+/** The phase in flight's short name, or `done` once every phase is. */
+export const livePhase = (phases: readonly Phase[]): string => phases.find(p => p.state === 'live')?.short ?? 'done'
+
 /** The run's own last sentence and cost, from its newest `… $N so far: text` line. */
 export function noteOf(progress: string): { note: string; cost: number | null } {
   for (const line of progress.split('\n').reverse()) {
@@ -233,11 +363,17 @@ export function buildBoard(
   progress: Readonly<Record<string, string>>,
   alive: ReadonlySet<number>,
   now: number,
-  loop: Loop | null = null,
-  recent: Ended[] = [],
-  onDeck: Deck[] = [],
-  tools: Readonly<Record<string, string>> = {},
+  extra: {
+    loop?: Loop | null
+    recent?: Ended[]
+    onDeck?: Deck[]
+    /** Each running brief's newest tool call, read from its log. */
+    tools?: Readonly<Record<string, string>>
+    /** Each brief's cycle count, read from `origin/main`. */
+    cycles?: Readonly<Record<string, number>>
+  } = {},
 ): Board {
+  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {} } = extra
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { note, cost } = noteOf(text)
@@ -250,7 +386,8 @@ export function buildBoard(
       startedMs: Number.isFinite(started) ? started : now,
       cost: Math.max(r.cost, cost ?? 0),
       stage,
-      tool: stage === 'starting' ? (tools[r.brief] ?? '') : '',
+      tool: tools[r.brief] ?? '',
+      phases: phasesOf(text, cycles[briefKey(r.brief)]),
       note,
       isAlive: r.pid !== null && alive.has(r.pid),
     }
@@ -479,9 +616,6 @@ export const LOOP_LANE = 'fix'
 export const isLoopLanding = (b: Board, r: Run): boolean =>
   b.loop !== null && r.lane === LOOP_LANE && b.loop.stage.startsWith('landing ')
 
-/** What a run is doing: its newest tool call while it has no step line, else its stage. */
-export const doingOf = (r: Run): string => (r.tool === '' ? r.stage : r.tool)
-
 /** The loop's hint-line part while no landing runs: `◐ loop review p1 14m`. */
 export const loopPart = (loop: Loop, now: number): string =>
   `◐ loop ${loop.stage} ${elapsed(loop.startedMs, now)}`
@@ -499,7 +633,7 @@ export function statusLine(b: Board): string | undefined {
       ? [lane === LOOP_LANE && b.loop !== null ? loopPart(b.loop, b.checkedAt) : `${lane} lane idle`]
       : runs.map(r =>
           r.isAlive
-            ? `● ${r.sitting} ${doingOf(r)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
+            ? `● ${r.sitting} ${miniBar(r.phases)} ${livePhase(r.phases)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
             : `✗ ${r.sitting} launcher gone`,
         ),
   )

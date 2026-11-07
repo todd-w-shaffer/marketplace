@@ -4,17 +4,22 @@ A Claude Code mod that shows the shoots.film autopilot runs beside the chat. It 
 dispatcher writes and never starts a model turn, so it costs no tokens.
 
 - **Hint line.** The end of the dim line under the prompt shows each lane's running sitting with its stage
-  and how long it has run, or that the lane is idle, then how many briefs wait and the cost so far:
-  `● S301 review low 46m · fix lane idle · $8.58 in flight`. It is empty when nothing runs or waits.
-- **First steps.** Until a run writes its first step line (a skill, a commit, a push), its stage reads as
-  its newest tool call, `● S393 Bash: Run the focused check 22m`, in place of `starting`. The call comes
-  from the end of the run's stream-json `.log`: the log can pass the 4 MiB read cap, so the board reads
-  its last 256 KiB with `tail -c`, and only for a run with no step line yet.
+  as a one-cell-per-phase bar, the phase in flight and how long it has run, or that the lane is idle, then
+  how many briefs wait and the cost so far: `● S393 █▓░░░░ c2 1h12m · fix lane idle · $12.22 in flight`.
+  It is empty when nothing runs or waits.
+- **Progress bar.** Each run's card has a block per phase of the fixed chain: each cycle, then `┊` where
+  session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is green when done,
+  amber in flight and dim to come. The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
+  on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
+  `code-review low` line; the ship starts at `/ship` or a push, and the archive at the first `/commit` after
+  the ship's push. Under the bar, the phase line reads `cycle 2 of 2 · Bash: Run the focused check`: the
+  phase, the stage when it adds to it, and the newest tool call, read from the last 256 KiB of the run's
+  stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
 - **The architecture loop.** While `scripts/archloop.sh` holds its lock, the fix lane shows the loop's stage
   in place of idle, `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
   `(loop)`. The loop's spend counts toward the cost in flight.
-- **`/board`** opens a pane with a section per lane (`epic`, `fix`): its run's stage, time, cost and last
-  sentence, or `idle`. Below them come the queue with what each
+- **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
+  time, cost and last sentence, or `idle`. Below them come the queue with what each
   entry waits for, and RECENT: the last 10 sittings that finished, newest first, one row each. A row reads like
   a lane's run: the sitting, its name, its lane (`(fix)`) while the dispatcher still lists it, and how long ago
   it ended, then `shipped · 3h43m · $26.11 · peak 385k · run 41303865474`. RECENT comes from each sitting's

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board, Deck, Ended, Loop } from '../types'
+import type { Board, Deck, Ended, Loop, Phase, Run } from '../types'
 import {
   LOG_TAIL_BYTES,
   LOOP_LANE,
@@ -10,13 +10,19 @@ import {
   buildBoard,
   briefFiles,
   buildLoop,
+  briefKey,
+  cycleBlobs,
+  cycleCount,
   deckDetail,
-  doingOf,
   elapsed,
   finishedToast,
   laneTag,
   isLoopLanding,
   lastToolOf,
+  livePhase,
+  miniBar,
+  phaseLine,
+  segmentWidth,
   money,
   newestRunDir,
   onDeckOf,
@@ -24,7 +30,6 @@ import {
   lanesOf,
   recentCandidates,
   recentOf,
-  stageOf,
   statusLine,
 } from './board'
 import type { LoopFile, RawStatus } from './board'
@@ -45,7 +50,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-6' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-7' })
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -113,27 +118,56 @@ async function readRecent($: EngineInterface, dir: string, raw: RawStatus): Prom
   return recentOf(texts, raw.finished)
 }
 
-// Brief texts by blob id; a blob's text never changes.
-let deckCache = new Map<string, string>()
+// Brief texts by blob id; a blob's text never changes. Pruned each poll to
+// the blobs the listing still names.
+let blobCache = new Map<string, string>()
 
-/** The briefs on `origin/main` that no run holds and the queue does not list. */
-async function readDeck($: EngineInterface, home: string, raw: RawStatus): Promise<Deck[]> {
+/** The text of `sha` in the checkout at `cwd`, read once per blob. */
+async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<string, string>): Promise<string> {
+  let text = blobCache.get(sha) ?? next.get(sha)
+  if (text === undefined) {
+    const blob = await $.process.run(['git', 'cat-file', 'blob', sha], { cwd, timeoutMs: 5000 })
+    text = blob.exitCode === 0 ? blob.stdout : ''
+  }
+  next.set(sha, text)
+  return text
+}
+
+// Each running brief's cycle count by its key, kept after the archive moves
+// the brief off docs/briefs/ so the bar keeps its length to the end.
+const cyclesCache = new Map<string, number>()
+
+/**
+ * The briefs on deck, and each running brief's cycle count, from one
+ * `git ls-tree -r origin/main docs/briefs/` in the checkout.
+ */
+async function readBriefs(
+  $: EngineInterface,
+  home: string,
+  raw: RawStatus,
+): Promise<{ onDeck: Deck[]; cycles: Record<string, number> }> {
   const cwd = `${home}/${REPO}`
+  const cycles: Record<string, number> = {}
+  const keys = raw.running.map(r => briefKey(r.brief))
   const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/'], { cwd, timeoutMs: 5000 })
-  if (ls.exitCode !== 0) return []
+  if (ls.exitCode !== 0) {
+    for (const k of keys) if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
+    return { onDeck: [], cycles }
+  }
   const next = new Map<string, string>()
   const briefs: { path: string; sha: string; text: string }[] = []
-  for (const f of briefFiles(ls.stdout)) {
-    let text = deckCache.get(f.sha)
-    if (text === undefined) {
-      const blob = await $.process.run(['git', 'cat-file', 'blob', f.sha], { cwd, timeoutMs: 5000 })
-      text = blob.exitCode === 0 ? blob.stdout : ''
+  for (const f of briefFiles(ls.stdout)) briefs.push({ ...f, text: await blobText($, cwd, f.sha, next) })
+  for (const k of keys) {
+    const shas = cycleBlobs(ls.stdout, k)
+    if (shas.length > 0) {
+      const texts = await Promise.all(shas.map(sha => blobText($, cwd, sha, next)))
+      cyclesCache.set(k, cycleCount(texts.join('\n')))
     }
-    next.set(f.sha, text)
-    briefs.push({ ...f, text })
+    if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
   }
-  deckCache = next
-  return onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief))
+  for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
+  blobCache = next
+  return { onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)), cycles }
 }
 
 // Finished entries already seen; null until the first read, which only
@@ -148,7 +182,7 @@ async function poll($: EngineInterface): Promise<void> {
   const status = text === undefined ? null : parseStatus(text)
   const loop = await readLoop($, home).catch(() => null)
   const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
-  const onDeck = await readDeck($, home, raw).catch(() => [])
+  const { onDeck, cycles } = await readBriefs($, home, raw).catch(() => ({ onDeck: [] as Deck[], cycles: {} }))
   if (status === null && loop === null && onDeck.length === 0) {
     await update($, board, () => null)
     return
@@ -157,14 +191,13 @@ async function poll($: EngineInterface): Promise<void> {
   const progress: Record<string, string> = {}
   const tools: Record<string, string> = {}
   for (const run of raw.running) {
-    const text = await $.fs.read(`${dir}/${baseName(run.brief)}.progress`).catch(() => '')
-    progress[run.brief] = text
-    if (stageOf(text) === 'starting') tools[run.brief] = await readLastTool($, `${dir}/${baseName(run.brief)}.log`)
+    progress[run.brief] = await $.fs.read(`${dir}/${baseName(run.brief)}.progress`).catch(() => '')
+    tools[run.brief] = await readLastTool($, `${dir}/${baseName(run.brief)}.log`)
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
   const recent = await readRecent($, dir, raw).catch(() => [])
-  const next = buildBoard(raw, progress, alive, await $.clock.now(), loop, recent, onDeck, tools)
+  const next = buildBoard(raw, progress, alive, await $.clock.now(), { loop, recent, onDeck, tools, cycles })
 
   await update($, board, () => next)
 
@@ -220,6 +253,34 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const b: Board | null = await read($, board)
 
+    // The bar and its labels: one block per phase, green when done, amber in
+    // flight, dim to come, with `┊` where session 2 takes over.
+    const phaseRows = (r: Run, width: number) => {
+      const cut = r.phases.findIndex(p => p.label === 'simplify')
+      const color = (p: Phase): string => (p.state === 'done' ? 'success' : p.state === 'live' ? 'warning' : 'inactive')
+      const glyph = (p: Phase): string => (p.state === 'done' ? '█' : p.state === 'live' ? '▓' : '░')
+      return [
+        <Text>
+          {r.phases.map((p, i) => (
+            <Text>
+              {i === cut && <Text dimColor>┊ </Text>}
+              <Text color={color(p)}>{glyph(p).repeat(width - 1)}</Text>{' '}
+            </Text>
+          ))}
+        </Text>,
+        <Text>
+          {r.phases.map((p, i) => (
+            <Text>
+              {i === cut && '  '}
+              <Text color={color(p)} bold={p.state === 'live'} dimColor={p.state === 'done'}>
+                {p.short.slice(0, width - 1).padEnd(width)}
+              </Text>
+            </Text>
+          ))}
+        </Text>,
+      ]
+    }
+
     if (b === null) {
       return (
         <Box flexDirection="column">
@@ -245,8 +306,10 @@ export const register: Register = on => {
         </Text>
 
         {lanesOf(b).map(({ lane, runs }) => (
-          <Box flexDirection="column" marginTop={1}>
-            <Text dimColor>{lane.toUpperCase()}</Text>
+          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="subtle" paddingX={1}>
+            <Text bold dimColor>
+              {lane.toUpperCase()}
+            </Text>
             {lane === LOOP_LANE && b.loop !== null && (
               <Box flexDirection="column">
                 <Text>
@@ -262,26 +325,30 @@ export const register: Register = on => {
                 </Text>
               </Box>
             )}
-            {runs.length === 0 && (lane !== LOOP_LANE || b.loop === null) && <Text dimColor>  idle</Text>}
+            {runs.length === 0 && (lane !== LOOP_LANE || b.loop === null) && <Text dimColor>idle</Text>}
             {runs.map(r => (
               <Box flexDirection="column">
-                <Text>
-                  <Text color={r.isAlive ? 'warning' : 'error'}>{r.isAlive ? '●' : '✗'} </Text>
-                  <Text bold>{r.sitting}</Text> {r.slug}
-                  {isLoopLanding(b, r) && <Text dimColor> (loop landing)</Text>}
-                </Text>
-                <Text>
-                  {'  '}
-                  {r.isAlive ? doingOf(r) : 'launcher gone, no finished line'}
-                  <Text dimColor>
-                    {' '}· {elapsed(r.startedMs, b.checkedAt)} · {money(r.cost)}
+                <Box justifyContent="space-between" columnGap={2}>
+                  <Text wrap="truncate-end">
+                    <Text color={r.isAlive ? 'warning' : 'error'}>{r.isAlive ? '●' : '✗'} </Text>
+                    <Text bold>{r.sitting}</Text> {r.slug}
+                    {isLoopLanding(b, r) && <Text dimColor> (loop landing)</Text>}
                   </Text>
-                </Text>
-                {r.note !== '' && (
-                  <Box paddingLeft={2}>
-                    <Text dimColor>{r.note}</Text>
+                  <Text dimColor>
+                    {elapsed(r.startedMs, b.checkedAt)} · {money(r.cost)}
+                  </Text>
+                </Box>
+                {r.isAlive ? (
+                  <Box flexDirection="column" marginTop={1}>
+                    {phaseRows(r, segmentWidth(e.props.bodyColumns, r.phases.length))}
+                    <Text color="warning" wrap="truncate-end">
+                      {phaseLine(r)}
+                    </Text>
                   </Box>
+                ) : (
+                  <Text color="error">launcher gone, no finished line</Text>
                 )}
+                {r.note !== '' && <Text dimColor>{r.note}</Text>}
               </Box>
             ))}
           </Box>
