@@ -52,6 +52,11 @@ export type Ended = {
   lane: string
   isShipped: boolean
   detail: string
+  /** The run's minutes and cost from its outcome's totals, or null when the outcome has none. */
+  minutes: number | null
+  usd: number | null
+  /** Why a run that did not ship stopped: its outcome's sentence. Empty for a ship. */
+  reason: string
   /** When the progress file was last written. */
   endedMs: number
 }

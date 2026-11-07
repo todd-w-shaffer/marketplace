@@ -29,11 +29,12 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   then only the bytes past where it stopped; a file that shrank is read again from the start.
 - **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
   time, cost and last sentence, or `idle`. Below them come the queue with what each
-  entry waits for, and RECENT: the last 10 sittings that finished, newest first, one row each. A row reads like
-  a lane's run: the sitting, its name, its lane (`(fix)`) while the dispatcher still lists it, and how long ago
-  it ended, then `shipped · 3h43m · $26.11 · peak 385k · run 41303865474`. RECENT comes from each sitting's
-  `.progress` file, whose last `finished:` line is its latest outcome, so it survives a dispatcher restart,
-  which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
+  entry waits for, and RECENT: the last 10 sittings that finished, newest first, one ledger row each: a green `●` or a
+  red `✗`, the lane as a small-capital tag (pink epic, teal fix) while the dispatcher still lists the run, the
+  sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
+  the cost, and how long ago it ended (`14m`, `5h`, `3d`). A run that stopped gets its reason on a second line
+  in red. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
+  outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, lowest sitting first:
   `◇ S342 gallery-pass-keeps-stars  epic · minisite/E4 · after S340, S341`. A brief with an `Epic:` header
   line is on the epic lane and one without is on fix; a brief not marked `**Mode: autopilot.**` reads

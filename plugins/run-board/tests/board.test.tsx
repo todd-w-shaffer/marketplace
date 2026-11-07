@@ -2,6 +2,8 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   ago,
+  agoShort,
+  costMeter,
   briefFiles,
   briefHeader,
   briefKey,
@@ -431,6 +433,28 @@ test('recent reads the last finished line of each sitting, newest first, and ski
   expect(recent.map(d => `${d.sitting}:${d.isShipped}${laneTag(d)}:${d.endedMs}`)).toEqual(['S337:true (epic):40', 'S339:false:30'])
   expect(recent[0]?.detail).toBe('shipped · 1h48m · $32.71 · peak 360k · run 41585826609')
   expect(recent[1]?.detail).toBe('stopped: the brief is still in docs/briefs. Read the handoff.')
+  // The ledger row reads the outcome's totals; a stop reads its reason and has none.
+  expect(recent.map(d => [d.minutes, d.usd, d.reason])).toEqual([
+    [108, 32.71, ''],
+    [null, null, 'stopped: the brief is still in docs/briefs. Read the handoff.'],
+  ])
+})
+
+test('a cost meter fills braille cells to scale, then the baseline', async () => {
+  expect(costMeter(32, 32, 6)).toEqual({ fill: '⣿⣿⣿⣿⣿⣿', rest: '' })
+  expect(costMeter(16, 32, 6)).toEqual({ fill: '⣿⣿⣿', rest: '⣀⣀⣀' })
+  // A part cell between full ones steps up through partial fills.
+  expect(costMeter(18, 32, 6)).toEqual({ fill: '⣿⣿⣿⣄', rest: '⣀⣀' })
+  expect(costMeter(0.5, 32, 6)).toEqual({ fill: '⡀', rest: '⣀⣀⣀⣀⣀' })
+  expect(costMeter(0, 32, 6)).toEqual({ fill: '', rest: '⣀⣀⣀⣀⣀⣀' })
+  expect(costMeter(5, 0, 4)).toEqual({ fill: '', rest: '⣀⣀⣀⣀' })
+})
+
+test('a short age reads in minutes, then hours, then days', async () => {
+  const at = Date.parse('2026-11-06T12:00:00Z')
+  expect(agoShort(at - 14 * 60000, at)).toBe('14m')
+  expect(agoShort(at - 5 * 3600000 - 50 * 60000, at)).toBe('5h')
+  expect(agoShort(at - 3 * 86400000, at)).toBe('3d')
 })
 
 test('ago reads in hours and minutes for two days, then in days', async () => {

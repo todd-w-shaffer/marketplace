@@ -569,11 +569,16 @@ export function recentOf(
     if (line === undefined) continue
     const outcome = line.slice('finished: '.length)
     const base = f.name.replace(/\.progress$/, '')
+    const totals = TOTALS.exec(outcome)
+    const isShipped = outcome.startsWith('shipped')
     out.push({
       ...sittingOf(base),
       lane: laneOf.get(base) ?? '',
-      isShipped: outcome.startsWith('shipped'),
+      isShipped,
       detail: outcomeDetail(outcome),
+      minutes: totals === null ? null : Number(totals[2]),
+      usd: totals === null ? null : Number(totals[1]),
+      reason: isShipped ? '' : totals === null ? outcome : outcome.slice(0, totals.index),
       endedMs: f.mtimeMs,
     })
     if (out.length === RECENT_LIMIT) break
@@ -754,6 +759,32 @@ export function localClock(ms: number, utcOffset: string): string {
 /** What the runs and the loop have spent so far. */
 export const inFlight = (b: Board): number =>
   Math.round((b.running.reduce((sum, r) => sum + r.cost, 0) + (b.loop?.cost ?? 0)) * 100) / 100
+
+/** How long ago, in one unit: `14m` under an hour, `5h` under two days, then `3d`. */
+export function agoShort(fromMs: number, toMs: number): string {
+  const minutes = Math.max(0, Math.floor((toMs - fromMs) / 60000))
+  if (minutes < 60) return `${minutes}m`
+  if (minutes < 48 * 60) return `${Math.floor(minutes / 60)}h`
+  return `${Math.floor(minutes / (24 * 60))}d`
+}
+
+// The part cells a cost meter steps through between full ones, emptiest first.
+const METER_PARTS = '⡀⣀⣄⣤⣦⣶⣷'
+
+/**
+ * A cost as a braille meter `width` cells wide, scaled to `max`: full `⣿`
+ * cells, one part cell for the remainder, then the `⣀` baseline. Any cost
+ * above zero shows at least the emptiest part cell.
+ */
+export function costMeter(usd: number, max: number, width: number): { fill: string; rest: string } {
+  if (max <= 0 || usd <= 0) return { fill: '', rest: '⣀'.repeat(width) }
+  const cells = Math.min(width, (usd / max) * width)
+  const full = Math.floor(cells + 1e-9)
+  const rem = cells - full
+  const part = full < width && rem > 1e-9 ? (METER_PARTS[Math.floor(rem * METER_PARTS.length)] ?? '') : ''
+  const fill = '⣿'.repeat(full) + part
+  return { fill, rest: '⣀'.repeat(width - fill.length) }
+}
 
 /** The time between two instants: `2h38m`, or `24m` under an hour. */
 export const elapsed = (fromMs: number, toMs: number): string =>

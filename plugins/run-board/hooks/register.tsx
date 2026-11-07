@@ -5,7 +5,8 @@ import type { Board, Deck, Ended, Loop, Phase, Run } from '../types'
 import {
   LOG_TAIL_BYTES,
   LOOP_LANE,
-  ago,
+  agoShort,
+  costMeter,
   baseName,
   buildBoard,
   briefFiles,
@@ -16,8 +17,8 @@ import {
   dotDigits,
   deckDetail,
   elapsed,
+  hoursMinutes,
   finishedToast,
-  laneTag,
   isLoopLanding,
   lastToolOf,
   ledgerChunk,
@@ -52,6 +53,7 @@ const F = {
   surface1: '#494d64',
   surface0: '#363a4f',
   teal: '#8bd5ca',
+  pink: '#f5bde6',
   sapphire: '#7dc4e4',
   base: '#24273a',
   mantle: '#1e2030',
@@ -73,6 +75,11 @@ const CARD = {
   backgroundColor: F.mantle,
   paddingX: 1,
 } as const
+
+// Each lane's colour, on its recent-row tag.
+const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
+// How many braille cells a recent row's cost meter takes.
+const RECENT_METER_CELLS = 6
 
 const PANE = 'run-board'
 // A name Claude Code does not reserve: `claude plugin validate` warns on one it does.
@@ -390,6 +397,8 @@ export const register: Register = on => {
       { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
       { value: cost.toFixed(2), label: '$ in flight', color: F.text, isZero: cost === 0 },
     ]
+    const recentMax = Math.max(0, ...b.recent.map(d => d.usd ?? 0))
+
     // The second row: spend in whole dollars over the last day, week and
     // month, and in all, from token-ledger.
     const spendTiles: typeof tiles =
@@ -529,21 +538,37 @@ export const register: Register = on => {
         {b.recent.length > 0 && (
           <Box {...CARD}>
             {heading('recent')}
-            {b.recent.map(d => (
-              <Box flexDirection="column">
-                <Text>
-                  <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '✓' : '✗'} </Text>
-                  <Text bold color={F.text}>{d.sitting}</Text>
-                  <Text color={F.subtext0}> {d.slug}</Text>
-                  <Text color={F.overlay2}>
-                    {laneTag(d)} · {ago(d.endedMs, b.checkedAt)}
-                  </Text>
-                </Text>
-                <Box paddingLeft={2}>
-                  <Text color={F.overlay0} wrap="truncate-end">{d.detail}</Text>
+            {b.recent.map(d => {
+              // One row per run: outcome, lane, sitting, then time, a cost meter
+              // scaled to the costliest run listed, the cost and the age.
+              const meter = costMeter(d.usd ?? 0, recentMax, RECENT_METER_CELLS)
+              return (
+                <Box flexDirection="column">
+                  <Box justifyContent="space-between" columnGap={2}>
+                    <Text wrap="truncate-end">
+                      <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '●' : '✗'} </Text>
+                      <Text color={LANE_COLOR[d.lane] ?? F.surface2}>{smallCaps(d.lane).padEnd(5)}</Text>
+                      <Text bold color={F.text}>{d.sitting}</Text>
+                      <Text color={F.subtext0}> {d.slug}</Text>
+                    </Text>
+                    <Text>
+                      <Text color={F.overlay2}>{(d.minutes === null ? '—' : hoursMinutes(d.minutes)).padStart(5)}  </Text>
+                      <Text color={F.peach}>{meter.fill}</Text>
+                      <Text color={F.surface1}>{meter.rest}</Text>
+                      <Text color={F.text}> {(d.usd === null ? '—' : money(d.usd)).padStart(7)}</Text>
+                      <Text color={F.overlay0}> {agoShort(d.endedMs, b.checkedAt).padStart(3)}</Text>
+                    </Text>
+                  </Box>
+                  {!d.isShipped && d.reason !== '' && (
+                    <Box paddingLeft={2}>
+                      <Text color={F.red} wrap="truncate-end">
+                        {d.reason}
+                      </Text>
+                    </Box>
+                  )}
                 </Box>
-              </Box>
-            ))}
+              )
+            })}
           </Box>
         )}
       </Box>
