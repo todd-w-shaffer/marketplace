@@ -76,7 +76,7 @@ const CARD = {
   paddingX: 1,
 } as const
 
-// Each lane's colour, on its recent-row tag.
+// Each lane's colour, on its card's pill and its recent-row tags.
 const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 // How many braille cells a recent row's cost meter takes.
 const RECENT_METER_CELLS = 6
@@ -338,7 +338,7 @@ export const register: Register = on => {
 
     // A lane's name as a pill on the raised surface.
     const pill = (name: string) => (
-      <Text backgroundColor={F.surface0} color={F.lavender}>
+      <Text backgroundColor={F.surface0} color={LANE_COLOR[name] ?? F.lavender}>
         {` ${name} `}
       </Text>
     )
