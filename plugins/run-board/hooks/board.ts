@@ -618,22 +618,23 @@ export function outcomeDetail(outcome: string): string {
   return parts.join(' · ')
 }
 
-// The dot font for the header's figures: each glyph 3 dots wide and 5 tall,
+// The dot font for the header's figures: each glyph 3 dots wide and 7 tall,
 // drawn on braille cells 2 dots wide and 4 tall, so a digit and its gap take
-// two cells and a figure takes two rows.
+// two cells, and a figure fills two rows with one blank dot row under it.
 const DOT_FONT: Record<string, readonly string[]> = {
-  '0': ['111', '101', '101', '101', '111'],
-  '1': ['010', '110', '010', '010', '111'],
-  '2': ['111', '001', '111', '100', '111'],
-  '3': ['111', '001', '111', '001', '111'],
-  '4': ['101', '101', '111', '001', '001'],
-  '5': ['111', '100', '111', '001', '111'],
-  '6': ['111', '100', '111', '101', '111'],
-  '7': ['111', '001', '001', '001', '001'],
-  '8': ['111', '101', '111', '101', '111'],
-  '9': ['111', '101', '111', '001', '111'],
-  '.': ['0', '0', '0', '0', '1'],
+  '0': ['111', '101', '101', '101', '101', '101', '111'],
+  '1': ['010', '110', '010', '010', '010', '010', '111'],
+  '2': ['111', '001', '001', '111', '100', '100', '111'],
+  '3': ['111', '001', '001', '111', '001', '001', '111'],
+  '4': ['101', '101', '101', '111', '001', '001', '001'],
+  '5': ['111', '100', '100', '111', '001', '001', '111'],
+  '6': ['111', '100', '100', '111', '101', '101', '111'],
+  '7': ['111', '001', '001', '001', '001', '001', '001'],
+  '8': ['111', '101', '101', '111', '101', '101', '111'],
+  '9': ['111', '101', '101', '111', '001', '001', '111'],
+  '.': ['0', '0', '0', '0', '0', '0', '1'],
 }
+const DOT_HEIGHT = 7
 
 // The braille bit for the dot at column x (0-1) and row y (0-3) of a cell.
 const DOT_BIT = [
@@ -643,18 +644,18 @@ const DOT_BIT = [
 
 /**
  * A figure as dot-matrix numerals, two rows of braille: each glyph of
- * DOT_FONT with one blank dot column after it, set one dot below the top
- * row. A character the font lacks draws as one blank cell.
+ * DOT_FONT with one blank dot column after it, from the top dot row down.
+ * A character the font lacks draws as one blank cell.
  */
 export function dotDigits(text: string): [string, string] {
   const columns: boolean[][] = []
   for (const ch of text) {
-    const glyph = DOT_FONT[ch] ?? ['0', '0', '0', '0', '0']
+    const glyph = DOT_FONT[ch] ?? new Array<string>(DOT_HEIGHT).fill('0')
     for (let x = 0; x < (glyph[0] ?? '').length; x++) columns.push(glyph.map(row => row[x] === '1'))
-    columns.push([false, false, false, false, false])
+    columns.push(new Array<boolean>(DOT_HEIGHT).fill(false))
   }
-  if (columns.length % 2 === 1) columns.push([false, false, false, false, false])
-  const lit = (x: number, y: number): boolean => y >= 1 && y <= 5 && (columns[x]?.[y - 1] ?? false)
+  if (columns.length % 2 === 1) columns.push(new Array<boolean>(DOT_HEIGHT).fill(false))
+  const lit = (x: number, y: number): boolean => y < DOT_HEIGHT && (columns[x]?.[y] ?? false)
   const rows: [string, string] = ['', '']
   for (let cell = 0; cell < columns.length / 2; cell++) {
     for (const band of [0, 1] as const) {

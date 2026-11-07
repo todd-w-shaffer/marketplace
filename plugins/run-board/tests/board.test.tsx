@@ -270,10 +270,11 @@ test('the cost in flight adds every run and the loop', async () => {
   expect(b.clock).toBe('11:49 AM')
 })
 
-test('figures draw as 3-by-5 dot numerals, two braille rows tall', async () => {
-  expect(dotDigits('10')).toEqual(['⢴⠀⡖⡆', '⠚⠂⠓⠃'])
-  expect(dotDigits('3.5')).toEqual(['⣒⡆⠀⣖⡂', '⠒⠃⠂⠒⠃'])
-  expect(dotDigits('0')).toEqual(['⡖⡆', '⠓⠃'])
+test('figures draw as 3-by-7 dot numerals, two braille rows tall', async () => {
+  expect(dotDigits('10')).toEqual(['⢺⠀⡏⡇', '⠼⠄⠧⠇'])
+  expect(dotDigits('3.5')).toEqual(['⣉⡇⠀⣏⡁', '⠤⠇⠄⠤⠇'])
+  expect(dotDigits('0')).toEqual(['⡏⡇', '⠧⠇'])
+  expect(dotDigits('7')).toEqual(['⠉⡇', '⠀⠇'])
   // A character the font lacks draws as a blank cell, never a wrong glyph.
   expect(dotDigits('7x')).toEqual([dotDigits('7')[0] + '⠀', dotDigits('7')[1] + '⠀'])
 })
