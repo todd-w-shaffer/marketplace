@@ -55,6 +55,16 @@ const F = {
   red: '#ed8796',
 } as const
 
+// Every section of the pane sits in one of these: a lane, the queue, on deck, recent.
+const CARD = {
+  flexDirection: 'column',
+  marginTop: 1,
+  borderStyle: 'round',
+  borderColor: F.surface2,
+  backgroundColor: F.mantle,
+  paddingX: 1,
+} as const
+
 const PANE = 'run-board'
 // A name Claude Code does not reserve: `claude plugin validate` warns on one it does.
 const COMMAND = 'board'
@@ -328,7 +338,7 @@ export const register: Register = on => {
         </Text>
 
         {lanesOf(b).map(({ lane, runs }) => (
-          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={F.surface2} backgroundColor={F.mantle} paddingX={1}>
+          <Box {...CARD}>
             <Text bold color={F.lavender}>
               {lane.toUpperCase()}
             </Text>
@@ -377,7 +387,7 @@ export const register: Register = on => {
         ))}
 
         {b.queued.length > 0 && (
-          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={F.surface2} backgroundColor={F.mantle} paddingX={1}>
+          <Box {...CARD}>
             <Text bold color={F.lavender}>QUEUED</Text>
             {b.queued.map(q => (
               <Text>
@@ -392,7 +402,7 @@ export const register: Register = on => {
         )}
 
         {b.onDeck.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
+          <Box {...CARD}>
             <Text bold color={F.lavender}>ON DECK</Text>
             {b.onDeck.map(d => (
               <Text>
@@ -407,7 +417,7 @@ export const register: Register = on => {
         )}
 
         {b.recent.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
+          <Box {...CARD}>
             <Text bold color={F.lavender}>RECENT</Text>
             {b.recent.map(d => (
               <Box flexDirection="column">
