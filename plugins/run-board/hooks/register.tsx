@@ -13,16 +13,24 @@ import {
   briefKey,
   cycleBlobs,
   cycleCount,
+  dotDigits,
   deckDetail,
   elapsed,
   finishedToast,
   laneTag,
   isLoopLanding,
   lastToolOf,
+  ledgerSpends,
   livePhase,
   miniBar,
+  phaseGlyphs,
   phaseLine,
   segmentWidth,
+  sparkCells,
+  spendBuckets,
+  spendColor,
+  SPEND_WARN_PER_HOUR,
+  weekSpend,
   inFlight,
   money,
   newestRunDir,
@@ -33,7 +41,7 @@ import {
   recentOf,
   statusLine,
 } from './board'
-import type { LoopFile, RawStatus } from './board'
+import type { LoopFile, RawStatus, Spend } from './board'
 
 // Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
 // paints comes from here, the pane's own ground included, so the pane reads
@@ -45,6 +53,7 @@ const F = {
   overlay0: '#6e738d',
   surface2: '#5b6078',
   surface1: '#494d64',
+  surface0: '#363a4f',
   base: '#24273a',
   mantle: '#1e2030',
   lavender: '#b7bdf8',
@@ -82,7 +91,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-8' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-9' })
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -128,6 +137,36 @@ async function readLastTool($: EngineInterface, log: string): Promise<string> {
     .run(['tail', '-c', String(LOG_TAIL_BYTES), log], { timeoutMs: 5000 })
     .catch(() => ({ exitCode: 1, stdout: '' }))
   return tail.exitCode === 0 ? lastToolOf(tail.stdout) : ''
+}
+
+// token-ledger's record of what each /commit and /ship cost, under $HOME.
+const LEDGER = '.claude/token-ledger.jsonl'
+// How much of the ledger's end the board reads: a week of records took about
+// 1.1 MB in November 2026, and `$.process.run` keeps 4 MiB of output.
+const LEDGER_TAIL_BYTES = 3 * 1024 * 1024
+// The sparkline: half-hour buckets over the last 24 hours, two to a cell.
+const SPARK_BUCKETS = 48
+const SPARK_BUCKET_MS = 30 * 60 * 1000
+
+// The ledger's spends, kept while its size holds: it only grows, by a line
+// per /commit and /ship.
+let ledgerCache: { size: number; spends: Spend[] } | null = null
+
+/** The last 24 hours of spend in half-hour buckets, and the week's total, from token-ledger. */
+async function readSpend($: EngineInterface, home: string, now: number): Promise<Board['spend']> {
+  const path = `${home}/${LEDGER}`
+  const stat = await $.process.run(['stat', '-f', '%z', path], { timeoutMs: 5000 })
+  const size = Number(stat.stdout.trim())
+  if (stat.exitCode !== 0 || !Number.isFinite(size)) return null
+  if (ledgerCache === null || ledgerCache.size !== size) {
+    const tail = await $.process.run(['tail', '-c', String(LEDGER_TAIL_BYTES), path], { timeoutMs: 5000 })
+    if (tail.exitCode !== 0) return null
+    ledgerCache = { size, spends: ledgerSpends(tail.stdout) }
+  }
+  return {
+    buckets: spendBuckets(ledgerCache.spends, now, SPARK_BUCKETS, SPARK_BUCKET_MS),
+    week: weekSpend(ledgerCache.spends, now),
+  }
 }
 
 // Progress files read for RECENT, by name, kept while their mtime holds.
@@ -231,7 +270,9 @@ async function poll($: EngineInterface): Promise<void> {
   const recent = await readRecent($, dir, raw).catch(() => [])
   const offset = await $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' }))
   const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
-  const next = buildBoard(raw, progress, alive, await $.clock.now(), { loop, recent, onDeck, tools, cycles, utcOffset })
+  const now = await $.clock.now()
+  const spend = await readSpend($, home, now).catch(() => null)
+  const next = buildBoard(raw, progress, alive, now, { loop, recent, onDeck, tools, cycles, utcOffset, spend })
 
   await update($, board, () => next)
 
@@ -287,19 +328,33 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const b: Board | null = await read($, board)
 
-    // The bar and its labels: one block per phase, green when done, amber in
-    // flight, dim to come, with `┊` where session 2 takes over.
+    // A lane's name as a pill on the raised surface.
+    const pill = (name: string) => (
+      <Text backgroundColor={F.surface0} color={F.lavender}>
+        {` ${name} `}
+      </Text>
+    )
+    const heading = (name: string) => (
+      <Text bold color={F.lavender}>
+        {name}
+      </Text>
+    )
+
+    // The bar and its labels: one braille block per phase, green when done,
+    // peach and tapering in flight, a grey baseline to come; `⋮` where
+    // session 2 takes over and a `⡇` cap at the end.
     const phaseRows = (r: Run, width: number) => {
       const cut = r.phases.findIndex(p => p.label === 'simplify')
-      const color = (p: Phase): string => (p.state === 'done' ? F.green : p.state === 'live' ? F.peach : F.surface1)
-      const labelColor = (p: Phase): string => (p.state === 'done' ? F.subtext0 : p.state === 'live' ? F.peach : F.surface2)
-      const glyph = (p: Phase): string => (p.state === 'done' ? '█' : p.state === 'live' ? '▓' : '░')
+      const last = r.phases.length - 1
+      const color = (p: Phase): string => (p.state === 'done' ? F.green : p.state === 'live' ? F.peach : F.surface2)
+      const labelColor = (p: Phase): string => (p.state === 'done' ? F.overlay2 : p.state === 'live' ? F.peach : F.surface2)
       return [
         <Text>
           {r.phases.map((p, i) => (
             <Text>
-              {i === cut && <Text color={F.overlay0}>┊ </Text>}
-              <Text color={color(p)}>{glyph(p).repeat(width - 1)}</Text>{' '}
+              {i === cut && <Text color={F.overlay0}>⋮ </Text>}
+              <Text color={color(p)}>{phaseGlyphs(p.state, width - 1)}</Text>
+              {i === last ? <Text color={F.overlay0}>⡇</Text> : ' '}
             </Text>
           ))}
         </Text>,
@@ -319,89 +374,125 @@ export const register: Register = on => {
     if (b === null) {
       return (
         <Box flexDirection="column">
-          <Text color={F.overlay2}>No autopilot status yet.</Text>
-          <Text color={F.overlay2}>Looking for ~/{LOG_DIR}/status.json</Text>
+          <Text color={F.overlay2}>no autopilot status yet</Text>
+          <Text color={F.overlay0}>looking for ~/{LOG_DIR}/status.json</Text>
         </Box>
       )
     }
 
-    // The header's four figures, each in the colour its section uses below; a
-    // zero fades to the to-come grey.
+    // The header's four figures as dot numerals, each in the colour its
+    // section uses below; a zero fades to the to-come grey.
+    const cost = inFlight(b)
     const tiles: { value: string; label: string; color: string; isZero: boolean }[] = [
       { value: String(b.running.length), label: 'running', color: F.peach, isZero: b.running.length === 0 },
       { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
       { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
-      { value: money(inFlight(b)), label: 'in flight', color: F.text, isZero: inFlight(b) === 0 },
+      { value: cost.toFixed(2), label: '$ in flight', color: F.text, isZero: cost === 0 },
     ]
+    const spark =
+      b.spend === null
+        ? null
+        : sparkCells(b.spend.buckets, Math.max(SPEND_WARN_PER_HOUR / 2, ...b.spend.buckets))
+    // A bucket is half an hour, so its spend doubled is the hourly rate.
+    const sparkRow = (cells: { ch: string; value: number }[]) => cells.map(c => <Text color={spendColor(c.value * 2)}>{c.ch}</Text>)
 
     return (
       <Box flexDirection="column">
         <Box {...CARD} marginTop={0}>
           <Box justifyContent="space-between" columnGap={2}>
-            <Text bold color={F.lavender}>
-              AUTOPILOT
-            </Text>
+            {heading('autopilot')}
             <Text color={b.isDispatcherLive ? F.green : F.yellow}>
-              ● {b.isDispatcherLive ? 'dispatcher live' : 'no dispatcher running'}
-              <Text color={F.overlay2}> · {b.clock}</Text>
+              ● {b.isDispatcherLive ? 'live' : 'no dispatcher'}
+              <Text color={F.overlay0}> │ </Text>
+              <Text color={F.overlay2}>{b.clock}</Text>
             </Text>
           </Box>
           <Box marginTop={1} justifyContent="space-between" columnGap={2}>
-            {tiles.map(t => (
-              <Box flexDirection="column">
-                <Text bold color={t.isZero ? F.surface2 : t.color}>
-                  {t.value}
-                </Text>
-                <Text color={t.isZero ? F.surface2 : F.overlay2}>{t.label}</Text>
-              </Box>
-            ))}
+            {tiles.map(t => {
+              const [top, bottom] = dotDigits(t.value)
+              const tone = t.isZero ? F.surface2 : t.color
+              return (
+                <Box flexDirection="column">
+                  <Text color={tone}>{top}</Text>
+                  <Text color={tone}>{bottom}</Text>
+                  <Text color={t.isZero ? F.surface2 : F.overlay2}>{t.label}</Text>
+                </Box>
+              )
+            })}
           </Box>
+          {spark !== null && b.spend !== null && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text>
+                {sparkRow(spark.top)}
+                <Text bold color={F.text}>
+                  {'  '}
+                  {money(b.spend.week)}
+                </Text>
+              </Text>
+              <Text>
+                {sparkRow(spark.bottom)}
+                <Text color={F.overlay2}>{'  '}week</Text>
+              </Text>
+              <Text color={F.overlay0}>spend per hour · last 24h</Text>
+            </Box>
+          )}
         </Box>
 
         {lanesOf(b).map(({ lane, runs }) => (
           <Box {...CARD}>
-            <Text bold color={F.lavender}>
-              {lane.toUpperCase()}
-            </Text>
             {lane === LOOP_LANE && b.loop !== null && (
-              <Box flexDirection="column">
-                <Text>
-                  <Text color={F.mauve}>◐ </Text>
-                  <Text bold color={F.text}>loop</Text> {b.loop.name}
+              <Box justifyContent="space-between" columnGap={2}>
+                <Text wrap="truncate-end">
+                  {pill(lane)}
+                  <Text color={F.mauve}>{'  '}◐ </Text>
+                  <Text bold color={F.text}>loop</Text>
+                  <Text color={F.subtext0}> {b.loop.name}</Text>
+                  <Text color={F.overlay2}> · {b.loop.stage}</Text>
                 </Text>
-                <Text>
-                  {'  '}
-                  {b.loop.stage}
-                  <Text color={F.overlay2}>
-                    {' '}· {elapsed(b.loop.startedMs, b.checkedAt)} · {money(b.loop.cost)}
-                  </Text>
+                <Text color={F.overlay2}>
+                  {elapsed(b.loop.startedMs, b.checkedAt)}
+                  <Text color={F.overlay0}> │ </Text>
+                  <Text color={F.text}>{money(b.loop.cost)}</Text>
                 </Text>
               </Box>
             )}
-            {runs.length === 0 && (lane !== LOOP_LANE || b.loop === null) && <Text color={F.overlay2}>idle</Text>}
+            {runs.length === 0 && (lane !== LOOP_LANE || b.loop === null) && (
+              <Text>
+                {pill(lane)}
+                <Text color={F.overlay0}>{'  '}idle</Text>
+              </Text>
+            )}
             {runs.map(r => (
               <Box flexDirection="column">
                 <Box justifyContent="space-between" columnGap={2}>
                   <Text wrap="truncate-end">
-                    <Text color={r.isAlive ? F.peach : F.red}>{r.isAlive ? '●' : '✗'} </Text>
-                    <Text bold color={F.text}>{r.sitting}</Text> {r.slug}
+                    {pill(lane)}
+                    {'  '}
+                    {!r.isAlive && <Text color={F.red}>✗ </Text>}
+                    <Text bold color={F.text}>{r.sitting}</Text>
+                    <Text color={F.subtext0}> {r.slug}</Text>
                     {isLoopLanding(b, r) && <Text color={F.overlay2}> (loop landing)</Text>}
                   </Text>
                   <Text color={F.overlay2}>
-                    {elapsed(r.startedMs, b.checkedAt)} · {money(r.cost)}
+                    {elapsed(r.startedMs, b.checkedAt)}
+                    <Text color={F.overlay0}> │ </Text>
+                    <Text color={F.text}>{money(r.cost)}</Text>
                   </Text>
                 </Box>
                 {r.isAlive ? (
                   <Box flexDirection="column" marginTop={1}>
                     {phaseRows(r, segmentWidth(e.props.bodyColumns, r.phases.length))}
-                    <Text color={F.peach} wrap="truncate-end">
-                      {phaseLine(r)}
+                    <Text wrap="truncate-end">
+                      <Text color={F.peach}>{phaseLine(r).split(' · ')[0]}</Text>
+                      <Text color={F.overlay2}>
+                        {phaseLine(r).includes(' · ') ? ` · ${phaseLine(r).split(' · ').slice(1).join(' · ')}` : ''}
+                      </Text>
                     </Text>
                   </Box>
                 ) : (
                   <Text color={F.red}>launcher gone, no finished line</Text>
                 )}
-                {r.note !== '' && <Text color={F.overlay2}>{r.note}</Text>}
+                {r.note !== '' && <Text color={F.overlay0}>{r.note}</Text>}
               </Box>
             ))}
           </Box>
@@ -409,11 +500,12 @@ export const register: Register = on => {
 
         {b.queued.length > 0 && (
           <Box {...CARD}>
-            <Text bold color={F.lavender}>QUEUED</Text>
+            {heading('queued')}
             {b.queued.map(q => (
               <Text>
                 <Text color={F.blue}>○ </Text>
-                <Text bold color={F.text}>{q.sitting}</Text> {q.slug}
+                <Text bold color={F.text}>{q.sitting}</Text>
+                <Text color={F.subtext0}> {q.slug}</Text>
                 <Text color={F.overlay2}>
                   {'  '}{q.lane}{q.reason !== '' ? ` · waits for ${q.reason}` : ''}
                 </Text>
@@ -424,11 +516,12 @@ export const register: Register = on => {
 
         {b.onDeck.length > 0 && (
           <Box {...CARD}>
-            <Text bold color={F.lavender}>ON DECK</Text>
+            {heading('on deck')}
             {b.onDeck.map(d => (
               <Text>
                 <Text color={F.mauve}>◇ </Text>
-                <Text bold color={F.text}>{d.sitting}</Text> {d.slug}
+                <Text bold color={F.text}>{d.sitting}</Text>
+                <Text color={F.subtext0}> {d.slug}</Text>
                 <Text color={F.overlay2}>
                   {'  '}{deckDetail(d)}
                 </Text>
@@ -439,18 +532,19 @@ export const register: Register = on => {
 
         {b.recent.length > 0 && (
           <Box {...CARD}>
-            <Text bold color={F.lavender}>RECENT</Text>
+            {heading('recent')}
             {b.recent.map(d => (
               <Box flexDirection="column">
                 <Text>
                   <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '✓' : '✗'} </Text>
-                  <Text bold color={F.text}>{d.sitting}</Text> {d.slug}
+                  <Text bold color={F.text}>{d.sitting}</Text>
+                  <Text color={F.subtext0}> {d.slug}</Text>
                   <Text color={F.overlay2}>
                     {laneTag(d)} · {ago(d.endedMs, b.checkedAt)}
                   </Text>
                 </Text>
                 <Box paddingLeft={2}>
-                  <Text color={F.overlay2} wrap="truncate-end">{d.detail}</Text>
+                  <Text color={F.overlay0} wrap="truncate-end">{d.detail}</Text>
                 </Box>
               </Box>
             ))}

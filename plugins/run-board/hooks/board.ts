@@ -254,9 +254,27 @@ export function phaseLine(r: Run): string {
   return parts.join(' · ')
 }
 
-/** One character per phase for the hint line: `█` done, `▓` in flight, `░` to come. */
+/** One braille cell per phase for the hint line, `⣿` done, `⣤` in flight, `⣀` to come, then a `⡇` cap. */
 export const miniBar = (phases: readonly Phase[]): string =>
-  phases.map(p => (p.state === 'done' ? '█' : p.state === 'live' ? '▓' : '░')).join('')
+  `${phases.map(p => (p.state === 'done' ? '⣿' : p.state === 'live' ? '⣤' : '⣀')).join('')}⡇`
+
+// A block in flight tapers from full to the baseline, so it reads as filling.
+const LIVE_TAPER = '⣿⣿⣷⣦⣤⣀'
+
+/**
+ * A phase's block in the pane's bar, `width` cells of braille: full when
+ * done, tapering when in flight, the `⣀` baseline when still to come.
+ */
+export function phaseGlyphs(state: PhaseState, width: number): string {
+  if (state === 'done') return '⣿'.repeat(width)
+  if (state === 'todo') return '⣀'.repeat(width)
+  if (width >= LIVE_TAPER.length) return LIVE_TAPER + '⣀'.repeat(width - LIVE_TAPER.length)
+  // A narrow block samples the taper without its baseline end, so it never
+  // ends on the dot a phase still to come draws.
+  const core = LIVE_TAPER.slice(0, -1)
+  const step = (core.length - 1) / Math.max(1, width - 1)
+  return Array.from({ length: width }, (_, i) => core[Math.round(i * step)] ?? '⣤').join('')
+}
 
 /**
  * Columns per bar block in a pane `bodyColumns` wide: the card's border and
@@ -373,9 +391,11 @@ export function buildBoard(
     cycles?: Readonly<Record<string, number>>
     /** The machine's UTC offset as `date +%z` prints it, `-0500`. */
     utcOffset?: string
+    /** Spend from token-ledger, or null when it could not be read. */
+    spend?: Board['spend']
   } = {},
 ): Board {
-  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {}, utcOffset = '' } = extra
+  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {}, utcOffset = '', spend = null } = extra
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { note, cost } = noteOf(text)
@@ -410,6 +430,7 @@ export function buildBoard(
   return {
     checkedAt: now,
     clock: localClock(now, utcOffset),
+    spend,
     isDispatcherLive: raw.dispatcher !== null && alive.has(raw.dispatcher),
     loop,
     running,
@@ -597,6 +618,174 @@ export function outcomeDetail(outcome: string): string {
   return parts.join(' · ')
 }
 
+// The dot font for the header's figures: each glyph 3 dots wide and 5 tall,
+// drawn on braille cells 2 dots wide and 4 tall, so a digit and its gap take
+// two cells and a figure takes two rows.
+const DOT_FONT: Record<string, readonly string[]> = {
+  '0': ['111', '101', '101', '101', '111'],
+  '1': ['010', '110', '010', '010', '111'],
+  '2': ['111', '001', '111', '100', '111'],
+  '3': ['111', '001', '111', '001', '111'],
+  '4': ['101', '101', '111', '001', '001'],
+  '5': ['111', '100', '111', '001', '111'],
+  '6': ['111', '100', '111', '101', '111'],
+  '7': ['111', '001', '001', '001', '001'],
+  '8': ['111', '101', '111', '101', '111'],
+  '9': ['111', '101', '111', '001', '111'],
+  '.': ['0', '0', '0', '0', '1'],
+}
+
+// The braille bit for the dot at column x (0-1) and row y (0-3) of a cell.
+const DOT_BIT = [
+  [0x01, 0x02, 0x04, 0x40],
+  [0x08, 0x10, 0x20, 0x80],
+] as const
+
+/**
+ * A figure as dot-matrix numerals, two rows of braille: each glyph of
+ * DOT_FONT with one blank dot column after it, set one dot below the top
+ * row. A character the font lacks draws as one blank cell.
+ */
+export function dotDigits(text: string): [string, string] {
+  const columns: boolean[][] = []
+  for (const ch of text) {
+    const glyph = DOT_FONT[ch] ?? ['0', '0', '0', '0', '0']
+    for (let x = 0; x < (glyph[0] ?? '').length; x++) columns.push(glyph.map(row => row[x] === '1'))
+    columns.push([false, false, false, false, false])
+  }
+  if (columns.length % 2 === 1) columns.push([false, false, false, false, false])
+  const lit = (x: number, y: number): boolean => y >= 1 && y <= 5 && (columns[x]?.[y - 1] ?? false)
+  const rows: [string, string] = ['', '']
+  for (let cell = 0; cell < columns.length / 2; cell++) {
+    for (const band of [0, 1] as const) {
+      let bits = 0
+      for (const dx of [0, 1] as const)
+        for (let dy = 0; dy < 4; dy++) if (lit(cell * 2 + dx, band * 4 + dy)) bits |= DOT_BIT[dx][dy] ?? 0
+      rows[band] += String.fromCodePoint(0x2800 | bits)
+    }
+  }
+  return rows
+}
+
+/** Spend over a span: a commit's cost over its window, or a ship's overhead over its own. */
+export type Spend = { startMs: number; endMs: number; usd: number }
+
+/**
+ * The spends in token-ledger's JSON lines: each commit's `cost.usd` and each
+ * ship's `overhead.usd`, over the record's window, or at its instant when it
+ * has none. A line that does not parse, or has no cost, is skipped: the read
+ * starts mid-file, so its first line is often cut.
+ */
+export function ledgerSpends(text: string): Spend[] {
+  const out: Spend[] = []
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('{')) continue
+    let rec: unknown
+    try {
+      rec = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (typeof rec !== 'object' || rec === null) continue
+    const r = rec as { kind?: unknown; ts?: unknown; window?: { start?: unknown }; cost?: { usd?: unknown }; overhead?: { usd?: unknown } }
+    const usd = r.kind === 'commit' ? r.cost?.usd : r.kind === 'ship' ? r.overhead?.usd : undefined
+    const endMs = typeof r.ts === 'string' ? Date.parse(r.ts) : NaN
+    if (typeof usd !== 'number' || !Number.isFinite(usd) || !Number.isFinite(endMs)) continue
+    const start = typeof r.window?.start === 'string' ? Date.parse(r.window.start) : NaN
+    out.push({ startMs: Number.isFinite(start) && start < endMs ? start : endMs, endMs, usd })
+  }
+  return out
+}
+
+/**
+ * Spend in `count` buckets of `bucketMs` ending at `now`, oldest first. A
+ * spend spreads over its window in proportion to time, so a long commit does
+ * not land as one spike at the moment it was recorded.
+ */
+export function spendBuckets(spends: readonly Spend[], now: number, count: number, bucketMs: number): number[] {
+  const out = new Array<number>(count).fill(0)
+  const from = now - count * bucketMs
+  for (const s of spends) {
+    if (s.endMs <= from || s.startMs >= now) continue
+    const span = s.endMs - s.startMs
+    if (span <= 0) {
+      const i = Math.floor((s.endMs - from) / bucketMs)
+      out[Math.min(count - 1, i)] = (out[Math.min(count - 1, i)] ?? 0) + s.usd
+      continue
+    }
+    for (let i = Math.max(0, Math.floor((s.startMs - from) / bucketMs)); i < count; i++) {
+      const lo = Math.max(s.startMs, from + i * bucketMs)
+      const hi = Math.min(s.endMs, from + (i + 1) * bucketMs)
+      if (hi <= lo) {
+        if (lo >= s.endMs) break
+        continue
+      }
+      out[i] = (out[i] ?? 0) + (s.usd * (hi - lo)) / span
+    }
+  }
+  return out.map(v => Math.round(v * 100) / 100)
+}
+
+/** What the spends recorded in the seven days before `now` came to. */
+export const weekSpend = (spends: readonly Spend[], now: number): number =>
+  Math.round(spends.filter(s => s.endMs > now - 7 * 86400000 && s.endMs <= now).reduce((sum, s) => sum + s.usd, 0) * 100) / 100
+
+/** One cell of a two-row sparkline: its braille character and the larger of its two samples. */
+export type SparkCell = { ch: string; value: number }
+
+// Bits for a sample's height in one cell, bottom up: 0 to 4 dots in a column.
+const LEFT_BITS = [0x00, 0x40, 0x44, 0x46, 0x47] as const
+const RIGHT_BITS = [0x00, 0x80, 0xa0, 0xb0, 0xb8] as const
+
+/**
+ * A two-row sparkline, as thermo draws one: two samples per cell, eight dot
+ * levels over the two rows, scaled to `peak`. A sample under 2% of the peak
+ * draws nothing, so a quiet stretch reads as empty.
+ */
+export function sparkCells(values: readonly number[], peak: number): { top: SparkCell[]; bottom: SparkCell[] } {
+  const level = (v: number): number =>
+    peak <= 0 || v <= 0 || v < peak * 0.02 ? 0 : Math.max(1, Math.min(8, Math.floor((v / peak) * 8)))
+  const top: SparkCell[] = []
+  const bottom: SparkCell[] = []
+  for (let i = 0; i < values.length; i += 2) {
+    const a = values[i] ?? 0
+    const b = values[i + 1] ?? 0
+    const la = level(a)
+    const lb = level(b)
+    const low = (LEFT_BITS[Math.min(la, 4)] ?? 0) | (RIGHT_BITS[Math.min(lb, 4)] ?? 0)
+    const high = (LEFT_BITS[Math.max(0, la - 4)] ?? 0) | (RIGHT_BITS[Math.max(0, lb - 4)] ?? 0)
+    const value = Math.max(a, b)
+    bottom.push({ ch: String.fromCodePoint(0x2800 | low), value })
+    top.push({ ch: String.fromCodePoint(0x2800 | high), value })
+  }
+  return { top, bottom }
+}
+
+// Spend per hour where the sparkline turns yellow, and where it turns red.
+// Measured on the ledger's week to 2026-11-06: half the hours that spent
+// anything spent under $12, nine in ten under $31, the busiest $70.
+export const SPEND_WARN_PER_HOUR = 20
+export const SPEND_CRIT_PER_HOUR = 40
+
+// Macchiato's sapphire, yellow and red: the thermo severity stops.
+const SPEND_STOPS = ['#7dc4e4', '#eed49f', '#ed8796'] as const
+
+const blend = (a: string, b: string, t: number): string => {
+  const ch = (hex: string, i: number): number => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16)
+  return `#${[0, 1, 2]
+    .map(i => Math.round(ch(a, i) + (ch(b, i) - ch(a, i)) * t).toString(16).padStart(2, '0'))
+    .join('')}`
+}
+
+/** A spend rate's colour: sapphire to yellow up to the warn rate, yellow to red up to the critical one, red past it. */
+export function spendColor(perHour: number): string {
+  const [cool, warm, hot] = SPEND_STOPS
+  if (perHour >= SPEND_CRIT_PER_HOUR) return hot
+  if (perHour >= SPEND_WARN_PER_HOUR)
+    return blend(warm, hot, (perHour - SPEND_WARN_PER_HOUR) / (SPEND_CRIT_PER_HOUR - SPEND_WARN_PER_HOUR))
+  return blend(cool, warm, Math.max(0, perHour) / SPEND_WARN_PER_HOUR)
+}
+
 /**
  * An instant as a 12-hour clock in the offset `date +%z` prints: `7:41 PM`
  * at `-0500`. The engine gives a mod no time zone, so the poll reads the
@@ -651,17 +840,17 @@ export function statusLine(b: Board): string | undefined {
   if (b.running.length === 0 && b.queued.length === 0 && b.loop === null) return undefined
   const parts = lanesOf(b).flatMap(({ lane, runs }) =>
     runs.length === 0
-      ? [lane === LOOP_LANE && b.loop !== null ? loopPart(b.loop, b.checkedAt) : `${lane} lane idle`]
+      ? [lane === LOOP_LANE && b.loop !== null ? loopPart(b.loop, b.checkedAt) : `${lane} idle`]
       : runs.map(r =>
           r.isAlive
             ? `● ${r.sitting} ${miniBar(r.phases)} ${livePhase(r.phases)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
             : `✗ ${r.sitting} launcher gone`,
         ),
   )
-  if (b.queued.length > 0) parts.push(`○ ${b.queued.length} queued`)
+  if (b.queued.length > 0) parts.push(`○ ${b.queued.length}`)
   const cost = inFlight(b)
-  if (cost > 0) parts.push(`${money(cost)} in flight`)
-  return parts.join(' · ')
+  if (cost > 0) parts.push(money(cost))
+  return parts.join(' │ ')
 }
 
 /** A finished run's lane as a tag, ` (fix)`, or nothing when the dispatcher wrote none. */

@@ -7,6 +7,7 @@ import {
   briefKey,
   cycleBlobs,
   cycleCount,
+  dotDigits,
   buildBoard,
   buildLoop,
   deckDetail,
@@ -14,6 +15,7 @@ import {
   laneTag,
   lanesOf,
   lastToolOf,
+  ledgerSpends,
   inFlight,
   localClock,
   loopCostOf,
@@ -21,12 +23,17 @@ import {
   newestRunDir,
   onDeckOf,
   outcomeDetail,
+  phaseGlyphs,
   phaseLine,
   phasesOf,
   parseStatus,
   recentCandidates,
   recentOf,
   segmentWidth,
+  sparkCells,
+  spendBuckets,
+  spendColor,
+  weekSpend,
   runStartedMs,
   stageOf,
   statusLine,
@@ -88,7 +95,7 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
   expect(finishedToast(first)).toBe(
     '✓ S298 tool-paths-by-default (fix) · shipped · 2h38m · $27.53 · run 41212658012',
   )
-  expect(statusLine(b)).toBe('✗ S299 launcher gone · ● S300 ███▓░ ship 1h37m · ○ 1 queued · $17.72 in flight')
+  expect(statusLine(b)).toBe('✗ S299 launcher gone │ ● S300 ⣿⣿⣿⣤⣀⡇ ship 1h37m │ ○ 1 │ $17.72')
 })
 
 test('nothing running or queued clears the status line', async () => {
@@ -106,7 +113,7 @@ test('an empty lane reads as idle on the hint line and in the lane list', async 
   if (raw === null) throw new Error('status did not parse')
   const oneRun = { ...raw, running: raw.running.filter(r => r.lane === 'epic'), queued: [] }
   const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
-  expect(statusLine(b)).toBe('● S299 ▓░░░░ c1 1h06m · fix lane idle · $7.65 in flight')
+  expect(statusLine(b)).toBe('● S299 ⣤⣀⣀⣀⣀⡇ c1 1h06m │ fix idle │ $7.65')
   expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1', 'fix:0'])
 })
 
@@ -242,7 +249,7 @@ test('a running card and the hint line show the phase, the stage and the newest 
   expect(phaseLine(fix)).toBe('review xhigh')
   expect(phaseLine({ ...epic, stage: 'committing', tool: '' })).toBe('cycle 2 of 2 · committing')
   expect(phaseLine({ ...epic, stage: 'review low', tool: '' })).toBe('cycle 2 of 2')
-  expect(statusLine(b)).toBe('● S393 █▓░░░░ c2 1h06m · ● S395 ████▓░░ xhigh 1h37m · $16.68 in flight')
+  expect(statusLine(b)).toBe('● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h06m │ ● S395 ⣿⣿⣿⣿⣤⣀⣀⡇ xhigh 1h37m │ $16.68')
 })
 
 test('the clock reads in the local offset, to the minute, on a 12-hour face', async () => {
@@ -261,6 +268,52 @@ test('the cost in flight adds every run and the loop', async () => {
   const b = buildBoard(raw, { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 }, new Set([5147]), NOW, { utcOffset: '-0500' })
   expect(inFlight(b)).toBe(17.72)
   expect(b.clock).toBe('11:49 AM')
+})
+
+test('figures draw as 3-by-5 dot numerals, two braille rows tall', async () => {
+  expect(dotDigits('10')).toEqual(['⢴⠀⡖⡆', '⠚⠂⠓⠃'])
+  expect(dotDigits('3.5')).toEqual(['⣒⡆⠀⣖⡂', '⠒⠃⠂⠒⠃'])
+  expect(dotDigits('0')).toEqual(['⡖⡆', '⠓⠃'])
+  // A character the font lacks draws as a blank cell, never a wrong glyph.
+  expect(dotDigits('7x')).toEqual([dotDigits('7')[0] + '⠀', dotDigits('7')[1] + '⠀'])
+})
+
+test('a phase block fills with braille: full when done, tapering in flight, a baseline to come', async () => {
+  expect(phaseGlyphs('done', 4)).toBe('⣿⣿⣿⣿')
+  expect(phaseGlyphs('live', 6)).toBe('⣿⣿⣷⣦⣤⣀')
+  expect(phaseGlyphs('live', 3)).toBe('⣿⣷⣤')
+  expect(phaseGlyphs('live', 2)).toBe('⣿⣤')
+  expect(phaseGlyphs('todo', 3)).toBe('⣀⣀⣀')
+})
+
+const LEDGER = [
+  JSON.stringify({ kind: 'commit', ts: '2026-11-06T12:00:00Z', window: { start: '2026-11-06T11:00:00Z' }, cost: { usd: 6 } }),
+  JSON.stringify({ kind: 'ship', ts: '2026-11-06T12:30:00Z', window: { start: '2026-11-06T12:20:00Z' }, overhead: { usd: 1.5 } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-11-06T12:40:00Z', cost: { usd: null } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-10-20T12:00:00Z', window: { start: '2026-10-20T11:00:00Z' }, cost: { usd: 9 } }),
+  '{"kind":"commit","ts":"2026-11-06T13:0',
+].join('\n')
+
+test('the ledger reads as spends over each commit and ship window', async () => {
+  const spends = ledgerSpends(LEDGER)
+  expect(spends.length).toBe(3)
+  expect(spends[0]).toEqual({ startMs: Date.parse('2026-11-06T11:00:00Z'), endMs: Date.parse('2026-11-06T12:00:00Z'), usd: 6 })
+  const now = Date.parse('2026-11-06T13:00:00Z')
+  // Four half-hour buckets ending now: the commit spreads over 11:00-12:00, the ship lands in 12:00-12:30.
+  expect(spendBuckets(spends, now, 4, 1800000)).toEqual([3, 3, 1.5, 0])
+  expect(weekSpend(spends, now)).toBe(7.5)
+})
+
+test('spark cells take two samples each over two rows, and a spend colours by its hourly rate', async () => {
+  const { top, bottom } = sparkCells([0, 8, 4, 2], 8)
+  expect(top.map(c => c.ch).join('')).toBe('⢸⠀')
+  expect(bottom.map(c => c.ch).join('')).toBe('⢸⣧')
+  expect(bottom.map(c => c.value)).toEqual([8, 4])
+  expect(spendColor(0)).toBe('#7dc4e4')
+  expect(spendColor(20)).toBe('#eed49f')
+  expect(spendColor(40)).toBe('#ed8796')
+  expect(spendColor(99)).toBe('#ed8796')
+  expect(spendColor(10)).toBe('#b6ccc2')
 })
 
 // A loop run's progress, copied from run 2026-10-28-0730 up to its first landing.
@@ -310,7 +363,7 @@ test('a live loop replaces fix lane idle, and tags a landing of its own', async 
     at,
     { loop: buildLoop('2026-11-01-1417', [file('p1/review.log', 1)], 'turn ended: success, 3 turns, $3.20 so far', at) },
   )
-  expect(statusLine(idle)).toBe('epic lane idle · ◐ loop review p1 14m · $3.20 in flight')
+  expect(statusLine(idle)).toBe('epic idle │ ◐ loop review p1 14m │ $3.20')
 
   const landing = buildBoard(
     {
@@ -324,7 +377,7 @@ test('a live loop replaces fix lane idle, and tags a landing of its own', async 
     at,
     { loop: buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at) },
   )
-  expect(statusLine(landing)).toBe('epic lane idle · ● S316 ▓░░░░ c1 10m (loop) · $21.49 in flight')
+  expect(statusLine(landing)).toBe('epic idle │ ● S316 ⣤⣀⣀⣀⣀⡇ c1 10m (loop) │ $21.49')
 })
 
 test('an outcome reads as one detail line, outcome then time then cost', async () => {

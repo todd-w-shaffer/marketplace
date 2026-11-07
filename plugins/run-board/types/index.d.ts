@@ -82,6 +82,8 @@ export type Board = {
   checkedAt: number
   /** `checkedAt` on a 12-hour clock in the machine's offset, `7:41 PM`. */
   clock: string
+  /** The last 24 hours of spend in half-hour buckets, oldest first, and the week's total, from token-ledger; null when it could not be read. */
+  spend: { buckets: number[]; week: number } | null
   isDispatcherLive: boolean
   loop: Loop | null
   running: Run[]

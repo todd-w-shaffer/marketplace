@@ -5,11 +5,12 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 
 - **Hint line.** The end of the dim line under the prompt shows each lane's running sitting with its stage
   as a one-cell-per-phase bar, the phase in flight and how long it has run, or that the lane is idle, then
-  how many briefs wait and the cost so far: `● S393 █▓░░░░ c2 1h12m · fix lane idle · $12.22 in flight`.
+  how many briefs wait and the cost so far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ fix idle │ $12.22`.
   It is empty when nothing runs or waits.
-- **Progress bar.** Each run's card has a block per phase of the fixed chain: each cycle, then `┊` where
-  session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is green when done,
-  amber in flight and dim to come. The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
+- **Progress bar.** Each run's card has a braille block per phase of the fixed chain: each cycle, then `⋮` where
+  session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is a full `⣿` run in green when done, a
+  peach taper in flight and a grey `⣀` baseline to come, and the bar ends in a `⡇` cap. The lane's name is a
+  pill on the raised surface. The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
   on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
   `code-review low` line; the ship starts at `/ship` or a push, and the archive at the first `/commit` after
   the ship's push. Under the bar, the phase line reads `cycle 2 of 2 · Bash: Run the focused check`: the
@@ -18,9 +19,14 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **The architecture loop.** While `scripts/archloop.sh` holds its lock, the fix lane shows the loop's stage
   in place of idle, `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
   `(loop)`. The loop's spend counts toward the cost in flight.
-- **Header.** The pane opens on a card: AUTOPILOT, the dispatcher's state and the local time (`date +%z`
-  gives the offset, since the engine gives a mod no time zone), then four figures, running, queued, on deck
-  and cost in flight, each in its section's colour and grey at zero.
+- **Header.** The pane opens on a card in the design language of coolant's thermo dashboard: `autopilot`,
+  the dispatcher's state and the local time (`date +%z` gives the offset, since the engine gives a mod no
+  time zone), then four figures drawn as 3-by-5 dot numerals in braille, running, queued, on deck and `$ in
+  flight`, each in its section's colour and grey at zero. Under them, a two-row braille sparkline of spend
+  per half hour over the last 24 hours, two samples per cell, coloured sapphire to yellow at $20 an hour and
+  to red at $40, with the week's total beside it. Spend comes from `~/.claude/token-ledger.jsonl`: each
+  commit's cost spread over its window, and each ship's overhead. The board reads the file's last 3 MiB
+  with `tail -c`, and only when its size changes.
 - **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
   time, cost and last sentence, or `idle`. Below them come the queue with what each
   entry waits for, and RECENT: the last 10 sittings that finished, newest first, one row each. A row reads like
