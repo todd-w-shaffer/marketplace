@@ -29,6 +29,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `◇ S342 gallery-pass-keeps-stars  epic · minisite/E4 · after S340, S341`. A brief with an `Epic:` header
   line is on the epic lane and one without is on fix; a brief not marked `**Mode: autopilot.**` reads
   `interactive`. `/board` again closes it.
+- **Colours.** The pane paints in Catppuccin Frappé, from the `F` table in `hooks/register.tsx`: green done,
+  peach in flight, surface grey to come, lavender headings, blue queued, mauve on deck. The colours are
+  fixed hex values and do not follow the terminal theme; the hint line is plain text and takes none.
 - **Toast.** A run that finishes while the session is open raises a toast with its outcome.
 
 Every 5 seconds it reads `~/Library/Logs/shootsfilm-autopilot/status.json` (written by

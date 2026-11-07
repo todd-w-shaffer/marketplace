@@ -34,6 +34,24 @@ import {
 } from './board'
 import type { LoopFile, RawStatus } from './board'
 
+// Catppuccin Frappé (catppuccin.com/palette). Every colour the board paints
+// comes from here, so the pane reads the same whatever the terminal theme.
+const F = {
+  text: '#c6d0f5',
+  subtext0: '#a5adce',
+  overlay2: '#949cbb',
+  overlay0: '#737994',
+  surface2: '#626880',
+  surface1: '#51576d',
+  lavender: '#babbf1',
+  blue: '#8caaee',
+  mauve: '#ca9ee6',
+  green: '#a6d189',
+  yellow: '#e5c890',
+  peach: '#ef9f76',
+  red: '#e78284',
+} as const
+
 const PANE = 'run-board'
 // A name Claude Code does not reserve: `claude plugin validate` warns on one it does.
 const COMMAND = 'board'
@@ -257,13 +275,14 @@ export const register: Register = on => {
     // flight, dim to come, with `┊` where session 2 takes over.
     const phaseRows = (r: Run, width: number) => {
       const cut = r.phases.findIndex(p => p.label === 'simplify')
-      const color = (p: Phase): string => (p.state === 'done' ? 'success' : p.state === 'live' ? 'warning' : 'inactive')
+      const color = (p: Phase): string => (p.state === 'done' ? F.green : p.state === 'live' ? F.peach : F.surface1)
+      const labelColor = (p: Phase): string => (p.state === 'done' ? F.subtext0 : p.state === 'live' ? F.peach : F.surface2)
       const glyph = (p: Phase): string => (p.state === 'done' ? '█' : p.state === 'live' ? '▓' : '░')
       return [
         <Text>
           {r.phases.map((p, i) => (
             <Text>
-              {i === cut && <Text dimColor>┊ </Text>}
+              {i === cut && <Text color={F.overlay0}>┊ </Text>}
               <Text color={color(p)}>{glyph(p).repeat(width - 1)}</Text>{' '}
             </Text>
           ))}
@@ -272,7 +291,7 @@ export const register: Register = on => {
           {r.phases.map((p, i) => (
             <Text>
               {i === cut && '  '}
-              <Text color={color(p)} bold={p.state === 'live'} dimColor={p.state === 'done'}>
+              <Text color={labelColor(p)} bold={p.state === 'live'}>
                 {p.short.slice(0, width - 1).padEnd(width)}
               </Text>
             </Text>
@@ -284,8 +303,8 @@ export const register: Register = on => {
     if (b === null) {
       return (
         <Box flexDirection="column">
-          <Text dimColor>No autopilot status yet.</Text>
-          <Text dimColor>Looking for ~/{LOG_DIR}/status.json</Text>
+          <Text color={F.overlay2}>No autopilot status yet.</Text>
+          <Text color={F.overlay2}>Looking for ~/{LOG_DIR}/status.json</Text>
         </Box>
       )
     }
@@ -295,60 +314,60 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Text>
-          <Text bold>AUTOPILOT</Text>
-          <Text dimColor> · checked {at} UTC</Text>
+          <Text bold color={F.lavender}>AUTOPILOT</Text>
+          <Text color={F.overlay2}> · checked {at} UTC</Text>
         </Text>
-        <Text color={b.isDispatcherLive ? 'success' : 'warning'}>
+        <Text color={b.isDispatcherLive ? F.green : F.yellow}>
           {b.isDispatcherLive ? 'dispatcher live' : 'no dispatcher running'}
-          <Text dimColor>
+          <Text color={F.overlay2}>
             {' '}· {b.running.length} running · {b.queued.length} queued · {b.onDeck.length} on deck
           </Text>
         </Text>
 
         {lanesOf(b).map(({ lane, runs }) => (
-          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="subtle" paddingX={1}>
-            <Text bold dimColor>
+          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={F.surface2} paddingX={1}>
+            <Text bold color={F.lavender}>
               {lane.toUpperCase()}
             </Text>
             {lane === LOOP_LANE && b.loop !== null && (
               <Box flexDirection="column">
                 <Text>
-                  <Text color="suggestion">◐ </Text>
-                  <Text bold>loop</Text> {b.loop.name}
+                  <Text color={F.mauve}>◐ </Text>
+                  <Text bold color={F.text}>loop</Text> {b.loop.name}
                 </Text>
                 <Text>
                   {'  '}
                   {b.loop.stage}
-                  <Text dimColor>
+                  <Text color={F.overlay2}>
                     {' '}· {elapsed(b.loop.startedMs, b.checkedAt)} · {money(b.loop.cost)}
                   </Text>
                 </Text>
               </Box>
             )}
-            {runs.length === 0 && (lane !== LOOP_LANE || b.loop === null) && <Text dimColor>idle</Text>}
+            {runs.length === 0 && (lane !== LOOP_LANE || b.loop === null) && <Text color={F.overlay2}>idle</Text>}
             {runs.map(r => (
               <Box flexDirection="column">
                 <Box justifyContent="space-between" columnGap={2}>
                   <Text wrap="truncate-end">
-                    <Text color={r.isAlive ? 'warning' : 'error'}>{r.isAlive ? '●' : '✗'} </Text>
-                    <Text bold>{r.sitting}</Text> {r.slug}
-                    {isLoopLanding(b, r) && <Text dimColor> (loop landing)</Text>}
+                    <Text color={r.isAlive ? F.peach : F.red}>{r.isAlive ? '●' : '✗'} </Text>
+                    <Text bold color={F.text}>{r.sitting}</Text> {r.slug}
+                    {isLoopLanding(b, r) && <Text color={F.overlay2}> (loop landing)</Text>}
                   </Text>
-                  <Text dimColor>
+                  <Text color={F.overlay2}>
                     {elapsed(r.startedMs, b.checkedAt)} · {money(r.cost)}
                   </Text>
                 </Box>
                 {r.isAlive ? (
                   <Box flexDirection="column" marginTop={1}>
                     {phaseRows(r, segmentWidth(e.props.bodyColumns, r.phases.length))}
-                    <Text color="warning" wrap="truncate-end">
+                    <Text color={F.peach} wrap="truncate-end">
                       {phaseLine(r)}
                     </Text>
                   </Box>
                 ) : (
-                  <Text color="error">launcher gone, no finished line</Text>
+                  <Text color={F.red}>launcher gone, no finished line</Text>
                 )}
-                {r.note !== '' && <Text dimColor>{r.note}</Text>}
+                {r.note !== '' && <Text color={F.overlay2}>{r.note}</Text>}
               </Box>
             ))}
           </Box>
@@ -356,12 +375,12 @@ export const register: Register = on => {
 
         {b.queued.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            <Text dimColor>QUEUED</Text>
+            <Text bold color={F.lavender}>QUEUED</Text>
             {b.queued.map(q => (
               <Text>
-                <Text color="suggestion">○ </Text>
-                <Text bold>{q.sitting}</Text> {q.slug}
-                <Text dimColor>
+                <Text color={F.blue}>○ </Text>
+                <Text bold color={F.text}>{q.sitting}</Text> {q.slug}
+                <Text color={F.overlay2}>
                   {'  '}{q.lane}{q.reason !== '' ? ` · waits for ${q.reason}` : ''}
                 </Text>
               </Text>
@@ -371,12 +390,12 @@ export const register: Register = on => {
 
         {b.onDeck.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            <Text dimColor>ON DECK</Text>
+            <Text bold color={F.lavender}>ON DECK</Text>
             {b.onDeck.map(d => (
               <Text>
-                <Text color="suggestion">◇ </Text>
-                <Text bold>{d.sitting}</Text> {d.slug}
-                <Text dimColor>
+                <Text color={F.mauve}>◇ </Text>
+                <Text bold color={F.text}>{d.sitting}</Text> {d.slug}
+                <Text color={F.overlay2}>
                   {'  '}{deckDetail(d)}
                 </Text>
               </Text>
@@ -386,18 +405,18 @@ export const register: Register = on => {
 
         {b.recent.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            <Text dimColor>RECENT</Text>
+            <Text bold color={F.lavender}>RECENT</Text>
             {b.recent.map(d => (
               <Box flexDirection="column">
                 <Text>
-                  <Text color={d.isShipped ? 'success' : 'error'}>{d.isShipped ? '✓' : '✗'} </Text>
-                  <Text bold>{d.sitting}</Text> {d.slug}
-                  <Text dimColor>
+                  <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '✓' : '✗'} </Text>
+                  <Text bold color={F.text}>{d.sitting}</Text> {d.slug}
+                  <Text color={F.overlay2}>
                     {laneTag(d)} · {ago(d.endedMs, b.checkedAt)}
                   </Text>
                 </Text>
                 <Box paddingLeft={2}>
-                  <Text dimColor wrap="truncate-end">{d.detail}</Text>
+                  <Text color={F.overlay2} wrap="truncate-end">{d.detail}</Text>
                 </Box>
               </Box>
             ))}
