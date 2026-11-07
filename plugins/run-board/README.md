@@ -30,7 +30,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   line is on the epic lane and one without is on fix; a brief not marked `**Mode: autopilot.**` reads
   `interactive`. `/board` again closes it.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
-  on base, each lane card on mantle, green done, peach in flight, surface grey to come, lavender headings,
+  on base, each lane card and the queue on mantle, green done, peach in flight, surface grey to come, lavender headings,
   blue queued, mauve on deck. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint
   line is plain text and takes none.

@@ -377,7 +377,7 @@ export const register: Register = on => {
         ))}
 
         {b.queued.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={F.surface2} backgroundColor={F.mantle} paddingX={1}>
             <Text bold color={F.lavender}>QUEUED</Text>
             {b.queued.map(q => (
               <Text>
