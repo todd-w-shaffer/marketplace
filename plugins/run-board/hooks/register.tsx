@@ -11,6 +11,8 @@ import {
   buildBoard,
   briefFiles,
   buildLoop,
+  afterSittings,
+  briefHeader,
   briefKey,
   cycleBlobs,
   cycleCount,
@@ -31,6 +33,7 @@ import {
   money,
   newestRunDir,
   onDeckOf,
+  queueTree,
   parseStatus,
   lanesOf,
   recentCandidates,
@@ -223,14 +226,14 @@ async function readBriefs(
   $: EngineInterface,
   home: string,
   raw: RawStatus,
-): Promise<{ onDeck: Deck[]; cycles: Record<string, number> }> {
+): Promise<{ onDeck: Deck[]; cycles: Record<string, number>; afters: Record<string, string[]> }> {
   const cwd = `${home}/${REPO}`
   const cycles: Record<string, number> = {}
   const keys = raw.running.map(r => briefKey(r.brief))
   const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/'], { cwd, timeoutMs: 5000 })
   if (ls.exitCode !== 0) {
     for (const k of keys) if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
-    return { onDeck: [], cycles }
+    return { onDeck: [], cycles, afters: {} }
   }
   const next = new Map<string, string>()
   const briefs: { path: string; sha: string; text: string }[] = []
@@ -245,7 +248,8 @@ async function readBriefs(
   }
   for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
   blobCache = next
-  return { onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)), cycles }
+  const afters = Object.fromEntries(briefs.map(f => [briefKey(f.path), afterSittings(briefHeader(f.text).after)]))
+  return { onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)), cycles, afters }
 }
 
 // Finished entries already seen; null until the first read, which only
@@ -260,7 +264,7 @@ async function poll($: EngineInterface): Promise<void> {
   const status = text === undefined ? null : parseStatus(text)
   const loop = await readLoop($, home).catch(() => null)
   const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
-  const { onDeck, cycles } = await readBriefs($, home, raw).catch(() => ({ onDeck: [] as Deck[], cycles: {} }))
+  const { onDeck, cycles, afters } = await readBriefs($, home, raw).catch(() => ({ onDeck: [] as Deck[], cycles: {}, afters: {} }))
   if (status === null && loop === null && onDeck.length === 0) {
     await update($, board, () => null)
     return
@@ -279,7 +283,7 @@ async function poll($: EngineInterface): Promise<void> {
   const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
   const now = await $.clock.now()
   const spend = await readSpend($, home, now).catch(() => null)
-  const next = buildBoard(raw, progress, alive, now, { loop, recent, onDeck, tools, cycles, utcOffset, spend })
+  const next = buildBoard(raw, progress, alive, now, { loop, recent, onDeck, tools, cycles, utcOffset, spend, afters })
 
   await update($, board, () => next)
 
@@ -506,15 +510,27 @@ export const register: Register = on => {
         {b.queued.length > 0 && (
           <Box {...CARD}>
             {heading('queued')}
-            {b.queued.map(q => (
-              <Text>
-                <Text color={F.blue}>○ </Text>
-                <Text bold color={F.text}>{q.sitting}</Text>
-                <Text color={F.subtext0}> {q.slug}</Text>
-                <Text color={F.overlay2}>
-                  {'  '}{q.lane}{q.reason !== '' ? ` · waits for ${q.reason}` : ''}
+            {queueTree(b.running, b.queued).map(r => (
+              // A solid joint needs its parent shipped; a dashed one waits for its lane's run.
+              <Box justifyContent="space-between" columnGap={2}>
+                <Text wrap="truncate-end">
+                  <Text color={F.overlay0}>{r.rails}</Text>
+                  <Text color={r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
+                  <Text color={r.kind === 'run' ? F.peach : F.blue}>{r.kind === 'run' ? '●' : '○'} </Text>
+                  <Text bold color={F.text}>{r.sitting}</Text>
+                  <Text color={F.subtext0}> {r.slug}</Text>
                 </Text>
-              </Text>
+                {r.kind === 'run' ? (
+                  <Text>
+                    <Text color={LANE_COLOR[r.lane] ?? F.surface2}>{r.lane}</Text>
+                    <Text color={F.overlay2}> · running</Text>
+                  </Text>
+                ) : (
+                  <Text wrap="truncate-end" color={r.kind === 'turn' ? F.overlay0 : F.overlay2}>
+                    {r.note}
+                  </Text>
+                )}
+              </Box>
             ))}
           </Box>
         )}

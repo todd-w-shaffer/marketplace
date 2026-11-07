@@ -29,8 +29,13 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   across every project). The ledger outgrows one 4 MiB read, so the board reads it once in 3 MiB chunks,
   then only the bytes past where it stopped; a file that shrank is read again from the start.
 - **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
-  time, cost and last sentence, or `idle`. Below them come the queue with what each
-  entry waits for, and RECENT: the last 10 sittings that finished, newest first, one ledger row each: a green `●` or a
+  time, cost and last sentence, or `idle`. Below them comes the queue as a tree of who waits on whom: each
+  running run that something waits on is a root, and each entry hangs under the running or queued sitting
+  on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`), with every such
+  sitting named on the right (`after S396, S401`). An entry that needs nothing queued hangs under its lane's
+  run on a dashed grey joint (`└╌`, `its turn`), and one with no run in its lane is a root of its own under
+  the dispatcher's reason. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
+  Then RECENT: the last 10 sittings that finished, newest first, one ledger row each: a green `●` or a
   red `✗`, the lane as a lowercase tag (pink epic, teal fix) while the dispatcher still lists the run, the
   sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
   the cost, and how long ago it ended (`14m`, `5h`, `3d`). A run that stopped gets its reason on a second line

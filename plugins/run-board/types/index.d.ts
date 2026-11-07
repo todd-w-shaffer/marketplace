@@ -31,6 +31,8 @@ export type Waiting = {
   slug: string
   lane: string
   reason: string
+  /** The sittings on the brief's `After:` line on `origin/main`, shipped or not. */
+  after: string[]
 }
 
 export type Done = {

@@ -393,9 +393,11 @@ export function buildBoard(
     utcOffset?: string
     /** Spend totals from token-ledger, or null when it could not be read. */
     spend?: Board['spend']
+    /** Each brief's `After:` sittings, read from `origin/main`. */
+    afters?: Readonly<Record<string, string[]>>
   } = {},
 ): Board {
-  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {}, utcOffset = '', spend = null } = extra
+  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {}, utcOffset = '', spend = null, afters = {} } = extra
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { note, cost } = noteOf(text)
@@ -419,6 +421,7 @@ export function buildBoard(
     ...sittingOf(q.brief),
     lane: q.lane,
     reason: q.reason,
+    after: afters[briefKey(q.brief)] ?? [],
   }))
   const finished: Done[] = [...raw.finished]
     .sort((a, b) => b.entry - a.entry)
@@ -520,6 +523,110 @@ export function deckDetail(d: Deck): string {
   if (d.after !== '') parts.push(`after ${d.after}`)
   if (!d.isAutopilot) parts.push('interactive')
   return parts.join(' · ')
+}
+
+/** The sittings an `After:` line names, such as `S390, S393`, in capitals. */
+export const afterSittings = (after: string): string[] => [...after.matchAll(/\bs(\d+)\b/gi)].map(m => `S${m[1] ?? ''}`)
+
+/** One row of the queue drawn as a tree. */
+export type TreeRow = {
+  /** A rail for each level above whose branch goes on below this row, two cells per level. */
+  rails: string
+  /** `├─` or `└─` under the entry it needs, `├╌` or `└╌` under its lane's run, empty at a root. */
+  joint: string
+  /**
+   * `run`: a running root. `after`: an entry that needs its parent shipped.
+   * `turn`: an entry that needs nothing queued and waits for its lane's run.
+   * `free`: a root that waits on neither.
+   */
+  kind: 'run' | 'after' | 'turn' | 'free'
+  sitting: string
+  slug: string
+  lane: string
+  /** `after S396, S401`, `its turn`, the dispatcher's reason at a free root, or empty at a running root. */
+  note: string
+}
+
+/**
+ * The queue as a tree of who waits on whom. Each running run is a root, drawn
+ * only when something waits on it. An entry hangs under the running or queued
+ * sitting on its `After:` line that sits deepest in the tree, which is the one
+ * to ship last, and its note names every such sitting; a sitting that is
+ * neither running nor queued has shipped and draws no edge. An entry that
+ * needs nothing in the tree hangs dashed under its lane's run, and with no run
+ * in its lane it is a root of its own under the dispatcher's reason. Siblings
+ * go in queue order.
+ */
+export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane'>[], queued: readonly Waiting[]): TreeRow[] {
+  const runs = new Set(running.map(r => r.sitting))
+  const byEntry = [...queued].sort((a, b) => a.entry - b.entry)
+  const waiting = new Map(byEntry.map(q => [q.sitting, q]))
+  // A board stored by an older version of the mod has no `after`.
+  const needs = (q: Waiting): string[] => (q.after ?? []).filter(s => s !== q.sitting && (runs.has(s) || waiting.has(s)))
+
+  const parent = new Map<string, string | null>()
+  const depth = new Map<string, number>()
+  const depthOf = (s: string, seen: Set<string>): number => {
+    if (runs.has(s)) return 0
+    const known = depth.get(s)
+    if (known !== undefined) return known
+    const q = waiting.get(s)
+    if (q === undefined || seen.has(s)) return 0
+    seen.add(s)
+    let best: string | null = null
+    let d = 0
+    for (const n of needs(q)) {
+      const nd = depthOf(n, seen) + 1
+      if (best === null || nd > d) [best, d] = [n, nd]
+    }
+    if (best === null) {
+      best = running.find(r => r.lane === q.lane)?.sitting ?? null
+      d = best === null ? 0 : 1
+    }
+    parent.set(s, best)
+    depth.set(s, d)
+    return d
+  }
+  for (const q of byEntry) depthOf(q.sitting, new Set())
+
+  const rows: TreeRow[] = []
+  const drawn = new Set<string>()
+  const kids = (s: string) => byEntry.filter(q => parent.get(q.sitting) === s && !drawn.has(q.sitting))
+  const branch = (s: string, rails: string) => {
+    const ks = kids(s)
+    ks.forEach((k, i) => walk(k, rails, i === ks.length - 1))
+  }
+  const walk = (q: Waiting, rails: string, isLast: boolean) => {
+    if (drawn.has(q.sitting)) return
+    drawn.add(q.sitting)
+    const after = needs(q)
+    const isAfter = after.includes(parent.get(q.sitting) ?? '')
+    rows.push({
+      rails,
+      joint: `${isLast ? '└' : '├'}${isAfter ? '─' : '╌'}`,
+      kind: isAfter ? 'after' : 'turn',
+      sitting: q.sitting,
+      slug: q.slug,
+      lane: q.lane,
+      note: isAfter ? `after ${after.join(', ')}` : 'its turn',
+    })
+    branch(q.sitting, rails + (isLast ? '  ' : '│ '))
+  }
+
+  for (const r of running) {
+    if (kids(r.sitting).length === 0) continue
+    rows.push({ rails: '', joint: '', kind: 'run', sitting: r.sitting, slug: r.slug, lane: r.lane, note: '' })
+    branch(r.sitting, '')
+  }
+  // What hangs under no run: an entry with no run in its lane, or a ring of
+  // entries that each name the next on their After lines.
+  for (const q of byEntry) {
+    if (drawn.has(q.sitting)) continue
+    drawn.add(q.sitting)
+    rows.push({ rails: '', joint: '', kind: 'free', sitting: q.sitting, slug: q.slug, lane: q.lane, note: q.reason })
+    branch(q.sitting, '')
+  }
+  return rows
 }
 
 // How many finished sittings the pane lists under RECENT.

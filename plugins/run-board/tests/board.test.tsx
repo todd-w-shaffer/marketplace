@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
+  afterSittings,
   ago,
   agoShort,
   costMeter,
@@ -29,6 +30,7 @@ import {
   phaseGlyphs,
   phaseLine,
   phasesOf,
+  queueTree,
   parseStatus,
   recentCandidates,
   recentOf,
@@ -510,6 +512,64 @@ test('a brief key is the queue path, and a directory brief is its directory', as
 test('the header stops at the first heading', async () => {
   expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', isAutopilot: true })
   expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', isAutopilot: false })
+})
+
+test('an After line names its sittings', async () => {
+  expect(afterSittings('S390, S393')).toEqual(['S390', 'S393'])
+  expect(afterSittings('s340 and S341; issue #12')).toEqual(['S340', 'S341'])
+  expect(afterSittings('')).toEqual([])
+})
+
+test('a queued entry carries its brief\'s After sittings', async () => {
+  const raw = parseStatus(STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  const key = briefKey('docs/briefs/kickoff-sitting-s301-time-limit-record.md')
+  const b = buildBoard(raw, {}, new Set(), NOW, { afters: { [key]: ['S299', 'S290'] } })
+  expect(b.queued.map(q => q.after)).toEqual([['S299', 'S290']])
+  expect(buildBoard(raw, {}, new Set(), NOW).queued.map(q => q.after)).toEqual([[]])
+})
+
+const RUNNING = [
+  { sitting: 'S403', slug: 'dashboard-groups', lane: 'epic' },
+  { sitting: 'S396', slug: 'prune-test-overlaps', lane: 'fix' },
+]
+const waits = (entry: number, sitting: string, lane: string, after: string[], reason = '') => ({ entry, sitting, slug: sitting.toLowerCase(), lane, reason, after })
+const drawn = (rows: ReturnType<typeof queueTree>) => rows.map(r => `${r.rails}${r.joint}${r.sitting} ${r.note}`.trimEnd())
+
+test('the queue draws as a tree: each entry under what it needs, or dashed under its lane\'s run', async () => {
+  const queued = [
+    waits(3, 'S405', 'epic', ['S404']),
+    waits(4, 'S406', 'epic', ['S405']),
+    waits(7, 'S397', 'fix', ['S395', 'S396']),
+    waits(8, 'S398', 'fix', ['S397']),
+    waits(12, 'S402', 'fix', ['S396']),
+    waits(13, 'S407', 'epic', []),
+  ]
+  // S404 and S395 are neither running nor queued: they shipped, so they draw no edge.
+  expect(drawn(queueTree(RUNNING, queued))).toEqual([
+    'S403',
+    '├╌S405 its turn',
+    '│ └─S406 after S405',
+    '└╌S407 its turn',
+    'S396',
+    '├─S397 after S396',
+    '│ └─S398 after S397',
+    '└─S402 after S396',
+  ])
+  expect(queueTree(RUNNING, queued).map(r => r.kind)).toEqual(['run', 'turn', 'after', 'turn', 'run', 'after', 'after', 'after'])
+})
+
+test('an entry that needs two hangs under the one deeper in the tree, and names both', async () => {
+  const queued = [waits(7, 'S397', 'fix', ['S396']), waits(8, 'S398', 'fix', ['S397']), waits(12, 'S402', 'fix', ['S396', 'S398'])]
+  expect(drawn(queueTree(RUNNING, queued))).toEqual(['S396', '└─S397 after S396', '  └─S398 after S397', '    └─S402 after S396, S398'])
+})
+
+test('an entry with nothing in the tree to wait on is its own root, with the dispatcher\'s reason', async () => {
+  const queued = [waits(9, 'S500', 'epic', ['S404'], 'S404, which is not queued')]
+  // No epic run holds the lane, so S500 hangs under nothing; S396 has no waiters and stays out.
+  const rows = queueTree(RUNNING.slice(1), queued)
+  expect(drawn(rows)).toEqual(['S500 S404, which is not queued'])
+  expect(rows.map(r => r.kind)).toEqual(['free'])
 })
 
 test('on deck lists unheld briefs by sitting, epic lane from the Epic line', async () => {
