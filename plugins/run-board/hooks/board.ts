@@ -903,13 +903,14 @@ export const elapsed = (fromMs: number, toMs: number): string =>
 
 export const money = (n: number): string => `$${n.toFixed(2)}`
 
-// The dispatcher's lanes, one run each (scripts/dispatch.sh § lanes).
-export const LANES: readonly string[] = ['epic', 'fix']
-
-/** Every lane in order, the dispatcher's two first, each with its runs. */
+/**
+ * Each slot that holds a run, in slot order, with its runs, then the loop's
+ * lane while the loop is live and no run holds it. A free slot has no card.
+ */
 export function lanesOf(b: Board): { lane: string; runs: Run[] }[] {
-  const names = [...LANES, ...b.running.map(r => r.lane).filter(l => !LANES.includes(l))]
-  return [...new Set(names)].map(lane => ({ lane, runs: b.running.filter(r => r.lane === lane) }))
+  const names = [...new Set(b.running.map(r => r.lane))].sort((x, y) => x.localeCompare(y, 'en', { numeric: true }))
+  if (b.loop !== null && !names.includes(LOOP_LANE)) names.push(LOOP_LANE)
+  return names.map(lane => ({ lane, runs: b.running.filter(r => r.lane === lane) }))
 }
 
 // The lane the architecture loop runs its landings on (scripts/archloop.sh).

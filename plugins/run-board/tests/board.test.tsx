@@ -111,13 +111,13 @@ test('a file that is not the status shape reads as none', async () => {
   expect(parseStatus('[]')).toBe(null)
 })
 
-test('an empty lane reads as idle on the hint line and in the lane list', async () => {
+test('a free slot has no card and no idle part on the hint line', async () => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
   const oneRun = { ...raw, running: raw.running.filter(r => r.lane === 'epic'), queued: [] }
   const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
-  expect(statusLine(b)).toBe('● S299 ⣤⣀⣀⣀⣀⡇ c1 1h06m │ fix idle │ $7.65')
-  expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1', 'fix:0'])
+  expect(statusLine(b)).toBe('● S299 ⣤⣀⣀⣀⣀⡇ c1 1h06m │ $7.65')
+  expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1'])
 })
 
 const toolUse = (name: string, input: Record<string, unknown>): string =>
@@ -365,7 +365,7 @@ test('the loop cost adds finished stages and landings, and the session in flight
   expect(loopCostOf('')).toBe(0)
 })
 
-test('a live loop replaces fix lane idle, and tags a landing of its own', async () => {
+test('a live loop shows its stage, and tags a landing of its own', async () => {
   const at = Date.parse('2026-11-01T14:31:00Z')
   const idle = buildBoard(
     { dispatcher: null, running: [], queued: [], finished: [] },
@@ -374,7 +374,7 @@ test('a live loop replaces fix lane idle, and tags a landing of its own', async 
     at,
     { loop: buildLoop('2026-11-01-1417', [file('p1/review.log', 1)], 'turn ended: success, 3 turns, $3.20 so far', at) },
   )
-  expect(statusLine(idle)).toBe('epic idle │ ◐ loop review p1 14m │ $3.20')
+  expect(statusLine(idle)).toBe('◐ loop review p1 14m │ $3.20')
 
   const landing = buildBoard(
     {
@@ -388,7 +388,7 @@ test('a live loop replaces fix lane idle, and tags a landing of its own', async 
     at,
     { loop: buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at) },
   )
-  expect(statusLine(landing)).toBe('epic idle │ ● S316 ⣤⣀⣀⣀⣀⡇ c1 10m (loop) │ $21.49')
+  expect(statusLine(landing)).toBe('● S316 ⣤⣀⣀⣀⣀⡇ c1 10m (loop) │ $21.49')
 })
 
 test('an outcome reads as one detail line, outcome then time then cost', async () => {

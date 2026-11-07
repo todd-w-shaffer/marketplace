@@ -3,9 +3,9 @@
 A Claude Code mod that shows the shoots.film autopilot runs beside the chat. It reads the files the
 dispatcher writes and never starts a model turn, so it costs no tokens.
 
-- **Hint line.** The end of the dim line under the prompt shows each lane's running sitting with its stage
-  as a one-cell-per-phase bar, the phase in flight and how long it has run, or that the lane is idle, then
-  how many briefs wait and the cost so far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ fix idle │ $12.22`.
+- **Hint line.** The end of the dim line under the prompt shows each running sitting with its stage
+  as a one-cell-per-phase bar, the phase in flight and how long it has run, then
+  how many briefs wait and the cost so far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ ○ 1 │ $12.22`.
   It is empty when nothing runs or waits.
 - **Progress bar.** Each run's card has a braille block per phase of the fixed chain: each cycle, then `⋮` where
   session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is a full `⣿` run in green when done, a
@@ -16,8 +16,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   the ship's push. Under the bar, the phase line reads `cycle 2 of 2 · Bash: Run the focused check`: the
   phase, the stage when it adds to it, and the newest tool call, read from the last 256 KiB of the run's
   stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
-- **The architecture loop.** While `scripts/archloop.sh` holds its lock, the fix lane shows the loop's stage
-  in place of idle, `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
+- **The architecture loop.** While `scripts/archloop.sh` holds its lock, a card and the hint line show the loop's stage,
+  `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
   `(loop)`. The loop's spend counts toward the cost in flight.
 - **Header.** The pane opens on a card in the design language of coolant's thermo dashboard: `autopilot`,
   the dispatcher's state and the local time (`date +%z` gives the offset, since the engine gives a mod no
@@ -28,8 +28,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   and in all, from `~/.claude/token-ledger.jsonl` (each commit's `cost.usd` and each ship's `overhead.usd`,
   across every project). The ledger outgrows one 4 MiB read, so the board reads it once in 3 MiB chunks,
   then only the bytes past where it stopped; a file that shrank is read again from the start.
-- **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
-  time, cost and last sentence, or `idle`. Below them comes the queue as a tree of who waits on whom: each
+- **`/board`** opens a pane with a rounded card per slot that holds a run: its progress bar, phase line,
+  time, cost and last sentence. A free slot has no card. Below them comes the queue as a tree of who waits on whom: each
   running run that something waits on is a root, and each entry hangs under the running or queued sitting
   on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`), with every such
   sitting named on the right (`after S396, S401`). An entry that needs nothing queued hangs under its lane's
