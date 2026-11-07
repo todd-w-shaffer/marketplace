@@ -30,6 +30,7 @@ import {
   recentCandidates,
   recentOf,
   segmentWidth,
+  smallCaps,
   sparkCells,
   spendBuckets,
   spendColor,
@@ -315,6 +316,13 @@ test('spark cells take two samples each over two rows, and a spend colours by it
   expect(spendColor(40)).toBe('#ed8796')
   expect(spendColor(99)).toBe('#ed8796')
   expect(spendColor(10)).toBe('#b6ccc2')
+})
+
+test('small capitals stand in for a smaller size, and keep what has none', async () => {
+  expect(smallCaps('running')).toBe('ʀᴜɴɴɪɴɢ')
+  expect(smallCaps('$ in flight')).toBe('$ ɪɴ ꜰʟɪɢʜᴛ')
+  expect(smallCaps('on deck')).toBe('ᴏɴ ᴅᴇᴄᴋ')
+  expect(smallCaps('queued x9')).toBe('ǫᴜᴇᴜᴇᴅ x9')
 })
 
 // A loop run's progress, copied from run 2026-10-28-0730 up to its first landing.

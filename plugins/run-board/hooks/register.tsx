@@ -26,6 +26,7 @@ import {
   phaseGlyphs,
   phaseLine,
   segmentWidth,
+  smallCaps,
   sparkCells,
   spendBuckets,
   spendColor,
@@ -415,7 +416,9 @@ export const register: Register = on => {
                 <Box flexDirection="column">
                   <Text color={tone}>{top}</Text>
                   <Text color={tone}>{bottom}</Text>
-                  <Text color={t.isZero ? F.surface2 : F.overlay2}>{t.label}</Text>
+                  <Text size="caption" color={t.isZero ? F.surface2 : F.overlay2}>
+                    {smallCaps(t.label)}
+                  </Text>
                 </Box>
               )
             })}

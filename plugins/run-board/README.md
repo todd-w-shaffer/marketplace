@@ -22,7 +22,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **Header.** The pane opens on a card in the design language of coolant's thermo dashboard: `autopilot`,
   the dispatcher's state and the local time (`date +%z` gives the offset, since the engine gives a mod no
   time zone), then four figures drawn as 3-by-7 dot numerals in braille, running, queued, on deck and `$ in
-  flight`, each in its section's colour and grey at zero. Under them, a two-row braille sparkline of spend
+  flight`, each in its section's colour and grey at zero, over a label in Unicode small capitals (a terminal has one
+  text size; other surfaces draw the label at caption size). Under them, a two-row braille sparkline of spend
   per half hour over the last 24 hours, two samples per cell, coloured sapphire to yellow at $20 an hour and
   to red at $40, with the week's total beside it. Spend comes from `~/.claude/token-ledger.jsonl`: each
   commit's cost spread over its window, and each ship's overhead. The board reads the file's last 3 MiB
