@@ -38,6 +38,7 @@ import {
   runStartedMs,
   stageOf,
   statusLine,
+  tileFace,
 } from '../hooks/board'
 
 const STATUS = JSON.stringify({
@@ -278,6 +279,14 @@ test('figures draw as 3-by-7 dot numerals, two braille rows tall', async () => {
   expect(dotDigits('7')).toEqual(['⠉⡇', '⠀⠇'])
   // A character the font lacks draws as a blank cell, never a wrong glyph.
   expect(dotDigits('7x')).toEqual([dotDigits('7')[0] + '⠀', dotDigits('7')[1] + '⠀'])
+})
+
+test('a header tile sets its figure right-aligned over a rule, and its label in plain lowercase', async () => {
+  // The label is wider: the figure shifts right, and the rule spans the label.
+  expect(tileFace('7', 'queued')).toEqual({ top: '    ⠉⡇', bottom: '    ⠀⠇', rule: '──────', label: 'queued' })
+  // The figure is wider: the label pads out to it, so every row of the tile is one width.
+  const [top, bottom] = dotDigits('13402')
+  expect(tileFace('13402', '$ month')).toEqual({ top, bottom, rule: '─'.repeat(10), label: '$ month   ' })
 })
 
 test('a phase block fills with braille: full when done, tapering in flight, a baseline to come', async () => {

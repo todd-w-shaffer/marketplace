@@ -673,6 +673,21 @@ export function dotDigits(text: string): [string, string] {
   return rows
 }
 
+/** A header tile's rows, each padded to the tile's width: two rows of figure, a rule, a label. */
+export type TileFace = { top: string; bottom: string; rule: string; label: string }
+
+/**
+ * A header tile: the figure's dot numerals right-aligned over a thin rule,
+ * then the label as it is, in plain lowercase, since the terminal font has
+ * every letter it needs. The tile is as wide as its figure or its label,
+ * whichever is wider.
+ */
+export function tileFace(value: string, label: string): TileFace {
+  const [top, bottom] = dotDigits(value)
+  const width = Math.max(top.length, label.length)
+  return { top: top.padStart(width), bottom: bottom.padStart(width), rule: '─'.repeat(width), label: label.padEnd(width) }
+}
+
 // Unicode's small capitals, which sit at lowercase height: the terminal
 // draws every character one size, so these stand in for a smaller one.
 // Latin has no small capital x, so x stays as it is.

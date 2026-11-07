@@ -14,7 +14,6 @@ import {
   briefKey,
   cycleBlobs,
   cycleCount,
-  dotDigits,
   deckDetail,
   elapsed,
   hoursMinutes,
@@ -38,6 +37,7 @@ import {
   recentCandidates,
   recentOf,
   statusLine,
+  tileFace,
 } from './board'
 import type { LoopFile, RawStatus, Spend } from './board'
 
@@ -413,14 +413,15 @@ export const register: Register = on => {
     const tileRow = (row: typeof tiles) => (
       <Box marginTop={1} justifyContent="space-between" columnGap={2}>
         {row.map(t => {
-          const [top, bottom] = dotDigits(t.value)
+          const face = tileFace(t.value, t.label)
           const tone = t.isZero ? F.surface2 : t.color
           return (
             <Box flexDirection="column">
-              <Text color={tone}>{top}</Text>
-              <Text color={tone}>{bottom}</Text>
+              <Text color={tone}>{face.top}</Text>
+              <Text color={tone}>{face.bottom}</Text>
+              <Text color={F.surface1}>{face.rule}</Text>
               <Text size="caption" color={t.isZero ? F.surface2 : F.overlay2}>
-                {smallCaps(t.label)}
+                {face.label}
               </Text>
             </Box>
           )
