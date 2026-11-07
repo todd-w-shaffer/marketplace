@@ -15,6 +15,7 @@ import {
   laneTag,
   lanesOf,
   lastToolOf,
+  ledgerChunk,
   ledgerSpends,
   inFlight,
   localClock,
@@ -31,10 +32,7 @@ import {
   recentOf,
   segmentWidth,
   smallCaps,
-  sparkCells,
-  spendBuckets,
-  spendColor,
-  weekSpend,
+  spendTotals,
   runStartedMs,
   stageOf,
   statusLine,
@@ -296,26 +294,25 @@ const LEDGER = [
   '{"kind":"commit","ts":"2026-11-06T13:0',
 ].join('\n')
 
-test('the ledger reads as spends over each commit and ship window', async () => {
+test('the ledger reads as spends, and totals by day, week, month and all time', async () => {
   const spends = ledgerSpends(LEDGER)
   expect(spends.length).toBe(3)
   expect(spends[0]).toEqual({ startMs: Date.parse('2026-11-06T11:00:00Z'), endMs: Date.parse('2026-11-06T12:00:00Z'), usd: 6 })
   const now = Date.parse('2026-11-06T13:00:00Z')
-  // Four half-hour buckets ending now: the commit spreads over 11:00-12:00, the ship lands in 12:00-12:30.
-  expect(spendBuckets(spends, now, 4, 1800000)).toEqual([3, 3, 1.5, 0])
-  expect(weekSpend(spends, now)).toBe(7.5)
+  // The October commit is outside the week and inside the month.
+  expect(spendTotals(spends, now)).toEqual({ day: 7.5, week: 7.5, month: 16.5, all: 16.5 })
+  expect(spendTotals(spends, Date.parse('2026-12-30T00:00:00Z'))).toEqual({ day: 0, week: 0, month: 0, all: 16.5 })
 })
 
-test('spark cells take two samples each over two rows, and a spend colours by its hourly rate', async () => {
-  const { top, bottom } = sparkCells([0, 8, 4, 2], 8)
-  expect(top.map(c => c.ch).join('')).toBe('⢸⠀')
-  expect(bottom.map(c => c.ch).join('')).toBe('⢸⣧')
-  expect(bottom.map(c => c.value)).toEqual([8, 4])
-  expect(spendColor(0)).toBe('#7dc4e4')
-  expect(spendColor(20)).toBe('#eed49f')
-  expect(spendColor(40)).toBe('#ed8796')
-  expect(spendColor(99)).toBe('#ed8796')
-  expect(spendColor(10)).toBe('#b6ccc2')
+test('the ledger reads in chunks that cut lines anywhere', async () => {
+  const text = `${LEDGER.split('\n').slice(0, 4).join('\n')}\n`
+  // Every cut point gives the same spends as one read, and leaves nothing behind.
+  for (const cut of [1, 37, 120, text.length - 1]) {
+    const first = ledgerChunk('', text.slice(0, cut))
+    const second = ledgerChunk(first.partial, text.slice(cut))
+    expect([...first.spends, ...second.spends]).toEqual(ledgerSpends(text))
+    expect(second.partial).toBe('')
+  }
 })
 
 test('small capitals stand in for a smaller size, and keep what has none', async () => {

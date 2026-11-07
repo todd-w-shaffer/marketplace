@@ -23,11 +23,10 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   the dispatcher's state and the local time (`date +%z` gives the offset, since the engine gives a mod no
   time zone), then four figures drawn as 3-by-7 dot numerals in braille, running, queued, on deck and `$ in
   flight`, each in its section's colour and grey at zero, over a label in Unicode small capitals (a terminal has one
-  text size; other surfaces draw the label at caption size). Under them, a two-row braille sparkline of spend
-  per half hour over the last 24 hours, two samples per cell, coloured sapphire to yellow at $20 an hour and
-  to red at $40, with the week's total beside it. Spend comes from `~/.claude/token-ledger.jsonl`: each
-  commit's cost spread over its window, and each ship's overhead. The board reads the file's last 3 MiB
-  with `tail -c`, and only when its size changes.
+  text size; other surfaces draw the label at caption size). A second row of tiles shows spend in whole dollars over the last 24 hours, 7 days and 30 days,
+  and in all, from `~/.claude/token-ledger.jsonl` (each commit's `cost.usd` and each ship's `overhead.usd`,
+  across every project). The ledger outgrows one 4 MiB read, so the board reads it once in 3 MiB chunks,
+  then only the bytes past where it stopped; a file that shrank is read again from the start.
 - **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
   time, cost and last sentence, or `idle`. Below them come the queue with what each
   entry waits for, and RECENT: the last 10 sittings that finished, newest first, one row each. A row reads like

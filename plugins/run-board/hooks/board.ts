@@ -391,7 +391,7 @@ export function buildBoard(
     cycles?: Readonly<Record<string, number>>
     /** The machine's UTC offset as `date +%z` prints it, `-0500`. */
     utcOffset?: string
-    /** Spend from token-ledger, or null when it could not be read. */
+    /** Spend totals from token-ledger, or null when it could not be read. */
     spend?: Board['spend']
   } = {},
 ): Board {
@@ -685,8 +685,7 @@ export type Spend = { startMs: number; endMs: number; usd: number }
 /**
  * The spends in token-ledger's JSON lines: each commit's `cost.usd` and each
  * ship's `overhead.usd`, over the record's window, or at its instant when it
- * has none. A line that does not parse, or has no cost, is skipped: the read
- * starts mid-file, so its first line is often cut.
+ * has none. A line that does not parse, or has no cost, is skipped.
  */
 export function ledgerSpends(text: string): Spend[] {
   const out: Spend[] = []
@@ -710,92 +709,32 @@ export function ledgerSpends(text: string): Spend[] {
 }
 
 /**
- * Spend in `count` buckets of `bucketMs` ending at `now`, oldest first. A
- * spend spreads over its window in proportion to time, so a long commit does
- * not land as one spike at the moment it was recorded.
+ * Spends from one chunk of the ledger, read from where the last chunk
+ * stopped: `partial` is the cut line the last chunk ended on. Returns the
+ * spends of every line the two complete, and the line this chunk leaves cut.
  */
-export function spendBuckets(spends: readonly Spend[], now: number, count: number, bucketMs: number): number[] {
-  const out = new Array<number>(count).fill(0)
-  const from = now - count * bucketMs
-  for (const s of spends) {
-    if (s.endMs <= from || s.startMs >= now) continue
-    const span = s.endMs - s.startMs
-    if (span <= 0) {
-      const i = Math.floor((s.endMs - from) / bucketMs)
-      out[Math.min(count - 1, i)] = (out[Math.min(count - 1, i)] ?? 0) + s.usd
-      continue
-    }
-    for (let i = Math.max(0, Math.floor((s.startMs - from) / bucketMs)); i < count; i++) {
-      const lo = Math.max(s.startMs, from + i * bucketMs)
-      const hi = Math.min(s.endMs, from + (i + 1) * bucketMs)
-      if (hi <= lo) {
-        if (lo >= s.endMs) break
-        continue
-      }
-      out[i] = (out[i] ?? 0) + (s.usd * (hi - lo)) / span
-    }
+export function ledgerChunk(partial: string, chunk: string): { spends: Spend[]; partial: string } {
+  const text = partial + chunk
+  const end = text.lastIndexOf('\n')
+  if (end === -1) return { spends: [], partial: text }
+  return { spends: ledgerSpends(text.slice(0, end)), partial: text.slice(end + 1) }
+}
+
+/** Spend by window: the last 24 hours, 7 days and 30 days before `now`, and every record. */
+export type SpendTotals = { day: number; week: number; month: number; all: number }
+
+const DAY_MS = 86400000
+
+/** What the spends came to over the last day, week and month before `now`, and in all. */
+export function spendTotals(spends: readonly Spend[], now: number): SpendTotals {
+  const sum = (sinceMs: number): number =>
+    Math.round(spends.filter(s => s.endMs > sinceMs && s.endMs <= now).reduce((t, s) => t + s.usd, 0) * 100) / 100
+  return {
+    day: sum(now - DAY_MS),
+    week: sum(now - 7 * DAY_MS),
+    month: sum(now - 30 * DAY_MS),
+    all: sum(Number.NEGATIVE_INFINITY),
   }
-  return out.map(v => Math.round(v * 100) / 100)
-}
-
-/** What the spends recorded in the seven days before `now` came to. */
-export const weekSpend = (spends: readonly Spend[], now: number): number =>
-  Math.round(spends.filter(s => s.endMs > now - 7 * 86400000 && s.endMs <= now).reduce((sum, s) => sum + s.usd, 0) * 100) / 100
-
-/** One cell of a two-row sparkline: its braille character and the larger of its two samples. */
-export type SparkCell = { ch: string; value: number }
-
-// Bits for a sample's height in one cell, bottom up: 0 to 4 dots in a column.
-const LEFT_BITS = [0x00, 0x40, 0x44, 0x46, 0x47] as const
-const RIGHT_BITS = [0x00, 0x80, 0xa0, 0xb0, 0xb8] as const
-
-/**
- * A two-row sparkline, as thermo draws one: two samples per cell, eight dot
- * levels over the two rows, scaled to `peak`. A sample under 2% of the peak
- * draws nothing, so a quiet stretch reads as empty.
- */
-export function sparkCells(values: readonly number[], peak: number): { top: SparkCell[]; bottom: SparkCell[] } {
-  const level = (v: number): number =>
-    peak <= 0 || v <= 0 || v < peak * 0.02 ? 0 : Math.max(1, Math.min(8, Math.floor((v / peak) * 8)))
-  const top: SparkCell[] = []
-  const bottom: SparkCell[] = []
-  for (let i = 0; i < values.length; i += 2) {
-    const a = values[i] ?? 0
-    const b = values[i + 1] ?? 0
-    const la = level(a)
-    const lb = level(b)
-    const low = (LEFT_BITS[Math.min(la, 4)] ?? 0) | (RIGHT_BITS[Math.min(lb, 4)] ?? 0)
-    const high = (LEFT_BITS[Math.max(0, la - 4)] ?? 0) | (RIGHT_BITS[Math.max(0, lb - 4)] ?? 0)
-    const value = Math.max(a, b)
-    bottom.push({ ch: String.fromCodePoint(0x2800 | low), value })
-    top.push({ ch: String.fromCodePoint(0x2800 | high), value })
-  }
-  return { top, bottom }
-}
-
-// Spend per hour where the sparkline turns yellow, and where it turns red.
-// Measured on the ledger's week to 2026-11-06: half the hours that spent
-// anything spent under $12, nine in ten under $31, the busiest $70.
-export const SPEND_WARN_PER_HOUR = 20
-export const SPEND_CRIT_PER_HOUR = 40
-
-// Macchiato's sapphire, yellow and red: the thermo severity stops.
-const SPEND_STOPS = ['#7dc4e4', '#eed49f', '#ed8796'] as const
-
-const blend = (a: string, b: string, t: number): string => {
-  const ch = (hex: string, i: number): number => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16)
-  return `#${[0, 1, 2]
-    .map(i => Math.round(ch(a, i) + (ch(b, i) - ch(a, i)) * t).toString(16).padStart(2, '0'))
-    .join('')}`
-}
-
-/** A spend rate's colour: sapphire to yellow up to the warn rate, yellow to red up to the critical one, red past it. */
-export function spendColor(perHour: number): string {
-  const [cool, warm, hot] = SPEND_STOPS
-  if (perHour >= SPEND_CRIT_PER_HOUR) return hot
-  if (perHour >= SPEND_WARN_PER_HOUR)
-    return blend(warm, hot, (perHour - SPEND_WARN_PER_HOUR) / (SPEND_CRIT_PER_HOUR - SPEND_WARN_PER_HOUR))
-  return blend(cool, warm, Math.max(0, perHour) / SPEND_WARN_PER_HOUR)
 }
 
 /**

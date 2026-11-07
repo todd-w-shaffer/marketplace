@@ -20,18 +20,14 @@ import {
   laneTag,
   isLoopLanding,
   lastToolOf,
-  ledgerSpends,
+  ledgerChunk,
   livePhase,
   miniBar,
   phaseGlyphs,
   phaseLine,
   segmentWidth,
   smallCaps,
-  sparkCells,
-  spendBuckets,
-  spendColor,
-  SPEND_WARN_PER_HOUR,
-  weekSpend,
+  spendTotals,
   inFlight,
   money,
   newestRunDir,
@@ -55,6 +51,8 @@ const F = {
   surface2: '#5b6078',
   surface1: '#494d64',
   surface0: '#363a4f',
+  teal: '#8bd5ca',
+  sapphire: '#7dc4e4',
   base: '#24273a',
   mantle: '#1e2030',
   lavender: '#b7bdf8',
@@ -142,32 +140,34 @@ async function readLastTool($: EngineInterface, log: string): Promise<string> {
 
 // token-ledger's record of what each /commit and /ship cost, under $HOME.
 const LEDGER = '.claude/token-ledger.jsonl'
-// How much of the ledger's end the board reads: a week of records took about
-// 1.1 MB in November 2026, and `$.process.run` keeps 4 MiB of output.
-const LEDGER_TAIL_BYTES = 3 * 1024 * 1024
-// The sparkline: half-hour buckets over the last 24 hours, two to a cell.
-const SPARK_BUCKETS = 48
-const SPARK_BUCKET_MS = 30 * 60 * 1000
+// How much of the ledger one read takes: `$.process.run` keeps 4 MiB of
+// output, and the whole file passes that, so the first read takes it in
+// chunks.
+const LEDGER_CHUNK_BYTES = 3 * 1024 * 1024
 
-// The ledger's spends, kept while its size holds: it only grows, by a line
-// per /commit and /ship.
-let ledgerCache: { size: number; spends: Spend[] } | null = null
+// The ledger as read so far. It only grows, by a line per /commit and /ship,
+// so each poll reads only the bytes past `offset`; a file shorter than
+// `offset` was replaced, and is read again from the start.
+let ledger: { offset: number; partial: string; spends: Spend[] } = { offset: 0, partial: '', spends: [] }
 
-/** The last 24 hours of spend in half-hour buckets, and the week's total, from token-ledger. */
+/** Spend over the last day, week and month, and in all, from token-ledger. */
 async function readSpend($: EngineInterface, home: string, now: number): Promise<Board['spend']> {
   const path = `${home}/${LEDGER}`
   const stat = await $.process.run(['stat', '-f', '%z', path], { timeoutMs: 5000 })
   const size = Number(stat.stdout.trim())
   if (stat.exitCode !== 0 || !Number.isFinite(size)) return null
-  if (ledgerCache === null || ledgerCache.size !== size) {
-    const tail = await $.process.run(['tail', '-c', String(LEDGER_TAIL_BYTES), path], { timeoutMs: 5000 })
-    if (tail.exitCode !== 0) return null
-    ledgerCache = { size, spends: ledgerSpends(tail.stdout) }
+  if (size < ledger.offset) ledger = { offset: 0, partial: '', spends: [] }
+  while (ledger.offset < size) {
+    const count = Math.min(LEDGER_CHUNK_BYTES, size - ledger.offset)
+    const chunk = await $.process.run(
+      ['sh', '-c', 'tail -c +"$1" "$2" | head -c "$3"', 'sh', String(ledger.offset + 1), path, String(count)],
+      { timeoutMs: 5000 },
+    )
+    if (chunk.exitCode !== 0) return null
+    const read = ledgerChunk(ledger.partial, chunk.stdout)
+    ledger = { offset: ledger.offset + count, partial: read.partial, spends: [...ledger.spends, ...read.spends] }
   }
-  return {
-    buckets: spendBuckets(ledgerCache.spends, now, SPARK_BUCKETS, SPARK_BUCKET_MS),
-    week: weekSpend(ledgerCache.spends, now),
-  }
+  return spendTotals(ledger.spends, now)
 }
 
 // Progress files read for RECENT, by name, kept while their mtime holds.
@@ -390,12 +390,34 @@ export const register: Register = on => {
       { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
       { value: cost.toFixed(2), label: '$ in flight', color: F.text, isZero: cost === 0 },
     ]
-    const spark =
+    // The second row: spend in whole dollars over the last day, week and
+    // month, and in all, from token-ledger.
+    const spendTiles: typeof tiles =
       b.spend === null
-        ? null
-        : sparkCells(b.spend.buckets, Math.max(SPEND_WARN_PER_HOUR / 2, ...b.spend.buckets))
-    // A bucket is half an hour, so its spend doubled is the hourly rate.
-    const sparkRow = (cells: { ch: string; value: number }[]) => cells.map(c => <Text color={spendColor(c.value * 2)}>{c.ch}</Text>)
+        ? []
+        : [
+            { value: String(Math.round(b.spend.day)), label: '$ day', color: F.teal, isZero: b.spend.day === 0 },
+            { value: String(Math.round(b.spend.week)), label: '$ week', color: F.sapphire, isZero: b.spend.week === 0 },
+            { value: String(Math.round(b.spend.month)), label: '$ month', color: F.lavender, isZero: b.spend.month === 0 },
+            { value: String(Math.round(b.spend.all)), label: '$ all time', color: F.text, isZero: b.spend.all === 0 },
+          ]
+    const tileRow = (row: typeof tiles) => (
+      <Box marginTop={1} justifyContent="space-between" columnGap={2}>
+        {row.map(t => {
+          const [top, bottom] = dotDigits(t.value)
+          const tone = t.isZero ? F.surface2 : t.color
+          return (
+            <Box flexDirection="column">
+              <Text color={tone}>{top}</Text>
+              <Text color={tone}>{bottom}</Text>
+              <Text size="caption" color={t.isZero ? F.surface2 : F.overlay2}>
+                {smallCaps(t.label)}
+              </Text>
+            </Box>
+          )
+        })}
+      </Box>
+    )
 
     return (
       <Box flexDirection="column">
@@ -408,37 +430,8 @@ export const register: Register = on => {
               <Text color={F.overlay2}>{b.clock}</Text>
             </Text>
           </Box>
-          <Box marginTop={1} justifyContent="space-between" columnGap={2}>
-            {tiles.map(t => {
-              const [top, bottom] = dotDigits(t.value)
-              const tone = t.isZero ? F.surface2 : t.color
-              return (
-                <Box flexDirection="column">
-                  <Text color={tone}>{top}</Text>
-                  <Text color={tone}>{bottom}</Text>
-                  <Text size="caption" color={t.isZero ? F.surface2 : F.overlay2}>
-                    {smallCaps(t.label)}
-                  </Text>
-                </Box>
-              )
-            })}
-          </Box>
-          {spark !== null && b.spend !== null && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text>
-                {sparkRow(spark.top)}
-                <Text bold color={F.text}>
-                  {'  '}
-                  {money(b.spend.week)}
-                </Text>
-              </Text>
-              <Text>
-                {sparkRow(spark.bottom)}
-                <Text color={F.overlay2}>{'  '}week</Text>
-              </Text>
-              <Text color={F.overlay0}>spend per hour · last 24h</Text>
-            </Box>
-          )}
+          {tileRow(tiles)}
+          {spendTiles.length > 0 && tileRow(spendTiles)}
         </Box>
 
         {lanesOf(b).map(({ lane, runs }) => (
