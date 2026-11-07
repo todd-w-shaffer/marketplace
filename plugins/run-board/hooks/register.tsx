@@ -23,6 +23,7 @@ import {
   miniBar,
   phaseLine,
   segmentWidth,
+  inFlight,
   money,
   newestRunDir,
   onDeckOf,
@@ -81,7 +82,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-7' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-8' })
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -228,7 +229,9 @@ async function poll($: EngineInterface): Promise<void> {
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
   const recent = await readRecent($, dir, raw).catch(() => [])
-  const next = buildBoard(raw, progress, alive, await $.clock.now(), { loop, recent, onDeck, tools, cycles })
+  const offset = await $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' }))
+  const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
+  const next = buildBoard(raw, progress, alive, await $.clock.now(), { loop, recent, onDeck, tools, cycles, utcOffset })
 
   await update($, board, () => next)
 
@@ -322,20 +325,38 @@ export const register: Register = on => {
       )
     }
 
-    const at = new Date(b.checkedAt).toISOString().slice(11, 19)
+    // The header's four figures, each in the colour its section uses below; a
+    // zero fades to the to-come grey.
+    const tiles: { value: string; label: string; color: string; isZero: boolean }[] = [
+      { value: String(b.running.length), label: 'running', color: F.peach, isZero: b.running.length === 0 },
+      { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
+      { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
+      { value: money(inFlight(b)), label: 'in flight', color: F.text, isZero: inFlight(b) === 0 },
+    ]
 
     return (
       <Box flexDirection="column">
-        <Text>
-          <Text bold color={F.lavender}>AUTOPILOT</Text>
-          <Text color={F.overlay2}> · checked {at} UTC</Text>
-        </Text>
-        <Text color={b.isDispatcherLive ? F.green : F.yellow}>
-          {b.isDispatcherLive ? 'dispatcher live' : 'no dispatcher running'}
-          <Text color={F.overlay2}>
-            {' '}· {b.running.length} running · {b.queued.length} queued · {b.onDeck.length} on deck
-          </Text>
-        </Text>
+        <Box {...CARD} marginTop={0}>
+          <Box justifyContent="space-between" columnGap={2}>
+            <Text bold color={F.lavender}>
+              AUTOPILOT
+            </Text>
+            <Text color={b.isDispatcherLive ? F.green : F.yellow}>
+              ● {b.isDispatcherLive ? 'dispatcher live' : 'no dispatcher running'}
+              <Text color={F.overlay2}> · {b.clock}</Text>
+            </Text>
+          </Box>
+          <Box marginTop={1} justifyContent="space-between" columnGap={2}>
+            {tiles.map(t => (
+              <Box flexDirection="column">
+                <Text bold color={t.isZero ? F.surface2 : t.color}>
+                  {t.value}
+                </Text>
+                <Text color={t.isZero ? F.surface2 : F.overlay2}>{t.label}</Text>
+              </Box>
+            ))}
+          </Box>
+        </Box>
 
         {lanesOf(b).map(({ lane, runs }) => (
           <Box {...CARD}>

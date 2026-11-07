@@ -80,6 +80,8 @@ export type Deck = {
 
 export type Board = {
   checkedAt: number
+  /** `checkedAt` on a 12-hour clock in the machine's offset, `7:41 PM`. */
+  clock: string
   isDispatcherLive: boolean
   loop: Loop | null
   running: Run[]

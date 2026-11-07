@@ -14,6 +14,8 @@ import {
   laneTag,
   lanesOf,
   lastToolOf,
+  inFlight,
+  localClock,
   loopCostOf,
   loopStageOf,
   newestRunDir,
@@ -241,6 +243,24 @@ test('a running card and the hint line show the phase, the stage and the newest 
   expect(phaseLine({ ...epic, stage: 'committing', tool: '' })).toBe('cycle 2 of 2 · committing')
   expect(phaseLine({ ...epic, stage: 'review low', tool: '' })).toBe('cycle 2 of 2')
   expect(statusLine(b)).toBe('● S393 █▓░░░░ c2 1h06m · ● S395 ████▓░░ xhigh 1h37m · $16.68 in flight')
+})
+
+test('the clock reads in the local offset, to the minute, on a 12-hour face', async () => {
+  const t = Date.parse('2026-11-07T00:41:07Z')
+  expect(localClock(t, '-0500')).toBe('7:41 PM')
+  expect(localClock(t, '+0000')).toBe('12:41 AM')
+  expect(localClock(t, '+0530')).toBe('6:11 AM')
+  expect(localClock(Date.parse('2026-11-07T17:05:00Z'), '-0500')).toBe('12:05 PM')
+  // An offset that does not parse reads as UTC, and says so.
+  expect(localClock(t, '')).toBe('12:41 AM UTC')
+})
+
+test('the cost in flight adds every run and the loop', async () => {
+  const raw = parseStatus(STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  const b = buildBoard(raw, { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 }, new Set([5147]), NOW, { utcOffset: '-0500' })
+  expect(inFlight(b)).toBe(17.72)
+  expect(b.clock).toBe('11:49 AM')
 })
 
 // A loop run's progress, copied from run 2026-10-28-0730 up to its first landing.

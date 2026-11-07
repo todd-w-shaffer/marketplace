@@ -371,9 +371,11 @@ export function buildBoard(
     tools?: Readonly<Record<string, string>>
     /** Each brief's cycle count, read from `origin/main`. */
     cycles?: Readonly<Record<string, number>>
+    /** The machine's UTC offset as `date +%z` prints it, `-0500`. */
+    utcOffset?: string
   } = {},
 ): Board {
-  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {} } = extra
+  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {}, utcOffset = '' } = extra
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { note, cost } = noteOf(text)
@@ -407,6 +409,7 @@ export function buildBoard(
     })
   return {
     checkedAt: now,
+    clock: localClock(now, utcOffset),
     isDispatcherLive: raw.dispatcher !== null && alive.has(raw.dispatcher),
     loop,
     running,
@@ -594,6 +597,24 @@ export function outcomeDetail(outcome: string): string {
   return parts.join(' · ')
 }
 
+/**
+ * An instant as a 12-hour clock in the offset `date +%z` prints: `7:41 PM`
+ * at `-0500`. The engine gives a mod no time zone, so the poll reads the
+ * offset. An offset that does not parse reads as UTC, and the clock says so.
+ */
+export function localClock(ms: number, utcOffset: string): string {
+  const m = /^([+-])(\d{2})(\d{2})$/.exec(utcOffset.trim())
+  const shift = m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0
+  const d = new Date(ms + shift * 60000)
+  const h = d.getUTCHours()
+  const face = `${h % 12 === 0 ? 12 : h % 12}:${String(d.getUTCMinutes()).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`
+  return m ? face : `${face} UTC`
+}
+
+/** What the runs and the loop have spent so far. */
+export const inFlight = (b: Board): number =>
+  Math.round((b.running.reduce((sum, r) => sum + r.cost, 0) + (b.loop?.cost ?? 0)) * 100) / 100
+
 /** The time between two instants: `2h38m`, or `24m` under an hour. */
 export const elapsed = (fromMs: number, toMs: number): string =>
   hoursMinutes(Math.max(0, Math.floor((toMs - fromMs) / 60000)))
@@ -638,7 +659,7 @@ export function statusLine(b: Board): string | undefined {
         ),
   )
   if (b.queued.length > 0) parts.push(`○ ${b.queued.length} queued`)
-  const cost = b.running.reduce((sum, r) => sum + r.cost, 0) + (b.loop?.cost ?? 0)
+  const cost = inFlight(b)
   if (cost > 0) parts.push(`${money(cost)} in flight`)
   return parts.join(' · ')
 }

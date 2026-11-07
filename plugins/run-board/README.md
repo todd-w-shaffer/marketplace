@@ -18,6 +18,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **The architecture loop.** While `scripts/archloop.sh` holds its lock, the fix lane shows the loop's stage
   in place of idle, `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
   `(loop)`. The loop's spend counts toward the cost in flight.
+- **Header.** The pane opens on a card: AUTOPILOT, the dispatcher's state and the local time (`date +%z`
+  gives the offset, since the engine gives a mod no time zone), then four figures, running, queued, on deck
+  and cost in flight, each in its section's colour and grey at zero.
 - **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
   time, cost and last sentence, or `idle`. Below them come the queue with what each
   entry waits for, and RECENT: the last 10 sittings that finished, newest first, one row each. A row reads like
