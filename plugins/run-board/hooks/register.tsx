@@ -34,22 +34,25 @@ import {
 } from './board'
 import type { LoopFile, RawStatus } from './board'
 
-// Catppuccin Frappé (catppuccin.com/palette). Every colour the board paints
-// comes from here, so the pane reads the same whatever the terminal theme.
+// Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
+// paints comes from here, the pane's own ground included, so the pane reads
+// the same whatever the terminal theme.
 const F = {
-  text: '#c6d0f5',
-  subtext0: '#a5adce',
-  overlay2: '#949cbb',
-  overlay0: '#737994',
-  surface2: '#626880',
-  surface1: '#51576d',
-  lavender: '#babbf1',
-  blue: '#8caaee',
-  mauve: '#ca9ee6',
-  green: '#a6d189',
-  yellow: '#e5c890',
-  peach: '#ef9f76',
-  red: '#e78284',
+  text: '#cad3f5',
+  subtext0: '#a5adcb',
+  overlay2: '#939ab7',
+  overlay0: '#6e738d',
+  surface2: '#5b6078',
+  surface1: '#494d64',
+  base: '#24273a',
+  mantle: '#1e2030',
+  lavender: '#b7bdf8',
+  blue: '#8aadf4',
+  mauve: '#c6a0f6',
+  green: '#a6da95',
+  yellow: '#eed49f',
+  peach: '#f5a97f',
+  red: '#ed8796',
 } as const
 
 const PANE = 'run-board'
@@ -253,7 +256,7 @@ export const register: Register = on => {
       return { text: 'Run board closed.' }
     }
     await poll($).catch(() => undefined)
-    await $.ui.open({ id: PANE, title: TITLE })
+    await $.ui.open({ id: PANE, title: TITLE, backgroundColor: F.base })
     return { text: `Run board opened. /${COMMAND} again closes it.` }
   })
 
@@ -325,7 +328,7 @@ export const register: Register = on => {
         </Text>
 
         {lanesOf(b).map(({ lane, runs }) => (
-          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={F.surface2} paddingX={1}>
+          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor={F.surface2} backgroundColor={F.mantle} paddingX={1}>
             <Text bold color={F.lavender}>
               {lane.toUpperCase()}
             </Text>
