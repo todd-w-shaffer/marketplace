@@ -26,7 +26,6 @@ import {
   phaseGlyphs,
   phaseLine,
   segmentWidth,
-  smallCaps,
   spendTotals,
   inFlight,
   money,
@@ -548,7 +547,7 @@ export const register: Register = on => {
                   <Box justifyContent="space-between" columnGap={2}>
                     <Text wrap="truncate-end">
                       <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '●' : '✗'} </Text>
-                      <Text color={LANE_COLOR[d.lane] ?? F.surface2}>{smallCaps(d.lane).padEnd(5)}</Text>
+                      <Text color={LANE_COLOR[d.lane] ?? F.surface2}>{d.lane.padEnd(5)}</Text>
                       <Text bold color={F.text}>{d.sitting}</Text>
                       <Text color={F.subtext0}> {d.slug}</Text>
                     </Text>

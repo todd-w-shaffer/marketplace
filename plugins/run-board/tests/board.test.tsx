@@ -33,7 +33,6 @@ import {
   recentCandidates,
   recentOf,
   segmentWidth,
-  smallCaps,
   spendTotals,
   runStartedMs,
   stageOf,
@@ -324,13 +323,6 @@ test('the ledger reads in chunks that cut lines anywhere', async () => {
     expect([...first.spends, ...second.spends]).toEqual(ledgerSpends(text))
     expect(second.partial).toBe('')
   }
-})
-
-test('small capitals stand in for a smaller size, and keep what has none', async () => {
-  expect(smallCaps('running')).toBe('ʀᴜɴɴɪɴɢ')
-  expect(smallCaps('$ in flight')).toBe('$ ɪɴ ꜰʟɪɢʜᴛ')
-  expect(smallCaps('on deck')).toBe('ᴏɴ ᴅᴇᴄᴋ')
-  expect(smallCaps('queued x9')).toBe('ǫᴜᴇᴜᴇᴅ x9')
 })
 
 // A loop run's progress, copied from run 2026-10-28-0730 up to its first landing.

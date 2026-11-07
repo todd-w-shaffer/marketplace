@@ -31,7 +31,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **`/board`** opens a pane with a rounded card per lane (`epic`, `fix`): its run's progress bar, phase line,
   time, cost and last sentence, or `idle`. Below them come the queue with what each
   entry waits for, and RECENT: the last 10 sittings that finished, newest first, one ledger row each: a green `●` or a
-  red `✗`, the lane as a small-capital tag (pink epic, teal fix) while the dispatcher still lists the run, the
+  red `✗`, the lane as a lowercase tag (pink epic, teal fix) while the dispatcher still lists the run, the
   sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
   the cost, and how long ago it ended (`14m`, `5h`, `3d`). A run that stopped gets its reason on a second line
   in red. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest

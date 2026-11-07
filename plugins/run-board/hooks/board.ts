@@ -688,17 +688,6 @@ export function tileFace(value: string, label: string): TileFace {
   return { top: top.padStart(width), bottom: bottom.padStart(width), rule: '─'.repeat(width), label: label.padEnd(width) }
 }
 
-// Unicode's small capitals, which sit at lowercase height: the terminal
-// draws every character one size, so these stand in for a smaller one.
-// Latin has no small capital x, so x stays as it is.
-const SMALL_CAPS: Record<string, string> = {
-  a: 'ᴀ', b: 'ʙ', c: 'ᴄ', d: 'ᴅ', e: 'ᴇ', f: 'ꜰ', g: 'ɢ', h: 'ʜ', i: 'ɪ', j: 'ᴊ', k: 'ᴋ', l: 'ʟ', m: 'ᴍ',
-  n: 'ɴ', o: 'ᴏ', p: 'ᴘ', q: 'ǫ', r: 'ʀ', s: 'ꜱ', t: 'ᴛ', u: 'ᴜ', v: 'ᴠ', w: 'ᴡ', y: 'ʏ', z: 'ᴢ',
-}
-
-/** Text in small capitals: each lowercase letter that has one, everything else as it is. */
-export const smallCaps = (text: string): string => [...text].map(ch => SMALL_CAPS[ch] ?? ch).join('')
-
 /** Spend over a span: a commit's cost over its window, or a ship's overhead over its own. */
 export type Spend = { startMs: number; endMs: number; usd: number }
 
