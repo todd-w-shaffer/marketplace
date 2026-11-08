@@ -78,7 +78,7 @@ const CARD = {
   paddingX: 1,
 } as const
 
-// Each lane's colour, on its card's pill and its recent-row tags.
+// Each lane's colour, on its card's pill.
 const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 // How many braille cells a recent row's cost meter takes.
 const RECENT_METER_CELLS = 6
@@ -159,7 +159,7 @@ const LEDGER_CHUNK_BYTES = 3 * 1024 * 1024
 // `offset` was replaced, and is read again from the start.
 let ledger: { offset: number; partial: string; spends: Spend[] } = { offset: 0, partial: '', spends: [] }
 
-/** Spend over the last day, week and month, and in all, from token-ledger. */
+/** Spend over the last 24 hours, 7 days and 30 days, and in all, from token-ledger. */
 async function readSpend($: EngineInterface, home: string, now: number): Promise<Board['spend']> {
   const path = `${home}/${LEDGER}`
   const stat = await $.process.run(['stat', '-f', '%z', path], { timeoutMs: 5000 })
@@ -402,15 +402,16 @@ export const register: Register = on => {
     ]
     const recentMax = Math.max(0, ...b.recent.map(d => d.usd ?? 0))
 
-    // The second row: spend in whole dollars over the last day, week and
-    // month, and in all, from token-ledger.
+    // The second row: spend in whole dollars over the last 24 hours, 7 days
+    // and 30 days, and in all, from token-ledger. The windows roll, so the
+    // labels name the span, not a calendar day, week or month.
     const spendTiles: typeof tiles =
       b.spend === null
         ? []
         : [
-            { value: String(Math.round(b.spend.day)), label: '$ day', color: F.teal, isZero: b.spend.day === 0 },
-            { value: String(Math.round(b.spend.week)), label: '$ week', color: F.sapphire, isZero: b.spend.week === 0 },
-            { value: String(Math.round(b.spend.month)), label: '$ month', color: F.lavender, isZero: b.spend.month === 0 },
+            { value: String(Math.round(b.spend.day)), label: '$ 24h', color: F.teal, isZero: b.spend.day === 0 },
+            { value: String(Math.round(b.spend.week)), label: '$ 7 days', color: F.sapphire, isZero: b.spend.week === 0 },
+            { value: String(Math.round(b.spend.month)), label: '$ 30 days', color: F.lavender, isZero: b.spend.month === 0 },
             { value: String(Math.round(b.spend.all)), label: '$ all time', color: F.text, isZero: b.spend.all === 0 },
           ]
     const tileRow = (row: typeof tiles) => (
@@ -555,30 +556,34 @@ export const register: Register = on => {
           <Box {...CARD}>
             {heading('recent')}
             {b.recent.map(d => {
-              // One row per run: outcome, lane, sitting, then time, a cost meter
+              // One row per run: outcome, sitting, then time, a cost meter
               // scaled to the costliest run listed, the cost and the age.
               const meter = costMeter(d.usd ?? 0, recentMax, RECENT_METER_CELLS)
               return (
                 <Box flexDirection="column">
-                  <Box justifyContent="space-between" columnGap={2}>
-                    <Text wrap="truncate-end">
-                      <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '●' : '✗'} </Text>
-                      <Text color={LANE_COLOR[d.lane] ?? F.surface2}>{d.lane.padEnd(5)}</Text>
-                      <Text bold color={F.text}>{d.sitting}</Text>
-                      <Text color={F.subtext0}> {d.slug}</Text>
-                    </Text>
-                    <Text>
-                      <Text color={F.overlay2}>{(d.minutes === null ? '—' : hoursMinutes(d.minutes)).padStart(5)}  </Text>
-                      <Text color={F.peach}>{meter.fill}</Text>
-                      <Text color={F.surface1}>{meter.rest}</Text>
-                      <Text color={F.text}> {(d.usd === null ? '—' : money(d.usd)).padStart(7)}</Text>
-                      <Text color={F.overlay0}> {agoShort(d.endedMs, b.checkedAt).padStart(3)}</Text>
-                    </Text>
+                  <Box columnGap={2}>
+                    {/* The slug gives way first, so the figures keep one line and one column. */}
+                    <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                      <Text wrap="truncate-end">
+                        <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '●' : '✗'} </Text>
+                        <Text bold color={F.text}>{d.sitting}</Text>
+                        <Text color={F.subtext0}> {d.slug}</Text>
+                      </Text>
+                    </Box>
+                    <Box flexShrink={0}>
+                      <Text wrap="truncate-end">
+                        <Text color={F.overlay2}>{(d.minutes === null ? '—' : hoursMinutes(d.minutes)).padStart(5)}  </Text>
+                        <Text color={F.peach}>{meter.fill}</Text>
+                        <Text color={F.surface1}>{meter.rest}</Text>
+                        <Text color={F.text}> {(d.usd === null ? '—' : money(d.usd)).padStart(7)}</Text>
+                        <Text color={F.overlay0}> {agoShort(d.endedMs, b.checkedAt).padStart(3)}</Text>
+                      </Text>
+                    </Box>
                   </Box>
                   {!d.isShipped && d.reason !== '' && (
                     <Box paddingLeft={2}>
-                      <Text color={F.red} wrap="truncate-end">
-                        {d.reason}
+                      <Text color={F.overlay0} wrap="truncate-end">
+                        └ {d.reason}
                       </Text>
                     </Box>
                   )}

@@ -10,7 +10,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **Progress bar.** Each run's card has a braille block per phase of the fixed chain: each cycle, then `⋮` where
   session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is a full `⣿` run in green when done, a
   peach taper in flight and a grey `⣀` baseline to come, and the bar ends in a `⡇` cap. The lane's name is a
-  pill on the raised surface, in the lane's colour (pink epic, teal fix), as on its recent rows. The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
+  pill on the raised surface, in the lane's colour (pink epic, teal fix). The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
   on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
   `code-review low` line; the ship starts at `/ship` or a push, and the archive at the first `/commit` after
   the ship's push. Under the bar, the phase line reads `cycle 2 of 2 · Bash: Run the focused check`: the
@@ -36,8 +36,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   run on a dashed grey joint (`└╌`, `its turn`), and one with no run in its lane is a root of its own under
   the dispatcher's reason. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
   Then RECENT: the last 10 sittings that finished, newest first, one ledger row each: a green `●` or a
-  red `✗`, the lane as a lowercase tag (pink epic, teal fix) while the dispatcher still lists the run, the
-  sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
+  red `✗`, the sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
   the cost, and how long ago it ended (`14m`, `5h`, `3d`). A run that stopped gets its reason on a second line
   in red. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
   outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
