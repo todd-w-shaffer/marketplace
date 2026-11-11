@@ -81,9 +81,13 @@ export type Deck = {
   epic: string
   /** The `After:` line's value, such as `S340, S341`, or empty. */
   after: string
-  /** Whether the brief is marked `**Mode: autopilot.**`. */
-  isAutopilot: boolean
+  /** `ready`: marked `**Mode: autopilot.**`. `interactive`: marked `**Mode: interactive.**`. `enrich`: neither yet. */
+  mode: DeckMode
+  /** The text after `**Mode: interactive.**`: why the brief needs a person. Empty otherwise. */
+  why: string
 }
+
+export type DeckMode = 'ready' | 'enrich' | 'interactive'
 
 export type Board = {
   checkedAt: number

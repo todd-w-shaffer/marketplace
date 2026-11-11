@@ -40,13 +40,17 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   the cost, and how long ago it ended (`14m`, `5h`, `3d`). A run that stopped gets its reason on a second line
   in red. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
   outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
-  `origin/main` in `docs/briefs/` that no run holds and the queue does not list, lowest sitting first:
-  `◇ S342 gallery-pass-keeps-stars  epic · minisite/E4 · after S340, S341`. A brief with an `Epic:` header
-  line is on the epic lane and one without is on fix; a brief not marked `**Mode: autopilot.**` reads
-  `interactive`. `/board` again closes it.
+  `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
+  group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow
+  `enrich` (no Mode line yet: it needs a pass before autopilot), and red `needs you` (marked
+  `**Mode: interactive.**`, a run with Todd in the session). Inside its group a brief hangs on a solid joint under
+  the brief its `After:` line names that sits deepest in the group, and otherwise dashed under the heading. Its note
+  gives the lane and epic, `after` and each named sitting still on deck, queued or running, and for `needs you`
+  the text after the marker, which says why: `└╌◇ S436 retire-held-path  fix · after S434 · Removes a wrangler.toml line.`
+  `/board` again closes it.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
   on base, each section in a card on mantle (the lanes, the queue, on deck, recent), green done, peach in flight, surface grey to come, lavender headings,
-  blue queued, mauve on deck. The colours are fixed hex values and do not follow the terminal theme; the
+  blue queued, mauve on deck, and on deck's groups in green, yellow and red. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint
   line is plain text and takes none.
 - **Toast.** A run that finishes while the session is open raises a toast with its outcome.

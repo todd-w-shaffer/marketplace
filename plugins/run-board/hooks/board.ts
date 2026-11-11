@@ -1,4 +1,4 @@
-import type { Board, Deck, Done, Ended, Loop, Phase, PhaseState, Run, Waiting } from '../types'
+import type { Board, Deck, DeckMode, Done, Ended, Loop, Phase, PhaseState, Run, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
@@ -475,21 +475,34 @@ export function briefKey(path: string): string {
   return rel.replace(/\/README\.md$/, '').replace(/\/$/, '')
 }
 
-/** The header lines above a brief's first `## ` heading that the board reads. */
-export function briefHeader(text: string): { epic: string; after: string; isAutopilot: boolean } {
+/**
+ * The header lines above a brief's first `## ` heading that the board reads.
+ * The mode is `ready` for a brief marked `**Mode: autopilot.**`, `interactive`
+ * for one marked `**Mode: interactive.**`, whose `why` is the text after the
+ * marker, and `enrich` for a brief that carries neither yet.
+ */
+export function briefHeader(text: string): { epic: string; after: string; mode: DeckMode; why: string } {
   let epic = ''
   let after = ''
-  let isAutopilot = false
+  let mode: DeckMode = 'enrich'
+  let why = ''
   for (const line of text.split('\n')) {
     if (line.startsWith('## ')) break
     const e = /^Epic: (.+)$/.exec(line)
     if (e) epic = (e[1] ?? '').trim()
     const a = /^After: (.+)$/.exec(line)
     if (a) after = (a[1] ?? '').trim()
-    if (line.includes('**Mode: autopilot.**')) isAutopilot = true
+    if (line.includes('**Mode: autopilot.**')) mode = 'ready'
+    const i = line.indexOf(INTERACTIVE)
+    if (i !== -1) {
+      mode = 'interactive'
+      why = line.slice(i + INTERACTIVE.length).trim()
+    }
   }
-  return { epic, after, isAutopilot }
+  return { epic, after, mode, why }
 }
+
+const INTERACTIVE = '**Mode: interactive.**'
 
 /** A sitting's number for ordering, or none for an issue brief. */
 const sittingNumber = (sitting: string): number => {
@@ -507,22 +520,18 @@ export function onDeckOf(briefs: readonly (BriefFile & { text: string })[], held
   return briefs
     .filter(b => !taken.has(briefKey(b.path)))
     .map(b => {
-      const { epic, after, isAutopilot } = briefHeader(b.text)
+      const { epic, after, mode, why } = briefHeader(b.text)
       const key = briefKey(b.path)
       const issue = /^kickoff-(\d+)-(.+)$/.exec(baseName(key))
       const name = issue ? { sitting: `#${issue[1] ?? ''}`, slug: issue[2] ?? '' } : sittingOf(key)
-      return { ...name, lane: epic === '' ? 'fix' : 'epic', epic, after, isAutopilot }
+      return { ...name, lane: epic === '' ? 'fix' : 'epic', epic, after, mode, why }
     })
     .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
 }
 
-/** A brief's lane, epic and wait as one detail line: `epic · minisite/E4 · after S340`. */
+/** A brief's lane and epic as one detail line: `epic · minisite/E4`. */
 export function deckDetail(d: Deck): string {
-  const parts = [d.lane]
-  if (d.epic !== '') parts.push(d.epic)
-  if (d.after !== '') parts.push(`after ${d.after}`)
-  if (!d.isAutopilot) parts.push('interactive')
-  return parts.join(' · ')
+  return d.epic === '' ? d.lane : `${d.lane} · ${d.epic}`
 }
 
 /** The sittings an `After:` line names, such as `S390, S393`, in capitals. */
@@ -625,6 +634,113 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
     drawn.add(q.sitting)
     rows.push({ rails: '', joint: '', kind: 'free', sitting: q.sitting, slug: q.slug, lane: q.lane, note: q.reason })
     branch(q.sitting, '')
+  }
+  return rows
+}
+
+/** On deck's three groups, in the order the pane draws them, and each one's heading. */
+export const DECK_GROUPS: readonly { mode: DeckMode; label: string }[] = [
+  { mode: 'ready', label: 'ready' },
+  { mode: 'enrich', label: 'enrich' },
+  { mode: 'interactive', label: 'needs you' },
+]
+
+/** One row of on deck drawn as a tree. */
+export type DeckRow = {
+  /** A rail for each level above whose branch goes on below this row, two cells per level. */
+  rails: string
+  /** `├─` or `└─` under the brief it waits on, `├╌` or `└╌` under its group, empty at a group. */
+  joint: string
+  /** `group`: a heading. `after`: a brief under one it waits on. `free`: a brief under its group. */
+  kind: 'group' | 'after' | 'free'
+  mode: DeckMode
+  /** Empty at a group. */
+  sitting: string
+  /** The brief's slug, or the group's heading. */
+  slug: string
+  /**
+   * At a group, how many briefs it holds. At a brief, its lane and epic, then
+   * `after` and the sittings it still waits on, then why it needs a person.
+   */
+  note: string
+}
+
+/**
+ * On deck as a tree in three groups: ready (autopilot), enrich (not yet
+ * autopilot) and needs you (interactive). A brief waits on each sitting its
+ * `After:` line names that is on deck, queued or running; one that has
+ * shipped is gone from all three and draws nothing. Inside its group a brief
+ * hangs under the brief it waits on that sits deepest in the group, the one to
+ * ship last, and otherwise dashed under the group. A wait that crosses groups
+ * shows in the note only. Siblings go by sitting.
+ */
+export function deckTree(deck: readonly Deck[], live: readonly string[]): DeckRow[] {
+  const waitable = new Set([...deck.map(d => d.sitting), ...live])
+  const waits = (d: Deck): string[] => afterSittings(d.after).filter(s => s !== d.sitting && waitable.has(s))
+  const note = (d: Deck): string => {
+    const parts = [deckDetail(d)]
+    const w = waits(d)
+    if (w.length > 0) parts.push(`after ${w.join(', ')}`)
+    if (d.why !== '') parts.push(d.why)
+    return parts.join(' · ')
+  }
+
+  const rows: DeckRow[] = []
+  for (const g of DECK_GROUPS) {
+    const members = deck.filter(d => d.mode === g.mode).sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
+    if (members.length === 0) continue
+    const by = new Map(members.map(d => [d.sitting, d]))
+    const parent = new Map<string, string | null>()
+    const depth = new Map<string, number>()
+    const depthOf = (s: string, seen: Set<string>): number => {
+      const known = depth.get(s)
+      if (known !== undefined) return known
+      const d = by.get(s)
+      if (d === undefined || seen.has(s)) return 0
+      seen.add(s)
+      let best: string | null = null
+      let n = 0
+      for (const w of waits(d)) {
+        if (!by.has(w)) continue
+        const wd = depthOf(w, seen) + 1
+        if (best === null || wd > n) [best, n] = [w, wd]
+      }
+      parent.set(s, best)
+      depth.set(s, n)
+      return n
+    }
+    for (const d of members) depthOf(d.sitting, new Set())
+    // A ring of briefs that each wait on the next hangs from nowhere: cut it
+    // where it is found, so the cut brief hangs under its group.
+    for (const d of members) {
+      const seen = new Set<string>([d.sitting])
+      let p = parent.get(d.sitting) ?? null
+      while (p !== null && !seen.has(p)) {
+        seen.add(p)
+        p = parent.get(p) ?? null
+      }
+      if (p !== null) parent.set(d.sitting, null)
+    }
+
+    rows.push({ rails: '', joint: '', kind: 'group', mode: g.mode, sitting: '', slug: g.label, note: String(members.length) })
+    const walk = (d: Deck, rails: string, isLast: boolean) => {
+      const isAfter = parent.get(d.sitting) != null
+      rows.push({
+        rails,
+        joint: `${isLast ? '└' : '├'}${isAfter ? '─' : '╌'}`,
+        kind: isAfter ? 'after' : 'free',
+        mode: g.mode,
+        sitting: d.sitting,
+        slug: d.slug,
+        note: note(d),
+      })
+      branch(d.sitting, rails + (isLast ? '  ' : '│ '))
+    }
+    const branch = (s: string | null, rails: string) => {
+      const ks = members.filter(d => (parent.get(d.sitting) ?? null) === s)
+      ks.forEach((k, i) => walk(k, rails, i === ks.length - 1))
+    }
+    branch(null, '')
   }
   return rows
 }

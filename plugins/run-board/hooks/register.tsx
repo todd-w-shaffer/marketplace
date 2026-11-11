@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board, Deck, Ended, Loop, Phase, Run } from '../types'
+import type { Board, Deck, DeckMode, Ended, Loop, Phase, Run } from '../types'
 import {
   LOG_TAIL_BYTES,
   LOOP_LANE,
@@ -16,7 +16,7 @@ import {
   briefKey,
   cycleBlobs,
   cycleCount,
-  deckDetail,
+  deckTree,
   elapsed,
   hoursMinutes,
   finishedToast,
@@ -80,6 +80,9 @@ const CARD = {
 
 // Each lane's colour, on its card's pill.
 const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
+// Each on-deck group's colour: green can queue now, yellow needs a pass to
+// reach autopilot, red needs a person in the session.
+const DECK_COLOR: Record<DeckMode, string> = { ready: F.green, enrich: F.yellow, interactive: F.red }
 // How many braille cells a recent row's cost meter takes.
 const RECENT_METER_CELLS = 6
 
@@ -539,16 +542,28 @@ export const register: Register = on => {
         {b.onDeck.length > 0 && (
           <Box {...CARD}>
             {heading('on deck')}
-            {b.onDeck.map(d => (
-              <Text>
-                <Text color={F.mauve}>◇ </Text>
-                <Text bold color={F.text}>{d.sitting}</Text>
-                <Text color={F.subtext0}> {d.slug}</Text>
-                <Text color={F.overlay2}>
-                  {'  '}{deckDetail(d)}
+            {deckTree(b.onDeck, [...b.running, ...b.queued].map(r => r.sitting)).map(r =>
+              r.kind === 'group' ? (
+                <Text>
+                  <Text bold color={DECK_COLOR[r.mode]}>{r.slug}</Text>
+                  <Text color={F.overlay0}> {r.note}</Text>
                 </Text>
-              </Text>
-            ))}
+              ) : (
+                // A solid joint waits on the brief above it; a dashed one hangs under its group.
+                <Box justifyContent="space-between" columnGap={2}>
+                  <Text wrap="truncate-end">
+                    <Text color={F.overlay0}>{r.rails}</Text>
+                    <Text color={r.kind === 'after' ? DECK_COLOR[r.mode] : F.surface2}>{r.joint}</Text>
+                    <Text color={DECK_COLOR[r.mode]}>◇ </Text>
+                    <Text bold color={F.text}>{r.sitting}</Text>
+                    <Text color={F.subtext0}> {r.slug}</Text>
+                  </Text>
+                  <Text wrap="truncate-end" color={F.overlay2}>
+                    {r.note}
+                  </Text>
+                </Box>
+              ),
+            )}
           </Box>
         )}
 

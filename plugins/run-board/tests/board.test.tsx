@@ -14,6 +14,7 @@ import {
   buildBoard,
   buildLoop,
   deckDetail,
+  deckTree,
   finishedToast,
   laneTag,
   lanesOf,
@@ -41,6 +42,7 @@ import {
   statusLine,
   tileFace,
 } from '../hooks/board'
+import type { Deck } from '../types'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -510,8 +512,13 @@ test('a brief key is the queue path, and a directory brief is its directory', as
 })
 
 test('the header stops at the first heading', async () => {
-  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', isAutopilot: true })
-  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', isAutopilot: false })
+  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', mode: 'ready', why: '' })
+  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', mode: 'enrich', why: '' })
+})
+
+test('an interactive brief says why it needs a person', async () => {
+  const text = '# x\n\n**Mode: interactive.** Removes a wrangler.toml line.\n\n## y\n**Mode: autopilot.**'
+  expect(briefHeader(text)).toEqual({ epic: '', after: '', mode: 'interactive', why: 'Removes a wrangler.toml line.' })
 })
 
 test('an After line names its sittings', async () => {
@@ -577,9 +584,49 @@ test('on deck lists unheld briefs by sitting, epic lane from the Epic line', asy
   const briefs = briefFiles(LS_TREE).map(f => ({ ...f, text: texts[f.sha] ?? '' }))
   const deck = onDeckOf(briefs, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
   expect(deck.map(d => `${d.sitting} ${d.slug} ${deckDetail(d)}`)).toEqual([
-    'S342 gallery-pass-keeps-stars epic · minisite/E4 · after S340, S341',
+    'S342 gallery-pass-keeps-stars epic · minisite/E4',
     'S350 split-work fix',
-    '#527 gallery-race fix · interactive',
+    '#527 gallery-race fix',
   ])
+  expect(deck.map(d => d.mode)).toEqual(['ready', 'ready', 'enrich'])
   expect(onDeckOf(briefs, ['docs/briefs/s350-split-work/README.md']).some(d => d.sitting === 'S350')).toBe(false)
+})
+
+const deckOf = (sitting: string, mode: Deck['mode'], after = '', why = ''): Deck => ({ sitting, slug: sitting.toLowerCase(), lane: 'fix', epic: '', after, mode, why })
+const deckDrawn = (rows: ReturnType<typeof deckTree>) => rows.map(r => `${r.rails}${r.joint}${r.kind === 'group' ? r.slug : r.sitting} ${r.note}`.trimEnd())
+
+test('on deck draws as a tree under ready, enrich and needs you, each brief under the one it waits on', async () => {
+  const deck = [
+    deckOf('S467', 'ready'),
+    deckOf('S470', 'ready', 'S429, S434'),
+    deckOf('S471', 'ready', 'S470'),
+    deckOf('S473', 'ready', 'S470, S471'),
+    deckOf('S472', 'enrich', 'S470, S471, S475'),
+    deckOf('S474', 'enrich'),
+    deckOf('S435', 'interactive', 'S470', 'Todd records the probe answers.'),
+    deckOf('S436', 'interactive', 'S429, S434', 'Removes a wrangler.toml line.'),
+  ]
+  // S475 is queued, S434 is running, S429 has shipped: only the first two are still waited on.
+  expect(deckDrawn(deckTree(deck, ['S475', 'S434']))).toEqual([
+    'ready 4',
+    '├╌S467 fix',
+    '└╌S470 fix · after S434',
+    '  └─S471 fix · after S470',
+    '    └─S473 fix · after S470, S471',
+    'enrich 2',
+    '├╌S472 fix · after S470, S471, S475',
+    '└╌S474 fix',
+    'needs you 2',
+    '├╌S435 fix · after S470 · Todd records the probe answers.',
+    '└╌S436 fix · after S434 · Removes a wrangler.toml line.',
+  ])
+  expect(deckTree(deck, []).filter(r => r.kind === 'group').map(r => r.mode)).toEqual(['ready', 'enrich', 'interactive'])
+})
+
+test('an empty group draws nothing, and a ring of waits still draws every brief', async () => {
+  const deck = [deckOf('S500', 'enrich', 'S501'), deckOf('S501', 'enrich', 'S500')]
+  const rows = deckDrawn(deckTree(deck, []))
+  expect(rows[0]).toBe('enrich 2')
+  expect(rows.length).toBe(3)
+  expect(rows.some(r => r.includes('S500')) && rows.some(r => r.includes('S501'))).toBe(true)
 })
