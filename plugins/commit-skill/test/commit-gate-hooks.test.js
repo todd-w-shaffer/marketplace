@@ -137,6 +137,34 @@ describe('the mint writes a token for /commit and /ship and for nothing else', (
     assert.equal(has('ship-docs'), false);
   });
 
+  test('keeps both tokens on a task notification, which wakes the session mid-call', (t) => {
+    // /commit runs its build in the background, the turn ends, and the build's
+    // completion arrives as a prompt. That prompt is no new instruction: the
+    // call that minted the token has not committed yet.
+    const { sb, repo, has, typed } = minting(t);
+    sb.mint(repo, 'commit');
+    sb.mint(repo, 'ship-docs');
+
+    const r = typed('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>');
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '');
+    assert.equal(has('commit'), true);
+    assert.equal(has('ship-docs'), true);
+  });
+
+  test('deletes both tokens on a typed prompt that only mentions a task notification', (t) => {
+    const { sb, repo, has, typed } = minting(t);
+    sb.mint(repo, 'commit');
+    sb.mint(repo, 'ship-docs');
+
+    const r = typed('why did the <task-notification> say failed?');
+
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(has('commit'), false);
+    assert.equal(has('ship-docs'), false);
+  });
+
   test('names the token after the session id in its environment, which the shell shares, not the payload', (t) => {
     // After /clear the payload carries a new session id, while the Bash shell
     // keeps the one its process started with. Both inherit the environment.

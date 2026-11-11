@@ -136,7 +136,8 @@ function check(msgfile) {
 // Writes the token on a /commit or /ship Skill call, and on a typed /commit or
 // /ship, which loads its skill with no Skill call. Any other Skill call deletes
 // the commit token and keeps ship-docs, because /ship calls /commit before its
-// docs step; any other prompt deletes both. A subagent's call does nothing: it
+// docs step; any other prompt deletes both, except a task notification, which
+// deletes nothing. A subagent's call does nothing: it
 // shares the session id, so it would act on the main thread's token.
 //
 // - The session id is CLAUDE_CODE_SESSION_ID from the environment, not the
@@ -173,6 +174,10 @@ function mint(p) {
     fs.writeFileSync(path.join(dir, `${sid}.${kind}`), '');
     return;
   }
+  // A background task's completion reaches the session as a prompt. It wakes
+  // the call that minted the token, which has not committed yet, so it deletes
+  // nothing.
+  if (event === 'UserPromptSubmit' && (p.prompt || '').startsWith('<task-notification>')) return;
   for (const k of event === 'UserPromptSubmit' ? ['commit', 'ship-docs'] : ['commit']) {
     try { fs.unlinkSync(path.join(dir, `${sid}.${k}`)); } catch { /* none to delete */ }
   }
