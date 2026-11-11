@@ -121,7 +121,8 @@ Rules:
 - Stage only the files that are part of the current work. Never stage `.env`, credentials, or unrelated files.
 - If a build step produced output artifacts that are tracked by git, include them.
 - Create the commit. Run `git status` after to confirm success.
-- Run `token-ledger commit --sha $(git rev-parse HEAD)`. Its single line of output is the `**Cost:**` line in step 6 — paste it verbatim, and never compute, estimate, or adjust the numbers yourself. With a split diff, each chunk is its own call and tallies itself after its own commit, so each chunk's summary carries its own Cost line. If the script is missing or fails, omit the Cost line and carry on: the tally never blocks a commit.
+- Run each git command as its own Bash call: `git add <paths>` as its own Bash call, then `git commit`, then `git status`. A session in a worktree runs under an isolation guard that refuses a line joining git to another step, and refuses git inside `$(…)`.
+- Run `token-ledger commit`. It reads the commit from `HEAD`, so it takes no sha. Its single line of output is the `**Cost:**` line in step 6 — paste it verbatim, and never compute, estimate, or adjust the numbers yourself. With a split diff, each chunk is its own call and tallies itself after its own commit, so each chunk's summary carries its own Cost line. If the script is missing or fails, omit the Cost line and carry on: the tally never blocks a commit.
 
 ### 6. Print summary
 
