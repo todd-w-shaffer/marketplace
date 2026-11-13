@@ -579,6 +579,16 @@ test('an entry with nothing in the tree to wait on is its own root, with the dis
   expect(rows.map(r => r.kind)).toEqual(['free'])
 })
 
+test('an entry held off a run that shares its paths is a root tagged held, not an edge under that run', async () => {
+  const queued = [
+    waits(10, 'S522', 'epic', [], 'kickoff-sitting-s518-device-lab-webkit in slot 1: both touch CLAUDE.md'),
+    waits(11, 'S523', 'epic', [], 'kickoff-sitting-s519-device-lab-simulator (pid 4242): both touch package.json, docs/e2e-testing.md'),
+  ]
+  const rows = queueTree([], queued)
+  expect(drawn(rows)).toEqual(['S522 held · S518 shares CLAUDE.md', 'S523 held · S519 shares package.json, docs/e2e-testing.md'])
+  expect(rows.map(r => r.kind)).toEqual(['held', 'held'])
+})
+
 test('on deck lists unheld briefs by sitting, epic lane from the Epic line', async () => {
   const texts: Record<string, string> = { bbb222: S342, ccc333: '**Mode: autopilot.**\nEpic: account-basics/E8\n## a', fff666: '**Mode: autopilot.**\n## a', '222999': '# issue\n## a' }
   const briefs = briefFiles(LS_TREE).map(f => ({ ...f, text: texts[f.sha] ?? '' }))

@@ -537,6 +537,17 @@ export function deckDetail(d: Deck): string {
 /** The sittings an `After:` line names, such as `S390, S393`, in capitals. */
 export const afterSittings = (after: string): string[] => [...after.matchAll(/\bs(\d+)\b/gi)].map(m => `S${m[1] ?? ''}`)
 
+/**
+ * `held · S518 shares CLAUDE.md` for a dispatcher reason that holds an entry
+ * off a run touching the same paths, or null for any other reason. If
+ * dispatch.sh changes its `<brief> <where>: both touch <paths>` reason, update
+ * this pattern.
+ */
+export function heldNote(reason: string): string | null {
+  const m = /\bs(\d+)-[\w-]*.*?: both touch (.+)$/i.exec(reason)
+  return m === null ? null : `held · S${m[1] ?? ''} shares ${m[2] ?? ''}`
+}
+
 /** One row of the queue drawn as a tree. */
 export type TreeRow = {
   /** A rail for each level above whose branch goes on below this row, two cells per level. */
@@ -547,8 +558,10 @@ export type TreeRow = {
    * `run`: a running root. `after`: an entry that needs its parent shipped.
    * `turn`: an entry that needs nothing queued and waits for its lane's run.
    * `free`: a root that waits on neither.
+   * `held`: a root that waits for a run to leave paths both briefs touch. The
+   * hold orders nothing, so it draws as a tag, not an edge.
    */
-  kind: 'run' | 'after' | 'turn' | 'free'
+  kind: 'run' | 'after' | 'turn' | 'free' | 'held'
   sitting: string
   slug: string
   lane: string
@@ -632,7 +645,8 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
   for (const q of byEntry) {
     if (drawn.has(q.sitting)) continue
     drawn.add(q.sitting)
-    rows.push({ rails: '', joint: '', kind: 'free', sitting: q.sitting, slug: q.slug, lane: q.lane, note: q.reason })
+    const held = heldNote(q.reason)
+    rows.push({ rails: '', joint: '', kind: held === null ? 'free' : 'held', sitting: q.sitting, slug: q.slug, lane: q.lane, note: held ?? q.reason })
     branch(q.sitting, '')
   }
   return rows
