@@ -515,7 +515,7 @@ export const register: Register = on => {
           <Box {...CARD}>
             {heading('queued')}
             {queueTree(b.running, b.queued).map(r => (
-              // A solid joint needs its parent shipped; a dashed one waits for its lane's run.
+              // A joint means the entry needs its parent shipped.
               <Box justifyContent="space-between" columnGap={2}>
                 <Text wrap="truncate-end">
                   <Text color={F.overlay0}>{r.rails}</Text>
@@ -530,7 +530,7 @@ export const register: Register = on => {
                     <Text color={F.overlay2}> · running</Text>
                   </Text>
                 ) : (
-                  <Text wrap="truncate-end" color={r.kind === 'held' ? F.yellow : r.kind === 'turn' ? F.overlay0 : F.overlay2}>
+                  <Text wrap="truncate-end" color={r.kind === 'held' ? F.yellow : F.overlay2}>
                     {r.note}
                   </Text>
                 )}

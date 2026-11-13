@@ -32,9 +32,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   time, cost and last sentence. A free slot has no card. Below them comes the queue as a tree of who waits on whom: each
   running run that something waits on is a root, and each entry hangs under the running or queued sitting
   on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`), with every such
-  sitting named on the right (`after S396, S401`). An entry that needs nothing queued hangs under its lane's
-  run on a dashed grey joint (`└╌`, `its turn`), and one with no run in its lane is a root of its own under
-  the dispatcher's reason. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
+  sitting named on the right (`after S396, S401`). An entry that needs nothing running or queued is a root of
+  its own under the dispatcher's reason (`a free slot`); one held only because a run touches the same
+  paths reads `held · S518 shares CLAUDE.md` in yellow, with no joint, since a hold orders nothing. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
   Then RECENT: the last 10 sittings that finished, newest first, one ledger row each: a green `●` or a
   red `✗`, the sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
   the cost, and how long ago it ended (`14m`, `5h`, `3d`). A run that stopped gets its reason on a second line

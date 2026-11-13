@@ -552,20 +552,19 @@ export function heldNote(reason: string): string | null {
 export type TreeRow = {
   /** A rail for each level above whose branch goes on below this row, two cells per level. */
   rails: string
-  /** `├─` or `└─` under the entry it needs, `├╌` or `└╌` under its lane's run, empty at a root. */
+  /** `├─` or `└─` under the entry it needs, empty at a root. */
   joint: string
   /**
    * `run`: a running root. `after`: an entry that needs its parent shipped.
-   * `turn`: an entry that needs nothing queued and waits for its lane's run.
    * `free`: a root that waits on neither.
    * `held`: a root that waits for a run to leave paths both briefs touch. The
    * hold orders nothing, so it draws as a tag, not an edge.
    */
-  kind: 'run' | 'after' | 'turn' | 'free' | 'held'
+  kind: 'run' | 'after' | 'free' | 'held'
   sitting: string
   slug: string
   lane: string
-  /** `after S396, S401`, `its turn`, the dispatcher's reason at a free root, or empty at a running root. */
+  /** `after S396, S401`, the dispatcher's reason at a free root, the held tag at a held root, or empty at a running root. */
   note: string
 }
 
@@ -575,8 +574,8 @@ export type TreeRow = {
  * sitting on its `After:` line that sits deepest in the tree, which is the one
  * to ship last, and its note names every such sitting; a sitting that is
  * neither running nor queued has shipped and draws no edge. An entry that
- * needs nothing in the tree hangs dashed under its lane's run, and with no run
- * in its lane it is a root of its own under the dispatcher's reason. Siblings
+ * needs nothing in the tree is a root of its own under the dispatcher's reason;
+ * a running run it does not name is not its parent, since slots order nothing. Siblings
  * go in queue order.
  */
 export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane'>[], queued: readonly Waiting[]): TreeRow[] {
@@ -601,10 +600,6 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
       const nd = depthOf(n, seen) + 1
       if (best === null || nd > d) [best, d] = [n, nd]
     }
-    if (best === null) {
-      best = running.find(r => r.lane === q.lane)?.sitting ?? null
-      d = best === null ? 0 : 1
-    }
     parent.set(s, best)
     depth.set(s, d)
     return d
@@ -622,15 +617,14 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
     if (drawn.has(q.sitting)) return
     drawn.add(q.sitting)
     const after = needs(q)
-    const isAfter = after.includes(parent.get(q.sitting) ?? '')
     rows.push({
       rails,
-      joint: `${isLast ? '└' : '├'}${isAfter ? '─' : '╌'}`,
-      kind: isAfter ? 'after' : 'turn',
+      joint: `${isLast ? '└' : '├'}─`,
+      kind: 'after',
       sitting: q.sitting,
       slug: q.slug,
       lane: q.lane,
-      note: isAfter ? `after ${after.join(', ')}` : 'its turn',
+      note: `after ${after.join(', ')}`,
     })
     branch(q.sitting, rails + (isLast ? '  ' : '│ '))
   }
@@ -640,7 +634,7 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
     rows.push({ rails: '', joint: '', kind: 'run', sitting: r.sitting, slug: r.slug, lane: r.lane, note: '' })
     branch(r.sitting, '')
   }
-  // What hangs under no run: an entry with no run in its lane, or a ring of
+  // What hangs under no run: an entry that names nothing running, or a ring of
   // entries that each name the next on their After lines.
   for (const q of byEntry) {
     if (drawn.has(q.sitting)) continue
