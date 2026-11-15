@@ -34,15 +34,17 @@ The first argument picks the mode:
 | `/savor decision <spec>` | decision | § Decision mode: the planning pass |
 | `/savor launch <spec> <findings file>` | launch | § Launch mode: Phases 1, 2 and 2b, then Phase 3 in a fresh agent |
 
-A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. In decision and
+A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. A request in
+words that names a mode ("decision pass", "savor this at launch") picks that mode, with the same required
+arguments. In decision and
 launch mode every argument in the mode's row is required: a missing one is a usage error, so state the row's
 invocation as `Usage:` and stop. Neither mode searches `docs/backlog/`, and launch mode needs the findings file
 because a caller that runs headless reads the findings from it.
 
 Decision and launch modes read the repo's checks doc (§ Repo checks) for three things the skill does not name:
 the status line each mode writes, the lines launch mode may not change, and the size check launch mode runs after
-its edits. Where the doc names none of them, decision mode leaves the status line as it is, and launch mode runs
-no size check and protects the spec's decisions only.
+its edits. Where the doc names none of them, each mode leaves the status line as it is, and launch mode runs no
+size check and protects the spec's decisions only.
 
 ## Phase 1: Context Gathering
 
@@ -426,12 +428,13 @@ state `Decision mode needs a user to answer its questions.` and stop before any 
 2. **Run the repo checks** (§ Repo checks). Hand the report to both agents, and clear no flag in the spec.
 3. **Launch two fresh agents in parallel**, each with the spec path and the checks report. Neither sees the
    other's answer.
-4. **Settle the critique's premises.** For each `premise:` line in the critique that the prober's list does not
-   hold, send all of them to the prober in one follow-up message, and count its answers with the rest in the
-   summary.
-5. **Choose the questions.** Ask only what changes the spec: a decision the critique calls a one-way door, a
-   premise answered `fails`, and a two-way door for which the critique names a concrete scenario. Drop the rest,
-   and count them in the summary.
+4. **Settle the critique's premises.** Collect each `premise:` line in the critique that names a claim missing
+   from the prober's list. Send them all to the prober in one follow-up message (`SendMessage` to the agent's
+   name), and count its answers with the rest in the summary.
+5. **Choose the questions.** A decision that already carries a ruling (the user's words and a date) is settled:
+   ask it again only when a premise it rests on answers `fails`. Of the open decisions, ask a one-way door, a
+   decision whose premise answers `fails`, and a two-way door for which the critique wrote a question. Drop the
+   rest, and count them in the summary.
 6. **Ask.** In the message, before the question tool: one sentence on what is happening, then a good/bad table
    for each question, then your recommended pick. Then ask every question in one `AskUserQuestion` call, a second
    only when the questions outnumber what one call holds. Each option says in plain words what changes for the
@@ -487,7 +490,7 @@ Decision mode edits nothing else in the spec: no fact, cycle, inventory row or t
 Savor (decision): [spec name]
   Agents: premise prober + product critique
   Premises: N hold, M fail, K unread
-  Questions: N asked, M dropped (two-way, no scenario)
+  Questions: N asked, M dropped (settled, or two-way with no question)
   Decisions recorded: [numbers]
   Status line: [the wording written, or "unchanged — the checks doc names none"]
 ```
@@ -502,56 +505,67 @@ It runs Phases 1, 2 and 2b as a full savor does, and differs in three ways:
 2. **The lead edits nothing in the spec, and judges no finding.** The session that implements the spec does not
    judge its own spec's findings. In Phase 1, each fix the staleness check or the repo checks doc tells the lead to
    make in the spec goes into the `lead` scratch file, one numbered finding per fix, instead of into the spec.
+   Each reviewer's prompt names that file as claims the lead already knows are stale, so no reviewer spends
+   turns finding them again.
 3. **Phase 3 runs in one fresh agent**, with the `premise fails` class below.
+
+**The findings file must not exist when the run starts.** If it does, state that the path is taken and stop, so
+an old table can never pass for this run's.
 
 ### The handoff to the Phase 3 agent
 
-Pick a scratch directory (the session's scratchpad if it has one, else a new temporary directory). Each Phase 2
-and 2b reviewer's prompt ends with: `Write your full answer to <directory>/<reviewer>.md, then reply with that
-path only.` The names are `systems`, `integration`, `testing-strategy`, `historical` and each persona's name; the
-lead writes `lead.md`. When every reviewer returns, create an empty file for any reviewer whose file does not
-exist. Do not summarise, merge or filter an answer.
+Make a new, empty scratch directory for this run (under the session's scratchpad if it has one, else a new
+temporary directory), so no file from an earlier run is read as this run's. Write `lead.md` there before the
+reviewers launch. Each Phase 2 and 2b reviewer's prompt ends with: `Write your full answer to
+<directory>/<name>.md, then reply with that path only.` The names are `systems`, `integration`,
+`testing-strategy`, `historical`, and each persona's name in lowercase with every run of other characters as one
+hyphen (`reliability-failure-modes-reviewer`). When every reviewer returns, create an empty file for any reviewer
+whose file does not exist. Do not summarise, merge or filter an answer.
 
 Then launch one fresh agent, in the same working tree, with no worktree isolation, because it edits the spec in
-place. Give it the spec path, the checks report's path, the scratch files' paths, the findings file path, the
-path of this `SKILL.md`, and this brief:
+place. Give it the spec path, the repo's checks doc path (or `none`), the checks report's path, the findings file
+path, the path of this `SKILL.md`, the scratch files' paths, the list of reviewers that ran, the reviewers
+skipped with the reason (`testing strategy: no test plan`), and this brief:
 
-> Read only § Phase 3 and § Launch mode of the `SKILL.md` at the path given, and apply § Phase 3 to the spec at
-> the path given, with the reviewers' files as the findings. Do not apply a `premise fails` fix. Then run the
-> size check the repo's checks doc names, if it names one. Write the findings table to the findings file. Answer
-> with the Phase 4 summary only, opening with the `Stop:` block when § Launch mode's stop applies. Ask the user
-> nothing. Do not commit.
+> Read § Phase 2b's historical classification heuristics, § Phase 3, § Phase 4 and § Launch mode of the
+> `SKILL.md` at the path given, and the repo's checks doc. Apply § Phase 3 to the spec at the path given, with
+> the reviewers' files as the findings; a reviewer's file name is its tag. Do not apply a `premise fails` fix.
+> Then run the size check the checks doc names, if it names one. If nothing stops the run, set the status line
+> to the wording the checks doc names for launch mode, if it names one. Write the findings table to the findings
+> file. Answer with the summary § Launch mode states, and nothing else. Ask the user nothing. Do not commit.
 
-The lead prints the agent's summary as it is. If the agent
-returns nothing, or the findings file does not exist after it returns, the lead states that the Phase 3 agent
-failed and stops with `Stop: the Phase 3 agent wrote no findings.`
+The lead prints the agent's summary as it is. If the agent returns nothing, or the findings file does not exist
+after it returns, the lead prints `Stop: agent failed — the Phase 3 agent wrote no findings file.`, then the
+paths of the spec and the scratch directory, and stops. The spec may hold part of the agent's edits.
 
 ### The `premise fails` class
 
-A finding is `premise fails` when its fix would change one of the spec's decisions, or a line the repo's checks
-doc says launch mode may not change. The agent records it and leaves the decision or line as it is: a decision
-belongs to whoever made it, and a run that rewrites one has stopped being the run the user agreed to.
+A finding is `premise fails` when its fix would change one of the spec's decisions or a line the repo's checks
+doc says launch mode may not change, or would add a decision that is a one-way door (§ Decision mode's critique
+brief defines one) and that the spec does not make. Phase 3's "make the choice" does not reach it. The agent
+records it and leaves the spec as it is: a decision belongs to whoever made it, and a run that makes or rewrites
+one has stopped being the run the user agreed to.
 
 ### The findings file
 
 One Markdown table, one row per finding that survived the signal filter:
 
 ```
-| # | Reviewer | Finding | Outcome |
-|---|---|---|---|
-| 1 | systems, integration | <one-line claim> | fixed |
+| Reviewer | Finding | Outcome |
+|---|---|---|
+| systems, integration | <one-line claim> | fixed |
 ```
 
-`Outcome` is `fixed` (fix in spec), `noted` (code comment), `discarded` (not a problem) or `premise fails`. A
-savor with no surviving finding writes the header and no rows.
+`Outcome` is `fixed` (fix in spec), `noted` (code comment), `discarded` (not a problem) or `premise fails`. A `|`
+inside a cell is written `\|`. A savor with no surviving finding writes the header and no rows.
 
 ### The stop
 
 Launch mode stops when a finding is `premise fails`, or when the size check the repo's checks doc names fails on
-the spec after the edits. The Phase 4 summary then opens with:
+the spec after the edits. The summary then opens with one block per cause, each `premise fails` finding its own:
 
 ```
-Stop: <one line: the premise that fails, or the size check and its number>
+Stop: <premise fails | size check> — <one line: the premise that fails, or the size check and its number>
   Question: <what the user decides>
   Options:
     A. <option> — <what the code does under it>
@@ -563,12 +577,12 @@ caller does next.
 
 ### Launch mode's summary
 
-The Phase 4 summary, with its first line `Savor (launch): [spec name]` and two more lines after `Sections
-modified:`:
+Any `Stop:` blocks come first. Then the Phase 4 summary, with its first line `Savor (launch): [spec name]`, its
+`Findings:` line counting `W premise fails` beside the other three, and two more lines after `Sections modified:`:
 
 ```
   Findings file: <path>
-  Stop: none | premise fails | size check
+  Stop: none | premise fails | size check | premise fails + size check
 ```
 
 ## Rules
