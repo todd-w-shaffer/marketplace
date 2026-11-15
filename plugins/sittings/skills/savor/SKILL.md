@@ -34,10 +34,10 @@ The first argument picks the mode:
 | `/savor decision <spec>` | decision | § Decision mode: the planning pass |
 | `/savor launch <spec> <findings file>` | launch | § Launch mode: Phases 1, 2 and 2b, then Phase 3 in a fresh agent |
 
-A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. A launch
-invocation with no findings file is a usage error: state `Usage: /savor launch <spec> <findings file>` and stop,
-because a caller that runs headless reads the findings from that file. A decision or launch invocation with no
-spec path is the same usage error; neither mode searches `docs/backlog/`.
+A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. In decision and
+launch mode every argument in the mode's row is required: a missing one is a usage error, so state the row's
+invocation as `Usage:` and stop. Neither mode searches `docs/backlog/`, and launch mode needs the findings file
+because a caller that runs headless reads the findings from it.
 
 Decision and launch modes read the repo's checks doc (§ Repo checks) for three things the skill does not name:
 the status line each mode writes, the lines launch mode may not change, and the size check launch mode runs after
@@ -386,7 +386,7 @@ For each surviving finding, classify:
 - **Fix in spec** — the spec text is wrong or incomplete, update it
 - **Code comment** — the spec is fine but the implementation needs a specific explanatory comment at a specific location (name the file and the function/block)
 - **Not a problem** — the reviewer flagged something that's actually handled; discard
-- **Premise fails** — launch mode only: the fix would change a decision or a protected line, so it is recorded and not applied (§ Launch mode)
+- **Premise fails** — launch mode only; § Launch mode defines it
 
 Present the merged findings as a numbered list with classifications. Then immediately apply all "fix in spec" items — edit the spec file directly. For "code comment" items, add a note in the relevant spec section with the exact location (e.g., "Add a comment in `handleEvent()` explaining why X is safe here").
 
@@ -422,14 +422,13 @@ reviewer, no contextual persona and no historical reviewer.
 **Decision mode needs a user to answer.** If the `AskUserQuestion` tool is not available, as in a headless run,
 state `Decision mode needs a user to answer its questions.` and stop before any agent launches.
 
-1. **Read** the spec completely, and `CLAUDE.md`.
-2. **Run the repo checks** (§ Repo checks). Hand the report to both agents. Clear no flag in the spec: decision
-   mode edits the decisions and the status line only.
+1. **Read** the spec completely, and `CLAUDE.md` if it is not already in context.
+2. **Run the repo checks** (§ Repo checks). Hand the report to both agents, and clear no flag in the spec.
 3. **Launch two fresh agents in parallel**, each with the spec path and the checks report. Neither sees the
    other's answer.
 4. **Settle the critique's premises.** For each `premise:` line in the critique that the prober's list does not
-   hold, read the code yourself and answer `holds`, `fails` or `unread` as the prober would. Count it with the
-   prober's answers in the summary.
+   hold, send all of them to the prober in one follow-up message, and count its answers with the rest in the
+   summary.
 5. **Choose the questions.** Ask only what changes the spec: a decision the critique calls a one-way door, a
    premise answered `fails`, and a two-way door for which the critique names a concrete scenario. Drop the rest,
    and count them in the summary.
@@ -498,32 +497,32 @@ Savor (decision): [spec name]
 Launch mode is the full savor, run on the tree the spec will change, at the start of the run that implements it.
 It runs Phases 1, 2 and 2b as a full savor does, and differs in three ways:
 
-1. **It never asks.** It makes no `AskUserQuestion` call, in any phase. Where a full savor would ask, the lead writes
-   the question to the `lead` scratch file below, and the Phase 3 agent classifies it.
+1. **It never asks.** It makes no `AskUserQuestion` call. A question the lead would put to the user goes into
+   the `lead` scratch file, and the Phase 3 agent classifies it.
 2. **The lead edits nothing in the spec, and judges no finding.** The session that implements the spec does not
    judge its own spec's findings. In Phase 1, each fix the staleness check or the repo checks doc tells the lead to
-   make in the spec goes into a scratch file named `lead`, one numbered finding per fix, instead of into the spec.
-3. **Phase 3 runs in one fresh agent**, and it has a fourth class, `premise fails`.
+   make in the spec goes into the `lead` scratch file, one numbered finding per fix, instead of into the spec.
+3. **Phase 3 runs in one fresh agent**, with the `premise fails` class below.
 
 ### The handoff to the Phase 3 agent
 
-When every Phase 2 and 2b reviewer returns, write each reviewer's answer verbatim to its own file in a scratch
-directory (the session's scratchpad if it has one, else a new temporary directory), named for the reviewer:
-`systems`, `integration`, `testing-strategy`, `historical`, a persona's name, and `lead`. A reviewer that returns
-nothing gets an empty file. Do not summarise, merge or filter an answer.
+Pick a scratch directory (the session's scratchpad if it has one, else a new temporary directory). Each Phase 2
+and 2b reviewer's prompt ends with: `Write your full answer to <directory>/<reviewer>.md, then reply with that
+path only.` The names are `systems`, `integration`, `testing-strategy`, `historical` and each persona's name; the
+lead writes `lead.md`. When every reviewer returns, create an empty file for any reviewer whose file does not
+exist. Do not summarise, merge or filter an answer.
 
 Then launch one fresh agent, in the same working tree, with no worktree isolation, because it edits the spec in
 place. Give it the spec path, the checks report's path, the scratch files' paths, the findings file path, the
 path of this `SKILL.md`, and this brief:
 
-> Apply § Phase 3 and § Launch mode of the `SKILL.md` at the path given to the spec at the path given. Merge the
-> reviewers' files, tag each finding with its reviewer (several tags when reviewers converged), apply the signal
-> filter, and classify each surviving finding. Edit the spec for each `fix in spec` and `code comment` finding.
-> Do not apply a `premise fails` fix. Then run the size check the repo's checks doc names, if it names one.
-> Write the findings table to the findings file. Answer with the Phase 4 summary only, opening with the `Stop:`
-> block when § Launch mode's stop applies. Ask the user nothing. Do not commit.
+> Read only § Phase 3 and § Launch mode of the `SKILL.md` at the path given, and apply § Phase 3 to the spec at
+> the path given, with the reviewers' files as the findings. Do not apply a `premise fails` fix. Then run the
+> size check the repo's checks doc names, if it names one. Write the findings table to the findings file. Answer
+> with the Phase 4 summary only, opening with the `Stop:` block when § Launch mode's stop applies. Ask the user
+> nothing. Do not commit.
 
-The lead prints the agent's summary as it is, and does not re-read or re-judge the findings. If the agent
+The lead prints the agent's summary as it is. If the agent
 returns nothing, or the findings file does not exist after it returns, the lead states that the Phase 3 agent
 failed and stops with `Stop: the Phase 3 agent wrote no findings.`
 
@@ -579,6 +578,6 @@ modified:`:
 - **Tighten only.** Fix incorrect assumptions, add missing edge case handling within existing scope, clarify ambiguous language, flag test breakage the TDD plan missed, and make each proposed test able to fail for the reason it names.
 - **Respect design decisions.** If the spec chose approach A over B, do not re-litigate. Only flag if approach A literally won't compile or has a bug.
 - **Fresh context is the point.** The agents don't see the conversation that produced the spec. Their naivete is the value — they'll ask "wait, does this actually work?" about things the author assumed.
-- **Launch mode never asks; it stops.** A question a launch savor cannot settle is a `premise fails` finding and a `Stop:` block, never an `AskUserQuestion` call.
+- **Launch mode never asks; it stops.** § Launch mode says where its questions go and when it stops.
 - **One pass.** Savor runs once. If the user wants another round after fixes, they invoke `/savor` again. Don't recursively self-audit.
 - **No implementation.** Savor edits the spec markdown. It never creates or modifies source code, tests, or build files. That's `/spec-to-ship`'s job.
