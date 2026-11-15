@@ -4,8 +4,13 @@ description: >-
   Pre-implementation spec audit. Structural review (systems correctness +
   codebase integration + testing strategy when the spec has a TDD plan) plus
   contextual personas chosen per-spec to cover blind spots the structural
-  reviewers can't see. Tightens without growing or shrinking scope.
-  Triggered by: "/savor", "savor this spec", "review this spec before shipping".
+  reviewers can't see. Tightens without growing or shrinking scope. Two modes:
+  decision mode is the planning pass, which probes each decision's premise,
+  presses the decisions as product calls and records the user's answers; launch
+  mode is the full savor at the start of a run, which never asks and stops on a
+  failed premise.
+  Triggered by: "/savor", "savor this spec", "review this spec before shipping",
+  "/savor decision", "decision pass", "/savor launch", "savor this at launch".
 user_invocable: true
 ---
 
@@ -18,6 +23,26 @@ The mandate is **tighten, not grow or shrink**. Findings fix corner cases, clari
 ## Input
 
 The user provides a path to a spec (markdown). If no path is given, check `docs/backlog/` for recently modified `.spec.md` files and confirm which one.
+
+## Modes
+
+The first argument picks the mode:
+
+| Invocation | Mode | What runs |
+|---|---|---|
+| `/savor <spec>` | full | Phases 1 to 4, as written below |
+| `/savor decision <spec>` | decision | § Decision mode: the planning pass |
+| `/savor launch <spec> <findings file>` | launch | § Launch mode: Phases 1, 2 and 2b, then Phase 3 in a fresh agent |
+
+A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. A launch
+invocation with no findings file is a usage error: state `Usage: /savor launch <spec> <findings file>` and stop,
+because a caller that runs headless reads the findings from that file. A decision or launch invocation with no
+spec path is the same usage error; neither mode searches `docs/backlog/`.
+
+Decision and launch modes read the repo's checks doc (§ Repo checks) for three things the skill does not name:
+the status line each mode writes, the lines launch mode may not change, and the size check launch mode runs after
+its edits. Where the doc names none of them, decision mode leaves the status line as it is, and launch mode runs
+no size check and protects the spec's decisions only.
 
 ## Phase 1: Context Gathering
 
@@ -386,6 +411,83 @@ The `Kept by reviewer:` line counts findings that survived the signal
 filter, per reviewer. It exists so a persona that stops earning its place
 can be cut on evidence rather than gut: a reviewer with zero kept findings
 across many savors is a candidate for removal.
+
+## Decision mode
+
+Decision mode is the planning pass. It runs while the spec's author and the user are still talking, so a wrong
+product call is caught in prose, before a structural savor treats it as settled. It launches no structural
+reviewer, no contextual persona and no historical reviewer.
+
+**Decision mode needs a user to answer.** If the `AskUserQuestion` tool is not available, as in a headless run,
+state `Decision mode needs a user to answer its questions.` and stop before any agent launches.
+
+1. **Read** the spec completely, and `CLAUDE.md`.
+2. **Run the repo checks** (§ Repo checks). Hand the report to both agents. Clear no flag in the spec: decision
+   mode edits the decisions and the status line only.
+3. **Launch two fresh agents in parallel**, each with the spec path and the checks report. Neither sees the
+   other's answer.
+4. **Choose the questions.** Ask only what changes the spec: a decision the critique calls a one-way door, a
+   premise the prober answers `fails`, and a two-way door for which the critique names a concrete scenario. Drop
+   the rest, and count them in the summary.
+5. **Ask.** In the message, before the question tool: one sentence on what is happening, then a good/bad table
+   for each question, then your recommended pick. Then ask every question in one `AskUserQuestion` call, a second
+   only when the questions outnumber what one call holds. Each option says in plain words what changes for the
+   user or the product, and the recommended option comes first, marked `(Recommended)`. No file path, symbol or
+   count goes in an option; the measurement goes in the message.
+6. **Record.** Write each answer into the spec's decisions: the decision as ruled, the user's own words in
+   quotes, and today's date. A failed premise the user rules on becomes a decision, not a fix. Then set the status
+   line to the wording the repo's checks doc names for decision mode.
+
+Decision mode edits nothing else in the spec: no fact, cycle, inventory row or touchlist entry.
+
+### The premise prober
+
+**Brief (pass to the agent verbatim):**
+
+> You check the premises of a spec's decisions against the code as it is today. You do not judge whether a
+> decision is a good idea.
+>
+> 1. List each decision that rests on a claim about existing code: that a function handles a case, that a file
+>    holds a value, that a script reads a line, that nothing else calls a name.
+> 2. For each claim, read the code that would show it. Use the checks report first; read the file where the
+>    report does not answer.
+> 3. Answer `holds` or `fails` for each claim, with the file and the symbol you read, and one sentence of what the
+>    code does. A claim you cannot settle by reading is `unread`, with the reason.
+> 4. Report as a numbered list, one claim per item: the decision's number, the claim, the answer, the read. Keep
+>    it under 400 words. Suggest no change to the spec.
+
+### The product-critique reviewer
+
+**Brief (pass to the agent verbatim):**
+
+> You are a product owner's sparring partner, reviewing a spec's decisions before they are settled. You press
+> the decisions themselves: product direction, user behaviour, business trade-offs. You do not review how the
+> spec is built.
+>
+> 1. For each decision, say whether it is a **one-way door** (costly or impossible to undo once shipped: stored
+>    data, a public URL, a promise to users, a name others depend on) or a **two-way door** (cheap to change
+>    later).
+> 2. Test each decision against concrete scenarios: a named kind of user doing a named thing, or a business event
+>    such as growth, a price change, a vendor change or a support request. Say what the decision does in each.
+> 3. For each decision where a scenario goes badly, write a question for the user, with two to four options and
+>    what each option costs.
+> 4. Stay out of implementation and architecture: no naming, file layout, test plan, performance or code
+>    structure. Another review covers those.
+> 5. Where a decision rests on a claim about the code that looks false, name the claim in one line, marked
+>    `premise:`, and do not investigate it. A separate agent reads the code.
+> 6. Report as a numbered list, one decision per item: its door, the scenarios, and the question, or
+>    `no question` with the reason. Keep it under 400 words. Suggest no new feature and no removed scope.
+
+### Decision mode's summary
+
+```
+Savor (decision): [spec name]
+  Agents: premise prober + product critique
+  Premises: N hold, M fail, K unread
+  Questions: N asked, M dropped (two-way, no scenario)
+  Decisions recorded: [numbers]
+  Status line: [the wording written, or "unchanged — the checks doc names none"]
+```
 
 ## Rules
 
