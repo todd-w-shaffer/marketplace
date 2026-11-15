@@ -27,6 +27,7 @@ import {
   miniBar,
   phaseGlyphs,
   phaseLine,
+  phaseName,
   segmentWidth,
   spendTotals,
   inFlight,
@@ -377,7 +378,7 @@ export const register: Register = on => {
             <Text>
               {i === cut && '  '}
               <Text color={labelColor(p)} bold={p.state === 'live'}>
-                {p.short.slice(0, width - 1).padEnd(width)}
+                {phaseName(p, width - 1).padEnd(width)}
               </Text>
             </Text>
           ))}

@@ -288,10 +288,31 @@ export function phaseGlyphs(state: PhaseState, width: number): string {
 /**
  * Columns per bar block in a pane `bodyColumns` wide: the card's border and
  * padding take four, the session marker two, and each block keeps a gap.
- * Between 3 and 7, so a short label still fits and a wide pane stays calm.
+ * Between 3 and 9, so a short label still fits, `simplify` fits on a wide
+ * pane, and a wider pane stays calm.
  */
 export const segmentWidth = (bodyColumns: number, phases: number): number =>
-  Math.max(3, Math.min(7, Math.floor((bodyColumns - 6) / Math.max(1, phases))))
+  Math.max(3, Math.min(9, Math.floor((bodyColumns - 6) / Math.max(1, phases))))
+
+// Each phase's names under the bar, longest first.
+const PHASE_NAMES: Record<string, readonly string[]> = {
+  savor: ['savor', 'sav'],
+  simplify: ['simplify', 'simpl', 'simp'],
+  'review xhigh': ['xhigh', 'xhi'],
+  shipping: ['ship'],
+  archiving: ['archive', 'arch'],
+}
+
+/**
+ * A phase's label under its bar block: the longest of its names that fits in
+ * `room` columns. A cycle reads `cycle 2`, then `c2`. When no name fits, the
+ * shortest name is cut to `room`.
+ */
+export function phaseName(p: Phase, room: number): string {
+  const k = /^cycle (\d+)$/.exec(p.label)
+  const names = k ? [p.label, `c${k[1] ?? ''}`] : (PHASE_NAMES[p.label] ?? [p.short])
+  return names.find(n => n.length <= room) ?? (names[names.length - 1] ?? '').slice(0, room)
+}
 
 /** The phase in flight's short name, or `done` once every phase is. */
 export const livePhase = (phases: readonly Phase[]): string => phases.find(p => p.state === 'live')?.short ?? 'done'

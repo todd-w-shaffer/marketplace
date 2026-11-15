@@ -30,6 +30,7 @@ import {
   outcomeDetail,
   phaseGlyphs,
   phaseLine,
+  phaseName,
   phasesOf,
   queueTree,
   parseStatus,
@@ -207,11 +208,27 @@ test('a run with step 0 opens on a savor phase that its own commit closes', asyn
   )
 })
 
-test('bar blocks fit the pane, between 3 and 7 columns', async () => {
+test('bar blocks fit the pane, between 3 and 9 columns', async () => {
   expect(segmentWidth(60, 7)).toBe(7)
   expect(segmentWidth(40, 7)).toBe(4)
   expect(segmentWidth(12, 9)).toBe(3)
-  expect(segmentWidth(200, 5)).toBe(7)
+  expect(segmentWidth(200, 5)).toBe(9)
+})
+
+test('a phase label is the longest of its names that fits, never a cut word', async () => {
+  const label = (p: string, room: number): string => phaseName({ label: p, short: '', state: 'todo' }, room)
+  expect(label('simplify', 8)).toBe('simplify')
+  expect(label('simplify', 6)).toBe('simpl')
+  expect(label('simplify', 4)).toBe('simp')
+  expect(label('simplify', 2)).toBe('si')
+  expect(label('savor', 4)).toBe('sav')
+  expect(label('archiving', 8)).toBe('archive')
+  expect(label('archiving', 5)).toBe('arch')
+  expect(label('review xhigh', 4)).toBe('xhi')
+  expect(label('shipping', 8)).toBe('ship')
+  expect(label('cycle 2', 8)).toBe('cycle 2')
+  expect(label('cycle 2', 6)).toBe('c2')
+  expect(label('cycle 12', 2)).toBe('c1')
 })
 
 test('phases fall back when the cycle count or the cycle number is missing', async () => {
