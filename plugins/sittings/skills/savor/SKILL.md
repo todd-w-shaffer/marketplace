@@ -33,13 +33,15 @@ The first argument picks the mode:
 | `/savor <spec>` | full | Phases 1 to 4, as written below |
 | `/savor decision <spec>` | decision | § Decision mode: the planning pass |
 | `/savor launch <spec> <findings file>` | launch | § Launch mode: Phases 1, 2 and 2b, then Phase 3 in a fresh agent |
+| `/savor launch <spec> <findings file> <since sha> <spec sha>` | launch, delta pass | § The delta pass: Phase 1, then reviewers on what changed since an earlier launch savor |
 
 A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. A `/savor`
 invocation picks its mode from its first argument only. A request made in words, with no `/savor` invocation,
 picks a mode only when it asks for that mode by name ("run a decision pass", "savor this at launch"), with the
 same required arguments. In decision and
 launch mode every argument in the mode's row is required: a missing one is a usage error, so state the row's
-invocation as `Usage:` and stop. Neither mode searches `docs/backlog/`, and launch mode needs the findings file
+invocation as `Usage:` and stop. Launch mode's two trailing arguments come as a pair or not at all: one alone is a
+usage error. Neither mode searches `docs/backlog/`, and launch mode needs the findings file
 because a caller that runs headless reads the findings from it.
 
 Decision and launch modes read the repo's checks doc (§ Repo checks) for three things the skill does not name:
@@ -577,6 +579,32 @@ Stop: <premise fails | size check> — <one line: the premise that fails, or the
 The edits and the findings file stay in place, uncommitted, for the caller. The repo's own rules say what the
 caller does next.
 
+### The delta pass
+
+Launch mode given `<since sha>` and `<spec sha>` reviews only what changed since an earlier launch savor of this
+spec. `<since sha>` is the base that savor ran at. `<spec sha>` is the commit that holds the spec as that savor
+left it. The caller supplies both; the skill reads neither from the spec.
+
+1. **Check the pair.** If `<since sha>` is not an ancestor of `HEAD`
+   (`git merge-base --is-ancestor <since sha> HEAD` fails), or `<spec sha>`'s tree holds no file at the spec's
+   path, run the full launch pass instead, and the summary's `Delta:` line says which check failed.
+2. **Run Phase 1 whole**: the staleness check and the repo checks, as launch mode does.
+3. **Build two deltas.** The spec delta is `git diff <spec sha> HEAD -- <spec>`, with the hunk that changes only
+   the status line left out, because the caller rewrites that line on every relaunch. The code delta is
+   `git diff <since sha> HEAD` over the paths the repo checks report names, or over every path the spec names in
+   backticks when there is no report, with the spec itself left out. Write both to the scratch directory, as
+   `spec-delta.diff` and `code-delta.diff`.
+4. **Both deltas empty: no reviewer runs.** Write the findings file with the header and no rows, set the status
+   line as launch mode does, and print the summary. No Phase 3 agent runs.
+5. **Otherwise, launch the reviewers the deltas call for.** Systems and integration always run. Testing strategy
+   runs when either delta touches the spec's test plan or a test file. The historical reviewer runs only when the
+   code delta is not empty. Pick personas from § Phase 2b's guide by what the deltas touch, not by the whole spec.
+   Each prompt carries both delta paths and this line: `Judge what these deltas change, and what they break in the
+   rest of the spec. The rest of the spec was savored at <since sha>; do not review it again.`
+6. **Phase 3 runs in one fresh agent**, as § The handoff to the Phase 3 agent states, with `premise fails` and the
+   stop unchanged. Give it the two delta paths beside the reviewers' files, and both shas, which it copies into
+   the summary's `Delta:` line as given.
+
 ### Launch mode's summary
 
 Any `Stop:` blocks come first. Then the Phase 4 summary, with its first line `Savor (launch): [spec name]`, its
@@ -585,6 +613,13 @@ Any `Stop:` blocks come first. Then the Phase 4 summary, with its first line `Sa
 ```
   Findings file: <path>
   Stop: none | premise fails | size check | premise fails + size check | agent failed
+```
+
+A delta pass adds a line after `Stop:`, and each reviewer it skipped goes on the `Structural:` or `Contextual:`
+line as `<name> (no delta)`:
+
+```
+  Delta: since <since sha>, spec at <spec sha> | none, both deltas empty | full pass, <the check that failed>
 ```
 
 ## Rules
