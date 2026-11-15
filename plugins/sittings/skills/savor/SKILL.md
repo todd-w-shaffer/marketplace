@@ -386,6 +386,7 @@ For each surviving finding, classify:
 - **Fix in spec** — the spec text is wrong or incomplete, update it
 - **Code comment** — the spec is fine but the implementation needs a specific explanatory comment at a specific location (name the file and the function/block)
 - **Not a problem** — the reviewer flagged something that's actually handled; discard
+- **Premise fails** — launch mode only: the fix would change a decision or a protected line, so it is recorded and not applied (§ Launch mode)
 
 Present the merged findings as a numbered list with classifications. Then immediately apply all "fix in spec" items — edit the spec file directly. For "code comment" items, add a note in the relevant spec section with the exact location (e.g., "Add a comment in `handleEvent()` explaining why X is safe here").
 
@@ -426,15 +427,18 @@ state `Decision mode needs a user to answer its questions.` and stop before any 
    mode edits the decisions and the status line only.
 3. **Launch two fresh agents in parallel**, each with the spec path and the checks report. Neither sees the
    other's answer.
-4. **Choose the questions.** Ask only what changes the spec: a decision the critique calls a one-way door, a
-   premise the prober answers `fails`, and a two-way door for which the critique names a concrete scenario. Drop
-   the rest, and count them in the summary.
-5. **Ask.** In the message, before the question tool: one sentence on what is happening, then a good/bad table
+4. **Settle the critique's premises.** For each `premise:` line in the critique that the prober's list does not
+   hold, read the code yourself and answer `holds`, `fails` or `unread` as the prober would. Count it with the
+   prober's answers in the summary.
+5. **Choose the questions.** Ask only what changes the spec: a decision the critique calls a one-way door, a
+   premise answered `fails`, and a two-way door for which the critique names a concrete scenario. Drop the rest,
+   and count them in the summary.
+6. **Ask.** In the message, before the question tool: one sentence on what is happening, then a good/bad table
    for each question, then your recommended pick. Then ask every question in one `AskUserQuestion` call, a second
    only when the questions outnumber what one call holds. Each option says in plain words what changes for the
    user or the product, and the recommended option comes first, marked `(Recommended)`. No file path, symbol or
    count goes in an option; the measurement goes in the message.
-6. **Record.** Write each answer into the spec's decisions: the decision as ruled, the user's own words in
+7. **Record.** Write each answer into the spec's decisions: the decision as ruled, the user's own words in
    quotes, and today's date. A failed premise the user rules on becomes a decision, not a fix. Then set the status
    line to the wording the repo's checks doc names for decision mode.
 
@@ -489,6 +493,85 @@ Savor (decision): [spec name]
   Status line: [the wording written, or "unchanged — the checks doc names none"]
 ```
 
+## Launch mode
+
+Launch mode is the full savor, run on the tree the spec will change, at the start of the run that implements it.
+It runs Phases 1, 2 and 2b as a full savor does, and differs in three ways:
+
+1. **It never asks.** It makes no `AskUserQuestion` call, in any phase. Where a full savor would ask, the lead writes
+   the question to the `lead` scratch file below, and the Phase 3 agent classifies it.
+2. **The lead edits nothing in the spec, and judges no finding.** The session that implements the spec does not
+   judge its own spec's findings. In Phase 1, each fix the staleness check or the repo checks doc tells the lead to
+   make in the spec goes into a scratch file named `lead`, one numbered finding per fix, instead of into the spec.
+3. **Phase 3 runs in one fresh agent**, and it has a fourth class, `premise fails`.
+
+### The handoff to the Phase 3 agent
+
+When every Phase 2 and 2b reviewer returns, write each reviewer's answer verbatim to its own file in a scratch
+directory (the session's scratchpad if it has one, else a new temporary directory), named for the reviewer:
+`systems`, `integration`, `testing-strategy`, `historical`, a persona's name, and `lead`. A reviewer that returns
+nothing gets an empty file. Do not summarise, merge or filter an answer.
+
+Then launch one fresh agent, in the same working tree, with no worktree isolation, because it edits the spec in
+place. Give it the spec path, the checks report's path, the scratch files' paths, the findings file path, the
+path of this `SKILL.md`, and this brief:
+
+> Apply § Phase 3 and § Launch mode of the `SKILL.md` at the path given to the spec at the path given. Merge the
+> reviewers' files, tag each finding with its reviewer (several tags when reviewers converged), apply the signal
+> filter, and classify each surviving finding. Edit the spec for each `fix in spec` and `code comment` finding.
+> Do not apply a `premise fails` fix. Then run the size check the repo's checks doc names, if it names one.
+> Write the findings table to the findings file. Answer with the Phase 4 summary only, opening with the `Stop:`
+> block when § Launch mode's stop applies. Ask the user nothing. Do not commit.
+
+The lead prints the agent's summary as it is, and does not re-read or re-judge the findings. If the agent
+returns nothing, or the findings file does not exist after it returns, the lead states that the Phase 3 agent
+failed and stops with `Stop: the Phase 3 agent wrote no findings.`
+
+### The `premise fails` class
+
+A finding is `premise fails` when its fix would change one of the spec's decisions, or a line the repo's checks
+doc says launch mode may not change. The agent records it and leaves the decision or line as it is: a decision
+belongs to whoever made it, and a run that rewrites one has stopped being the run the user agreed to.
+
+### The findings file
+
+One Markdown table, one row per finding that survived the signal filter:
+
+```
+| # | Reviewer | Finding | Outcome |
+|---|---|---|---|
+| 1 | systems, integration | <one-line claim> | fixed |
+```
+
+`Outcome` is `fixed` (fix in spec), `noted` (code comment), `discarded` (not a problem) or `premise fails`. A
+savor with no surviving finding writes the header and no rows.
+
+### The stop
+
+Launch mode stops when a finding is `premise fails`, or when the size check the repo's checks doc names fails on
+the spec after the edits. The Phase 4 summary then opens with:
+
+```
+Stop: <one line: the premise that fails, or the size check and its number>
+  Question: <what the user decides>
+  Options:
+    A. <option> — <what the code does under it>
+    B. <option> — <what the code does under it>
+```
+
+The edits and the findings file stay in place, uncommitted, for the caller. The repo's own rules say what the
+caller does next.
+
+### Launch mode's summary
+
+The Phase 4 summary, with its first line `Savor (launch): [spec name]` and two more lines after `Sections
+modified:`:
+
+```
+  Findings file: <path>
+  Stop: none | premise fails | size check
+```
+
 ## Rules
 
 - **Never grow scope.** Do not add features, cycles, phases, or new files to the touchlist.
@@ -496,5 +579,6 @@ Savor (decision): [spec name]
 - **Tighten only.** Fix incorrect assumptions, add missing edge case handling within existing scope, clarify ambiguous language, flag test breakage the TDD plan missed, and make each proposed test able to fail for the reason it names.
 - **Respect design decisions.** If the spec chose approach A over B, do not re-litigate. Only flag if approach A literally won't compile or has a bug.
 - **Fresh context is the point.** The agents don't see the conversation that produced the spec. Their naivete is the value — they'll ask "wait, does this actually work?" about things the author assumed.
+- **Launch mode never asks; it stops.** A question a launch savor cannot settle is a `premise fails` finding and a `Stop:` block, never an `AskUserQuestion` call.
 - **One pass.** Savor runs once. If the user wants another round after fixes, they invoke `/savor` again. Don't recursively self-audit.
 - **No implementation.** Savor edits the spec markdown. It never creates or modifies source code, tests, or build files. That's `/spec-to-ship`'s job.
