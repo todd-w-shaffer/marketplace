@@ -34,9 +34,10 @@ The first argument picks the mode:
 | `/savor decision <spec>` | decision | § Decision mode: the planning pass |
 | `/savor launch <spec> <findings file>` | launch | § Launch mode: Phases 1, 2 and 2b, then Phase 3 in a fresh agent |
 
-A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. A request in
-words that names a mode ("decision pass", "savor this at launch") picks that mode, with the same required
-arguments. In decision and
+A first argument that is neither `decision` nor `launch` is the spec path, and the mode is full. A `/savor`
+invocation picks its mode from its first argument only. A request made in words, with no `/savor` invocation,
+picks a mode only when it asks for that mode by name ("run a decision pass", "savor this at launch"), with the
+same required arguments. In decision and
 launch mode every argument in the mode's row is required: a missing one is a usage error, so state the row's
 invocation as `Usage:` and stop. Neither mode searches `docs/backlog/`, and launch mode needs the findings file
 because a caller that runs headless reads the findings from it.
@@ -535,8 +536,9 @@ skipped with the reason (`testing strategy: no test plan`), and this brief:
 > file. Answer with the summary § Launch mode states, and nothing else. Ask the user nothing. Do not commit.
 
 The lead prints the agent's summary as it is. If the agent returns nothing, or the findings file does not exist
-after it returns, the lead prints `Stop: agent failed — the Phase 3 agent wrote no findings file.`, then the
-paths of the spec and the scratch directory, and stops. The spec may hold part of the agent's edits.
+after it returns, the lead prints the stop block `Stop: agent failed — the Phase 3 agent wrote no findings file.`
+with the paths of the spec and the scratch directory in place of a question and options, then the summary line
+`Stop: agent failed`, and stops. The spec may hold part of the agent's edits.
 
 ### The `premise fails` class
 
@@ -582,7 +584,7 @@ Any `Stop:` blocks come first. Then the Phase 4 summary, with its first line `Sa
 
 ```
   Findings file: <path>
-  Stop: none | premise fails | size check | premise fails + size check
+  Stop: none | premise fails | size check | premise fails + size check | agent failed
 ```
 
 ## Rules
