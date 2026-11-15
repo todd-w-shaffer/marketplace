@@ -40,6 +40,9 @@ function sandbox(t) {
   const sb = {
     root,
     env,
+    projects,
+    lockFile: env.TOKEN_LEDGER_FILE + '.lock',
+    errorsFile: env.TOKEN_LEDGER_FILE + '.errors',
 
     git(cwd, ...args) {
       const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
@@ -51,29 +54,47 @@ function sandbox(t) {
       return spawnSync('git', args, { cwd, env, encoding: 'utf8' }).status;
     },
 
-    ledger(cwd, session, ...args) {
-      const r = spawnSync(process.execPath, [BIN, ...args], {
-        cwd, env: { ...env, CLAUDE_CODE_SESSION_ID: session }, encoding: 'utf8',
+    // A run with its status and stderr kept, which `ledger` drops.
+    run(cwd, session, args, { env: extra = {}, input } = {}) {
+      return spawnSync(process.execPath, [BIN, ...args], {
+        cwd, env: { ...env, CLAUDE_CODE_SESSION_ID: session, ...extra }, encoding: 'utf8', input,
       });
+    },
+
+    ledger(cwd, session, ...args) {
+      const r = sb.run(cwd, session, args);
       if (r.status !== 0) throw new Error(`token-ledger ${args.join(' ')} failed:\n${r.stderr}`);
       return r.stdout;
     },
 
-    // Writes one API call to a session's transcript, timestamped now. `dup`
-    // writes it twice, as Claude Code does for a call with several blocks.
-    spend(session, { model = 'claude-haiku-4-5', sub = false, dup = false, ...usage } = {}) {
+    // The hook's run, which waits for the detached recorder it starts.
+    sessionEnd(session, input) {
+      return sb.run(sb.root, session, ['session-end'], { input, env: { TOKEN_LEDGER_SESSION_END_WAIT: '1' } });
+    },
+
+    // Writes one API call to a session's transcript, timestamped now, with the
+    // `cwd` and `gitBranch` every real line carries, and returns the timestamp.
+    // `dup` writes it twice, as Claude Code does for a call with several blocks.
+    // `again` writes the previous call once more under a later timestamp, as
+    // Claude Code does when a call's blocks land seconds apart.
+    spend(session, {
+      model = 'claude-haiku-4-5', sub = false, dup = false, again = false, cwd = root, gitBranch = 'main',
+      project = projects, ...usage
+    } = {}) {
+      if (!again) ++nextId;
       tick();
       const file = sub
-        ? path.join(projects, session, 'subagents', 'agent-1.jsonl')
-        : path.join(projects, session + '.jsonl');
+        ? path.join(project, session, 'subagents', 'agent-1.jsonl')
+        : path.join(project, session + '.jsonl');
       fs.mkdirSync(path.dirname(file), { recursive: true });
+      const timestamp = new Date().toISOString();
       const line = JSON.stringify({
-        type: 'assistant',
-        timestamp: new Date().toISOString(),
-        message: { id: `msg_${++nextId}`, model, usage },
+        type: 'assistant', timestamp, cwd, gitBranch,
+        message: { id: `msg_${nextId}`, model, usage },
       }) + '\n';
       fs.appendFileSync(file, dup ? line + line : line);
       tick();
+      return timestamp;
     },
 
     rows() {
@@ -108,10 +129,10 @@ function sandbox(t) {
     },
 
     // Writes a file and commits it by hand, as /commit does before it tallies.
-    commit(cwd, file, body = file + '\n') {
+    commit(cwd, file, body = file + '\n', subject = 'add ' + file) {
       fs.writeFileSync(path.join(cwd, file), body);
       sb.git(cwd, 'add', file);
-      sb.git(cwd, 'commit', '-q', '-m', 'add ' + file);
+      sb.git(cwd, 'commit', '-q', '-m', subject);
       return sb.git(cwd, 'rev-parse', 'HEAD');
     },
 
@@ -225,12 +246,12 @@ test('ship from a branch with an upstream, after ship-begin', (t) => {
   assert.equal(sb.markers()[dir], undefined, 'ship clears its marker');
 });
 
-function worktree(sb) {
+function worktree(sb, branch = 'feature') {
   const main = sb.repo();
   sb.git(main, 'remote', 'set-head', 'origin', 'main');
   const wt = path.join(sb.root, 'work-feature');
-  sb.git(main, 'worktree', 'add', '-q', '-b', 'feature', wt);
-  assert.equal(spawnSync('git', ['rev-parse', '@{u}'], { cwd: wt, env: sb.env }).status, 128, 'feature has no upstream');
+  sb.git(main, 'worktree', 'add', '-q', '-b', branch, wt);
+  assert.equal(spawnSync('git', ['rev-parse', '@{u}'], { cwd: wt, env: sb.env }).status, 128, `${branch} has no upstream`);
   return { main, wt };
 }
 
@@ -280,6 +301,390 @@ test('ship with no marker and nothing pushed refuses rather than guessing', (t) 
   assert.equal(r.status, 1);
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /no ship base/);
+});
+
+// ---------- phase and sitting ----------
+
+const RULES = {
+  phase: [{ field: 'branch', pattern: '^worktree-plan-', phase: 'plan' }],
+  sitting: [{ field: 'subject', pattern: '\\bS(\\d+)\\b' }],
+};
+
+function writeRules(dir, body) {
+  fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'token-ledger.json'),
+    typeof body === 'string' ? body : JSON.stringify(body));
+}
+
+test('commit and ship take their phase and sitting from the main checkout\'s rules file', (t) => {
+  const sb = sandbox(t);
+  const { main, wt } = worktree(sb, 'worktree-plan-x');
+  // The rules sit in the main checkout only: a worktree's own root has none.
+  writeRules(main, RULES);
+
+  sb.spend('s1', { input_tokens: 1e6 });
+  const sha = sb.commit(wt, 'a.txt', 'a\n', 'docs(briefs): savor S581');
+  sb.ledger(wt, 's1', 'commit', '--sha', sha);
+  const row = last(sb.rows(), 'commit');
+  assert.equal(row.phase, 'plan');
+  assert.equal(row.sitting, 581);
+
+  sb.ledger(wt, 's1', 'ship-begin');
+  sb.git(wt, 'push', '-q', 'origin', 'HEAD:main');
+  sb.ledger(wt, 's1', 'ship');
+  const ship = last(sb.rows(), 'ship');
+  // A ship entry has no subject, so the subject rule cannot name its sitting.
+  assert.equal(ship.phase, 'plan');
+  assert.ok(!('sitting' in ship));
+});
+
+test('with no rules file an entry carries neither field', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  sb.spend('s1', { input_tokens: 1e6 });
+  const r = sb.run(dir, 's1', ['commit', '--sha', sb.commit(dir, 'a.txt', 'a\n', 'docs(briefs): savor S581')]);
+  assert.equal(r.status, 0);
+  assert.equal(r.stderr, '');
+  const row = last(sb.rows(), 'commit');
+  assert.ok(!('phase' in row));
+  assert.ok(!('sitting' in row));
+});
+
+for (const [name, body] of [
+  ['not JSON', '{phase:'],
+  ['not an object', '[]'],
+  ['a phase list that is not a list', { phase: 'plan' }],
+  ['a rule with no pattern', { sitting: [{ field: 'subject' }] }],
+  ['a pattern that is not a regex', { sitting: [{ field: 'subject', pattern: '(' }] }],
+]) {
+  test(`a rules file that is ${name} writes neither field, says so once, and still costs the commit`, (t) => {
+    const sb = sandbox(t);
+    const dir = sb.repo();
+    writeRules(dir, body);
+    sb.spend('s1', { input_tokens: 1e6 });
+    const r = sb.run(dir, 's1', ['commit', '--sha', sb.commit(dir, 'a.txt', 'a\n', 'docs(briefs): savor S581')]);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /^\*\*Cost:\*\* \$1\.00 · /);
+    assert.equal(r.stderr.split('\n').filter(Boolean).length, 1, r.stderr);
+    assert.match(r.stderr, /token-ledger\.json/);
+    const row = last(sb.rows(), 'commit');
+    assert.ok(!('phase' in row));
+    assert.ok(!('sitting' in row));
+  });
+}
+
+test('a sitting rule whose match has no all-digit group falls through to the next rule', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  writeRules(dir, { sitting: [
+    { field: 'subject', pattern: 'savor' },
+    { field: 'repo', pattern: 'nothing-matches-(\\d+)' },
+    { field: 'subject', pattern: 'S(\\d+)' },
+  ] });
+  sb.spend('s1', { input_tokens: 1e6 });
+  sb.ledger(dir, 's1', 'commit', '--sha', sb.commit(dir, 'a.txt', 'a\n', 'docs(briefs): savor S581'));
+  assert.equal(last(sb.rows(), 'commit').sitting, 581);
+});
+
+// ---------- sessions ----------
+//
+// A session id here is hex and dashes, because session-end refuses any other.
+
+const S1 = 'aaaa-0001';
+
+// A session with one tracked commit and a tail past it: $0.50 lead, then a
+// $0.50 subagent call last, on a branch the repo itself is not on.
+function withTail(sb) {
+  const dir = sb.repo();
+  sb.tracked(dir, S1, 'a.txt');
+  const at = { cwd: dir, gitBranch: 'topic' };
+  sb.spend(S1, { input_tokens: 5e5, ...at });
+  const end = sb.spend(S1, { sub: true, output_tokens: 1e5, ...at });
+  return { dir, end };
+}
+
+const sessions = (sb) => sb.rows().filter((r) => r.kind === 'session');
+
+test('record-session prices the tail past the last window and records it once', (t) => {
+  const sb = sandbox(t);
+  const { dir, end } = withTail(sb);
+  const commitEnd = last(sb.rows(), 'commit').window.end;
+
+  // Run from outside the repo: repo and branch come from the transcript.
+  assert.equal(sb.run(sb.root, 'other', ['record-session', S1]).status, 0);
+  const [row] = sessions(sb);
+  assert.ok(row, 'one session entry');
+  assert.equal(row.via, 'session-end');
+  assert.equal(row.session, S1);
+  assert.deepEqual(row.window, { start: commitEnd, end });
+  assert.equal(row.ts, end);
+  assert.equal(row.repo, dir);
+  assert.equal(row.project, dir);
+  assert.equal(row.branch, 'topic');
+  assert.equal(row.lead.calls, 1);
+  assert.equal(row.sub.calls, 1);
+  assert.equal(row.cost.usd, 1);
+  assert.equal(row.cost.lead_usd, 0.5);
+  assert.equal(row.cost.sub_usd, 0.5);
+  assert.ok(!('phase' in row));
+
+  assert.equal(sb.run(sb.root, 'other', ['record-session', S1]).status, 0);
+  assert.equal(sessions(sb).length, 1, 'a second run records nothing');
+});
+
+test('a call written again seconds later is counted once across two recordings', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  sb.tracked(dir, S1, 'a.txt');
+  const end = sb.spend(S1, { input_tokens: 5e5, cwd: dir });
+  sb.spend(S1, { input_tokens: 5e5, cwd: dir, again: true });
+  sb.ledger(sb.root, 'other', 'record-session', S1);
+  sb.ledger(sb.root, 'other', 'record-session', S1);
+  const got = sessions(sb);
+  assert.equal(got.length, 1, 'the later line of a counted call opens no second entry');
+  assert.equal(got[0].window.end, end, 'the window ends at the last counted line');
+  assert.equal(got[0].cost.usd, 0.5);
+});
+
+test('a call a commit counted is not counted again when its later line lands after the commit', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  sb.tracked(dir, S1, 'a.txt');
+  sb.spend(S1, { input_tokens: 1e6, cwd: dir, again: true });
+  sb.ledger(sb.root, 'other', 'record-session', S1);
+  assert.equal(sessions(sb).length, 0, 'the call belongs to the commit that holds its first line');
+});
+
+test('a session entry takes its phase and sitting from the transcript\'s project', (t) => {
+  const sb = sandbox(t);
+  const { dir } = withTail(sb);
+  writeRules(dir, { phase: [{ field: 'branch', pattern: '^topic$', phase: 'build' }],
+    sitting: [{ field: 'subject', pattern: 'S(\\d+)' }, { field: 'branch', pattern: 'topic' }] });
+  sb.ledger(sb.root, 'other', 'record-session', S1);
+  const [row] = sessions(sb);
+  assert.equal(row.phase, 'build');
+  assert.ok(!('sitting' in row));
+});
+
+test('a commit after a recorded tail starts where the tail ended', (t) => {
+  const sb = sandbox(t);
+  const { dir, end } = withTail(sb);
+  sb.ledger(sb.root, 'other', 'record-session', S1);
+  sb.tracked(dir, S1, 'b.txt');
+  const c = last(sb.rows(), 'commit');
+  assert.equal(c.window.start, end);
+  assert.equal(c.cost.usd, 1);
+});
+
+test('session-end records the named session through a detached recorder', (t) => {
+  const sb = sandbox(t);
+  const { end } = withTail(sb);
+  const input = JSON.stringify({ session_id: S1, transcript_path: '/nowhere.jsonl', cwd: '/nowhere', reason: 'clear' });
+  const r = sb.sessionEnd('stale-env-id', input);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '');
+  const [row] = sessions(sb);
+  assert.ok(row, 'the entry landed');
+  assert.equal(row.window.end, end);
+  assert.equal(row.via, 'session-end');
+});
+
+for (const [name, input] of [
+  ['empty', ''],
+  ['not JSON', '{session_id'],
+  ['not an object', '["aaaa-0001"]'],
+  ['missing session_id', '{"reason":"clear"}'],
+  ['a session_id that is a path', '{"session_id":"../aaaa-0001"}'],
+]) {
+  test(`session-end with stdin that is ${name} exits 0 and records nothing`, (t) => {
+    const sb = sandbox(t);
+    withTail(sb);
+    const r = sb.sessionEnd(S1, input);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '');
+    assert.equal(sessions(sb).length, 0);
+    assert.ok(!fs.existsSync(sb.errorsFile), 'no recorder was started');
+  });
+}
+
+test('a recorder that fails leaves its stderr in the errors file', (t) => {
+  const sb = sandbox(t);
+  sb.repo();
+  const input = JSON.stringify({ session_id: 'dead-beef' });
+  const r = sb.sessionEnd(S1, input);
+  assert.equal(r.status, 0);
+  assert.match(fs.readFileSync(sb.errorsFile, 'utf8'), /dead-beef/);
+});
+
+// ---------- the lock ----------
+
+// The binary asks `ps` in UTC under the C locale; the writer runs in another zone.
+function startOf(pid) {
+  return spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)],
+    { encoding: 'utf8', env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' } }).stdout.trim();
+}
+
+function holdLock(sb, pid, start) {
+  fs.writeFileSync(sb.lockFile, JSON.stringify({ pid, start }));
+}
+
+async function liveChild(t) {
+  const { spawn } = require('child_process');
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e6)'], { stdio: 'ignore' });
+  t.after(() => child.kill());
+  await new Promise((r) => child.once('spawn', r));
+  return child;
+}
+
+// A writer that never took over would wait forever; under no-wait it fails.
+function noWaitCommit(sb, dir) {
+  sb.spend(S1, { input_tokens: 1e6 });
+  const sha = sb.commit(dir, 'a.txt');
+  return sb.run(dir, S1, ['commit', '--sha', sha], { env: { TOKEN_LEDGER_LOCK_NOWAIT: '1', TZ: 'Pacific/Honolulu' } });
+}
+
+test('a lock whose holder has exited does not stop a commit', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  holdLock(sb, dead, 'Thu Jan  1 00:00:00 1970');
+  const r = noWaitCommit(sb, dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(sb.rows().length, 1);
+  assert.ok(!fs.existsSync(sb.lockFile), 'the writer released the lock');
+});
+
+test('a lock whose pid now names another process does not stop a commit', async (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  const child = await liveChild(t);
+  holdLock(sb, child.pid, 'Thu Jan  1 00:00:00 1970');
+  const r = noWaitCommit(sb, dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(sb.rows().length, 1);
+});
+
+test('a live holder keeps the lock: a no-wait writer refuses and appends nothing', async (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  const child = await liveChild(t);
+  holdLock(sb, child.pid, startOf(child.pid));
+  const r = noWaitCommit(sb, dir);
+  assert.notEqual(r.status, 0);
+  assert.equal(r.stdout, '');
+  assert.match(r.stderr, new RegExp(`\\b${child.pid}\\b`));
+  assert.equal(sb.rows().length, 0);
+});
+
+test('an append after a torn last line starts a line of its own', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+  fs.writeFileSync(sb.env.TOKEN_LEDGER_FILE, '{"v":1,"kind":"commit","ts":"2026-01-01T00:00');
+  sb.tracked(dir, S1, 'a.txt');
+  const lines = fs.readFileSync(sb.env.TOKEN_LEDGER_FILE, 'utf8').split('\n').filter(Boolean);
+  assert.equal(lines.length, 2);
+  assert.equal(JSON.parse(lines[1]).kind, 'commit');
+});
+
+// ---------- sweep ----------
+
+// Four sessions: never recorded (its cwd is a worktree path that is gone),
+// a tail past its last commit, fully recorded, and a tail on the session the
+// sweep runs inside, which it skips.
+function fourSessions(sb) {
+  const dir = sb.repo();
+  const gone = path.join(sb.root, 'gone', '.claude', 'worktrees', 'old');
+  const ids = { never: 'aaaa-0001', tail: 'bbbb-0002', done: 'cccc-0003', self: 'dddd-0004' };
+
+  sb.spend(ids.never, { input_tokens: 1e6, cwd: gone, gitBranch: 'old' });
+
+  sb.tracked(dir, ids.tail, 'a.txt');
+  sb.spend(ids.tail, { input_tokens: 5e5, cwd: dir });
+
+  sb.tracked(dir, ids.done, 'b.txt');
+
+  sb.tracked(dir, ids.self, 'c.txt');
+  sb.spend(ids.self, { input_tokens: 2e5, cwd: dir });
+  return { dir, gone, ids };
+}
+
+const sweep = (sb, ...args) => sb.run(sb.root, 'dddd-0004', ['sweep', ...args]);
+
+test('sweep records every session past its last window, skipping its own', (t) => {
+  const sb = sandbox(t);
+  const { dir, ids } = fourSessions(sb);
+  const before = sb.rows().length;
+
+  const dry = sweep(sb, '--dry-run');
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.equal(sb.rows().length, before, 'a dry run appends nothing');
+
+  const r = sweep(sb);
+  assert.equal(r.status, 0, r.stderr);
+  const got = sessions(sb);
+  assert.deepEqual(got.map((e) => e.session).sort(), [ids.never, ids.tail]);
+  assert.ok(got.every((e) => e.via === 'sweep'));
+
+  const never = got.find((e) => e.session === ids.never);
+  assert.equal(never.project, path.join(sb.root, 'gone'));
+  assert.equal(never.repo, path.join(sb.root, 'gone', '.claude', 'worktrees', 'old'));
+  assert.equal(never.branch, 'old');
+  assert.equal(never.cost.usd, 1);
+  const tail = got.find((e) => e.session === ids.tail);
+  assert.equal(tail.project, dir);
+  assert.equal(tail.cost.usd, 0.5);
+
+  // The dry run's per-project totals sum to what the real sweep wrote.
+  const totals = [...dry.stdout.matchAll(/^\$(\d+\.\d\d) · (\d+) sessions? · (.+)$/gm)];
+  const byProject = Object.fromEntries(totals.map((m) => [m[3], Number(m[1])]));
+  assert.deepEqual(byProject, { [path.join(sb.root, 'gone')]: 1, [dir]: 0.5 });
+
+  assert.equal(sweep(sb).status, 0);
+  assert.equal(sessions(sb).length, 2, 'a second sweep records nothing');
+});
+
+test('report prints the session spend outside any commit under its table', (t) => {
+  const sb = sandbox(t);
+  fourSessions(sb);
+  sweep(sb);
+  const out = sb.ledger(sb.root, 'dddd-0004', 'report', '--by', 'commit', '--all');
+  assert.match(out, /\n2 sessions · \$1\.50 outside any commit\n$/);
+  const ships = sb.ledger(sb.root, 'dddd-0004', 'report', '--all');
+  assert.match(ships, /\(nothing recorded\)\n2 sessions · \$1\.50 outside any commit\n$/);
+});
+
+test('a transcript that throws is reported and the sweep goes on', (t) => {
+  const sb = sandbox(t);
+  const { ids } = fourSessions(sb);
+  // A directory where a transcript should be makes its scan throw.
+  fs.mkdirSync(path.join(sb.projects, 'eeee-0005.jsonl'));
+  const r = sweep(sb);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /eeee-0005/);
+  assert.deepEqual(sessions(sb).map((e) => e.session).sort(), [ids.never, ids.tail]);
+});
+
+for (const args of [['--dry-run', '1'], ['--dry-run=true'], ['--dryrun']]) {
+  test(`sweep ${args.join(' ')} refuses and appends nothing`, (t) => {
+    const sb = sandbox(t);
+    fourSessions(sb);
+    const before = sb.rows().length;
+    const r = sweep(sb, ...args);
+    assert.notEqual(r.status, 0);
+    assert.equal(sb.rows().length, before);
+  });
+}
+
+test('a sweep reports a broken rules file once', (t) => {
+  const sb = sandbox(t);
+  const { dir } = fourSessions(sb);
+  fs.mkdirSync(path.join(dir, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude', 'token-ledger.json'), '{not json');
+  sb.spend('ffff-0006', { input_tokens: 1e5, cwd: dir });
+  const r = sweep(sb);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(sessions(sb).filter((e) => e.project === dir).length, 2, 'two sessions of one project');
+  assert.equal(r.stderr.match(/token-ledger\.json/g).length, 1);
 });
 
 // ---------- report ----------

@@ -8,14 +8,18 @@
 // the summary loses a line and nothing else. /ship lives in this plugin too,
 // and finds this script on PATH.
 //
-// Subcommands: commit, ship-begin, ship, and report and stats, which are run
-// by hand to read the ledger back.
+// A session's spend past its last commit or ship is recorded too, as a
+// `session` entry: the SessionEnd hook runs `session-end`, which starts
+// `record-session` detached, and `sweep` records every session the hook missed.
+//
+// Subcommands: commit, ship-begin, ship, record-session, session-end, sweep,
+// and report and stats, which are run by hand to read the ledger back.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { isShipDocs } = require('../lib/commit-format');
 
 const HOME = os.homedir();
@@ -48,11 +52,24 @@ function gitSafe(args, opts) {
   try { return git(args, { stdio: ['ignore', 'pipe', 'ignore'], ...opts }); } catch { return null; }
 }
 
-// The main checkout's root. Every worktree of one repository shares it, while
-// --show-toplevel names the worktree, so this is the key a report groups on.
+// `repo` is the worktree's root and `project` the main checkout's. Every
+// worktree of one repository shares the project, so it is the key a report
+// groups on. Null outside a work tree.
+function gitRoots(cwd) {
+  const out = gitSafe([...(cwd ? ['-C', cwd] : []),
+    'rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir']);
+  if (!out) return null;
+  const [repo, common] = out.split('\n');
+  return { repo, project: path.dirname(common) };
+}
+
 function projectRoot() {
-  const common = gitSafe(['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  return common ? path.dirname(common) : gitSafe(['rev-parse', '--show-toplevel']);
+  const roots = gitRoots();
+  return roots && roots.project;
+}
+
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
 }
 
 // An entry belongs to a project when it records that root. An entry written
@@ -79,22 +96,94 @@ function pct(part, whole) {
   return Math.round((part / whole) * 100);
 }
 
+// ---------- phase and sitting ----------
+
+const TAG_FIELDS = new Set(['branch', 'repo', 'subject']);
+
+// A project names its own phases and sittings in <root>/.claude/token-ledger.json:
+// {"phase": [{field, pattern, phase}], "sitting": [{field, pattern}]}. In each
+// list the first rule that matches wins. A sitting is the match's first group,
+// and a match whose first group is not all digits goes on to the next rule.
+// A missing file tags nothing, silently; a broken one tags nothing and says so
+// on stderr, so the cost line still prints.
+function readRules(root) {
+  if (!root) return null;
+  const file = path.join(root, '.claude', 'token-ledger.json');
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  const bad = (why) => { throw new Error(`${file}: ${why}`); };
+  let doc;
+  try { doc = JSON.parse(raw); } catch { bad('not JSON'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) bad('not a JSON object');
+  const rules = {};
+  for (const key of ['phase', 'sitting']) {
+    if (doc[key] === undefined) { rules[key] = []; continue; }
+    if (!Array.isArray(doc[key])) bad(`"${key}" is not a list`);
+    rules[key] = doc[key].map((r, i) => {
+      const where = `${key}[${i}]`;
+      if (!r || typeof r !== 'object' || !TAG_FIELDS.has(r.field) || typeof r.pattern !== 'string') {
+        bad(`${where} is not {field: branch|repo|subject, pattern}`);
+      }
+      if (key === 'phase' && typeof r.phase !== 'string') bad(`${where} has no string "phase"`);
+      let re;
+      try { re = new RegExp(r.pattern); } catch (e) { bad(`${where} pattern: ${e.message}`); }
+      return { field: r.field, re, phase: r.phase };
+    });
+  }
+  return rules;
+}
+
+// A sweep tags many entries of one project, so each project's rules are read
+// once per run, and a broken file is reported once.
+const rulesByRoot = new Map();
+
+// The entry's `phase` and `sitting`, each present only when a rule matched.
+function tagsFor(entry, root) {
+  if (!rulesByRoot.has(root)) {
+    try { rulesByRoot.set(root, readRules(root)); } catch (e) { rulesByRoot.set(root, e); }
+  }
+  const rules = rulesByRoot.get(root);
+  if (rules instanceof Error) {
+    process.stderr.write(`token-ledger: ${rules.message}; no phase or sitting recorded\n`);
+    rulesByRoot.set(root, null);
+    return {};
+  }
+  if (!rules) return {};
+  const tags = {};
+  const value = (r) => (typeof entry[r.field] === 'string' ? entry[r.field] : null);
+  for (const r of rules.phase) {
+    const v = value(r);
+    if (v !== null && r.re.test(v)) { tags.phase = r.phase; break; }
+  }
+  for (const r of rules.sitting) {
+    const v = value(r);
+    const m = v === null ? null : r.re.exec(v);
+    if (m && /^\d+$/.test(m[1] || '')) { tags.sitting = Number(m[1]); break; }
+  }
+  return tags;
+}
+
 // ---------- transcripts ----------
+
+// A session's lead transcript and subagent directory, in one project directory.
+function sessionAt(dir, sessionId) {
+  return { file: path.join(dir, sessionId + '.jsonl'), subagentDir: path.join(dir, sessionId, 'subagents') };
+}
 
 function findSession(sessionId) {
   let dirs;
   try { dirs = fs.readdirSync(PROJECTS); } catch { return null; }
   for (const d of dirs) {
-    const file = path.join(PROJECTS, d, sessionId + '.jsonl');
-    if (fs.existsSync(file)) {
-      return { file, subagentDir: path.join(PROJECTS, d, sessionId, 'subagents') };
-    }
+    const sess = sessionAt(path.join(PROJECTS, d), sessionId);
+    if (fs.existsSync(sess.file)) return sess;
   }
   return null;
 }
 
+// `lastMs` is the latest counted usage line in the window; `where` is the cwd and branch of the
+// latest usage line up to the window's end, counted or not.
 function newBucket() {
-  return { calls: 0, byModel: {} };
+  return { calls: 0, byModel: {}, lastMs: -Infinity, where: null };
 }
 
 function addUsage(bucket, model, u) {
@@ -124,13 +213,28 @@ async function scanFile(file, bucket, seen, startMs, endMs) {
     const model = row.message.model;
     if (!model || model === '<synthetic>') continue;
     const ts = Date.parse(row.timestamp);
-    if (!Number.isFinite(ts) || ts <= startMs || ts > endMs) continue;
-    // One API call is written to several lines; the message id de-duplicates it.
+    if (!Number.isFinite(ts) || ts > endMs) continue;
+    if (typeof row.cwd === 'string') bucket.where = { cwd: row.cwd, branch: row.gitBranch };
+    // One API call is written to several lines, seconds apart at times; the
+    // message id de-duplicates it. A call belongs to the window that holds its
+    // first line, so an id seen before the start is never counted here.
     const id = row.message.id || (row.requestId && row.requestId + ':' + model);
+    if (ts <= startMs) { if (id) seen.add(id); continue; }
     if (!id || seen.has(id)) continue;
     seen.add(id);
+    bucket.lastMs = Math.max(bucket.lastMs, ts);
     addUsage(bucket, model, row.message.usage);
   }
+}
+
+function subagentFiles(sess) {
+  try {
+    return fs.readdirSync(sess.subagentDir).filter((f) => f.endsWith('.jsonl')).map((f) => path.join(sess.subagentDir, f));
+  } catch { return []; } // a session with no subagents has no directory
+}
+
+function filesOf(sess) {
+  return [sess.file, ...subagentFiles(sess)];
 }
 
 async function collect(sess, startMs, endMs) {
@@ -138,11 +242,7 @@ async function collect(sess, startMs, endMs) {
   const sub = newBucket();
   const seen = new Set();
   await scanFile(sess.file, lead, seen, startMs, endMs);
-  let subFiles = [];
-  try {
-    subFiles = fs.readdirSync(sess.subagentDir).filter((f) => f.endsWith('.jsonl'));
-  } catch { /* a session with no subagents has no directory */ }
-  for (const f of subFiles) await scanFile(path.join(sess.subagentDir, f), sub, seen, startMs, endMs);
+  for (const f of subagentFiles(sess)) await scanFile(f, sub, seen, startMs, endMs);
   return { lead, sub };
 }
 
@@ -221,9 +321,131 @@ function readLedger() {
   return rows;
 }
 
+// Runs under the lock. A ledger whose last byte is not a newline ends in a
+// torn line, so the entry starts a line of its own rather than joining it.
 function appendLedger(entry) {
   fs.mkdirSync(path.dirname(LEDGER), { recursive: true });
-  fs.appendFileSync(LEDGER, JSON.stringify(entry) + '\n');
+  let sep = '';
+  try {
+    const fd = fs.openSync(LEDGER, 'r');
+    try {
+      const { size } = fs.fstatSync(fd);
+      const b = Buffer.alloc(1);
+      if (size && fs.readSync(fd, b, 0, 1, size - 1) === 1 && b[0] !== 0x0a) sep = '\n';
+    } finally { fs.closeSync(fd); }
+  } catch { /* no ledger yet */ }
+  fs.appendFileSync(LEDGER, sep + JSON.stringify(entry) + '\n');
+}
+
+// ---------- the lock ----------
+//
+// One writer at a time holds <LEDGER>.lock from its ledger read to its append.
+// The lock holds the holder's pid and that process's start time, and a writer
+// takes over a lock whose holder is gone: exited, or a pid now reused by
+// another process. There is no clock in it, so a live holder is waited for.
+
+const LOCK = LEDGER + '.lock';
+const GUARD = LOCK + '.takeover';
+
+// `ps` prints the start time in the caller's zone and locale, so every writer
+// asks in one zone and one locale, or a live holder reads as a reused pid.
+function startTimeOf(pid) {
+  try {
+    return execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
+    }).trim() || null;
+  } catch { return null; }
+}
+
+// A lock record that does not parse names no live holder.
+function holderOf(raw) {
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// A live pid is a reused one only when both start times are known and differ;
+// `withStart` false checks the pid alone, which spawns no `ps`.
+function holderGone(rec, withStart = true) {
+  if (!rec || !Number.isInteger(rec.pid) || rec.pid <= 0) return true;
+  try { process.kill(rec.pid, 0); } catch (e) {
+    if (e.code === 'ESRCH') return true;
+    if (e.code !== 'EPERM') throw e;
+  }
+  if (!withStart || typeof rec.start !== 'string') return false;
+  const now = startTimeOf(rec.pid);
+  return now !== null && now !== rec.start;
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Deletes the lock when it still holds the gone record. Only a takeover
+// deletes another writer's lock, and a takeover runs under GUARD, a second
+// lock taken the same way, so the lock cannot change between the check and
+// the delete. A guard whose holder is gone is deleted, and the caller tries
+// again. That delete is not guarded, so two writers can take over at once
+// only after a writer died inside a takeover.
+function takeOver(gone, tmp, mine) {
+  try { fs.linkSync(tmp, GUARD); } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    let held = null;
+    try { held = fs.readFileSync(GUARD, 'utf8'); } catch { return; }
+    if (holderGone(holderOf(held))) { try { fs.unlinkSync(GUARD); } catch { /* another writer did */ } }
+    return;
+  }
+  try {
+    let now = null;
+    try { now = fs.readFileSync(LOCK, 'utf8'); } catch { return; }
+    if (now === gone) fs.unlinkSync(LOCK);
+  } finally { release(GUARD, mine); }
+}
+
+// Answers the record the lock now holds. The record is written to a file of
+// its own and linked into place, so the lock file never appears empty.
+// A sweep takes the lock once per session, so this process's record is made once.
+let myRecord = null;
+
+function takeLock() {
+  fs.mkdirSync(path.dirname(LOCK), { recursive: true });
+  const mine = myRecord || (myRecord = JSON.stringify({ pid: process.pid, start: startTimeOf(process.pid) }));
+  const tmp = `${LOCK}.${process.pid}`;
+  fs.writeFileSync(tmp, mine);
+  try {
+    let told = false;
+    // A waiter checks the pid on every poll and the start time, which spawns
+    // `ps`, when the record changes and every 20th poll after.
+    let checked = null; let polls = 0;
+    for (;;) {
+      try { fs.linkSync(tmp, LOCK); return mine; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+      let held;
+      try { held = fs.readFileSync(LOCK, 'utf8'); } catch (e) {
+        if (e.code === 'ENOENT') continue;
+        throw e;
+      }
+      const withStart = held !== checked || ++polls % 20 === 0;
+      if (withStart) { checked = held; polls = 0; }
+      const holder = holderOf(held);
+      if (holderGone(holder, withStart)) { takeOver(held, tmp, mine); continue; }
+      const { pid } = holder;
+      if (process.env.TOKEN_LEDGER_LOCK_NOWAIT === '1') throw new Error(`the ledger lock is held by pid ${pid}`);
+      if (!told) {
+        process.stderr.write(`token-ledger: waiting for the ledger lock held by pid ${pid}\n`);
+        told = true;
+      }
+      sleepMs(50);
+    }
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* the link keeps the record */ }
+  }
+}
+
+function release(file, mine) {
+  try { if (fs.readFileSync(file, 'utf8') === mine) fs.unlinkSync(file); } catch { /* not ours */ }
+}
+
+async function withLock(fn) {
+  const mine = takeLock();
+  try { return await fn(); } finally { release(LOCK, mine); }
 }
 
 // Windows are contiguous: a commit starts where this session's last entry ended,
@@ -280,51 +502,182 @@ function sessionId() {
   return id;
 }
 
-async function windowFor(sess, rows, id) {
+async function startFor(sess, rows, id) {
   const last = lastEndForSession(rows, id);
-  const start = last === null ? await firstTimestamp(sess.file) - 1 : last;
-  return { startMs: start, endMs: Date.now() };
+  return last === null ? await firstTimestamp(sess.file) - 1 : last;
+}
+
+// A scan is a window and the usage in it: {startMs, endMs, lead, sub}.
+async function scanOf(sess, startMs, endMs) {
+  return { startMs, endMs, ...await collect(sess, startMs, endMs) };
+}
+
+// The usage past `startMs`, up to the last usage line across the lead file
+// and its subagent files; null when there is none.
+async function tailOf(sess, startMs) {
+  const { lead, sub } = await collect(sess, startMs, Infinity);
+  if (!lead.calls && !sub.calls) return null;
+  return { startMs, endMs: Math.max(lead.lastMs, sub.lastMs), lead, sub };
+}
+
+// A writer scans from `startMs` before it takes the lock, so a /commit never
+// waits behind a whole scan. Under the lock it re-reads the ledger, and when
+// another writer moved the session's start meanwhile, it answers `rescan` of
+// the new start instead of `scanned`.
+async function rescanIfMoved(sess, id, startMs, scanned, rescan, rows = readLedger()) {
+  const now = await startFor(sess, rows, id);
+  return now === startMs ? scanned : rescan(now);
+}
+
+// A commit's or a ship's rescan: from the moved start to the end it scanned to,
+// or to the start itself when the start moved past that end.
+function rescanTo(sess, scan0) {
+  return (startMs) => scanOf(sess, startMs, Math.max(scan0.endMs, startMs));
+}
+
+function windowOf(scan) {
+  return { start: new Date(scan.startMs).toISOString(), end: new Date(scan.endMs).toISOString() };
+}
+
+function usageOf(scan) {
+  return {
+    lead: { calls: scan.lead.calls, by_model: scan.lead.byModel },
+    sub: { calls: scan.sub.calls, by_model: scan.sub.byModel },
+  };
+}
+
+// ---------- rootOf ----------
+
+function isDir(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+// A recorded session's repo and project, from a transcript line's cwd rather
+// than this process's. A cwd that is gone, as an archived worktree is, answers
+// from the path: the project is the cwd cut at /.claude/worktrees/. A sweep
+// meets one cwd in many sessions, so each answer is kept for the run.
+const rootsByCwd = new Map();
+
+function rootOf(cwd) {
+  if (typeof cwd !== 'string' || !cwd) return { repo: null, project: null };
+  if (!rootsByCwd.has(cwd)) {
+    const cut = cwd.indexOf(path.sep + path.join('.claude', 'worktrees') + path.sep);
+    rootsByCwd.set(cwd, (isDir(cwd) && gitRoots(cwd)) || { repo: cwd, project: cut > -1 ? cwd.slice(0, cut) : cwd });
+  }
+  return rootsByCwd.get(cwd);
+}
+
+// ---------- sessions ----------
+
+const SESSION_ID = /^[0-9a-f-]+$/;
+
+function costOfEntry(s) {
+  return {
+    usd: Number(s.usd.toFixed(4)),
+    lead_usd: Number(s.leadUsd.toFixed(4)),
+    sub_usd: Number(s.subUsd.toFixed(4)),
+    prices_version: PRICES.version,
+    partial: s.unknown.length > 0,
+    unpriced_models: s.unknown,
+  };
+}
+
+function sizesOf(sess) {
+  return filesOf(sess).map((f) => {
+    try { return `${f}:${fs.statSync(f).size}`; } catch { return `${f}:-`; }
+  }).join('\n');
+}
+
+function sessionEntry(id, via, tail) {
+  const where = tail.lead.where || tail.sub.where || {};
+  const { repo, project } = rootOf(where.cwd);
+  const branch = typeof where.branch === 'string' ? where.branch : null;
+  return {
+    v: 1,
+    kind: 'session',
+    ts: new Date(tail.endMs).toISOString(),
+    session: id,
+    window: windowOf(tail),
+    via,
+    repo,
+    project,
+    branch,
+    ...tagsFor({ repo, branch }, project),
+    ...usageOf(tail),
+    cost: costOfEntry(summarise(tail.lead, tail.sub)),
+  };
+}
+
+// Records the session's usage past its last window as one `session` entry and
+// answers it, or null when there is nothing past the window. The hook and the
+// sweep both call this, so they cannot disagree on a window. A sweep skips a
+// session whose files grow during the scan, because a line flushed after the
+// scan but stamped before the end would fall outside every window. A sweep
+// passes the session it found and the ledger it read once for every session.
+async function recordSession(id, { via, sess = findSession(id), rows = readLedger(), sweep = false, dryRun = false } = {}) {
+  if (!sess) throw new Error(`no transcript found for session ${id}`);
+  const before = sweep ? sizesOf(sess) : null;
+  const startMs = await startFor(sess, rows, id);
+  const scanned = await tailOf(sess, startMs);
+  if (sweep && sizesOf(sess) !== before) return null;
+  // A later start sees no more than this one, so nothing scanned is nothing to record.
+  if (!scanned) return null;
+  if (dryRun) return sessionEntry(id, via, scanned);
+  return withLock(async () => {
+    const tail = await rescanIfMoved(sess, id, startMs, scanned, (s) => tailOf(sess, s));
+    if (!tail) return null;
+    const entry = sessionEntry(id, via, tail);
+    appendLedger(entry);
+    return entry;
+  });
 }
 
 // ---------- subcommands ----------
+
+// This process's worktree and project; outside a work tree it throws.
+function hereRoots() {
+  const roots = gitRoots();
+  if (!roots) throw new Error('not inside a git work tree');
+  return roots;
+}
 
 async function cmdCommit(args) {
   const id = sessionId();
   const sess = findSession(id);
   if (!sess) throw new Error(`no transcript found for session ${id}`);
-  const repo = git(['rev-parse', '--show-toplevel']);
+  const { repo, project } = hereRoots();
   const sha = git(['rev-parse', args.sha || 'HEAD']);
-  const rows = readLedger();
-  const { startMs, endMs } = await windowFor(sess, rows, id);
-  const { lead, sub } = await collect(sess, startMs, endMs);
-  const s = summarise(lead, sub);
+  const start0 = await startFor(sess, readLedger(), id);
+  const scan0 = await scanOf(sess, start0, Date.now());
   const stat = diffStat(sha);
+  const branch = gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const subject = gitSafe(['log', '-1', '--format=%s', sha]);
+  const tags = tagsFor({ repo, branch, subject }, project);
+  const patchId = patchIdOf(sha);
 
-  appendLedger({
-    v: 1,
-    kind: 'commit',
-    ts: new Date(endMs).toISOString(),
-    repo,
-    project: projectRoot(),
-    branch: gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']),
-    sha,
-    patch_id: patchIdOf(sha),
-    subject: gitSafe(['log', '-1', '--format=%s', sha]),
-    session: id,
-    window: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
-    lead: { calls: lead.calls, by_model: lead.byModel },
-    sub: { calls: sub.calls, by_model: sub.byModel },
-    cost: {
-      usd: Number(s.usd.toFixed(4)),
-      lead_usd: Number(s.leadUsd.toFixed(4)),
-      sub_usd: Number(s.subUsd.toFixed(4)),
-      prices_version: PRICES.version,
-      partial: s.unknown.length > 0,
-      unpriced_models: s.unknown,
-    },
-    files: stat.files,
-    insertions: stat.insertions,
-    deletions: stat.deletions,
+  const s = await withLock(async () => {
+    const w = await rescanIfMoved(sess, id, start0, scan0, rescanTo(sess, scan0));
+    const sum = summarise(w.lead, w.sub);
+    appendLedger({
+      v: 1,
+      kind: 'commit',
+      ts: new Date(w.endMs).toISOString(),
+      repo,
+      project,
+      branch,
+      ...tags,
+      sha,
+      patch_id: patchId,
+      subject,
+      session: id,
+      window: windowOf(w),
+      ...usageOf(w),
+      cost: costOfEntry(sum),
+      files: stat.files,
+      insertions: stat.insertions,
+      deletions: stat.deletions,
+    });
+    return sum;
   });
 
   process.stdout.write(costLine(s) + '\n');
@@ -363,7 +716,7 @@ async function cmdShip() {
   const id = sessionId();
   const sess = findSession(id);
   if (!sess) throw new Error(`no transcript found for session ${id}`);
-  const repo = git(['rev-parse', '--show-toplevel']);
+  const { repo, project } = hereRoots();
   const markers = readMarkers();
   const marker = markers[repo];
   const head = git(['rev-parse', 'HEAD']);
@@ -374,109 +727,118 @@ async function cmdShip() {
   const base = (marker && marker.base) || pushed;
   if (!base) throw new Error('no ship base: run `token-ledger ship-begin` before pushing');
   const shas = (gitSafe(['rev-list', '--reverse', `${base}..${head}`]) || '').split('\n').filter(Boolean);
-
-  const rows = readLedger();
-  const project = projectRoot();
-  const byPatch = new Map();
-  const bySha = new Map();
-  // A commit an earlier ship already claimed is not this ship's: base..HEAD
-  // reaches back over it when a pull --rebase lands after ship-begin, or when
-  // this branch was stacked on one that shipped first. A sha is the same
-  // commit in any clone; a patch-id can recur in an unrelated repo, so it
-  // only counts within this project.
-  const shipped = new Set();
-  for (const r of rows) {
-    if (r.kind === 'ship') {
-      const here = inProject(r, project);
-      for (const c of r.commits || []) {
-        if (c.sha) shipped.add(c.sha);
-        if (c.patch_id && here) shipped.add(c.patch_id);
-      }
-    }
-    if (r.kind !== 'commit') continue;
-    if (r.patch_id) byPatch.set(r.patch_id, r);
-    if (r.sha) bySha.set(r.sha, r);
-  }
+  const patchIds = new Map(shas.map((sha) => [sha, patchIdOf(sha)]));
   const subjects = new Map();
   for (const line of (gitSafe(['log', '--format=%H %s', `${base}..${head}`]) || '').split('\n')) {
     const sp = line.indexOf(' ');
     if (sp > 0) subjects.set(line.slice(0, sp), line.slice(sp + 1));
   }
-
-  const commits = [];
-  const claimed = new Set();
-  let matchedUsd = 0; let matchedLead = 0; let matchedSub = 0; let untracked = 0; let skipped = 0;
-  let partial = false;
-  for (const sha of shas) {
-    const pid = patchIdOf(sha);
-    if (shipped.has(sha) || (pid && shipped.has(pid))) { skipped++; continue; }
-    // Each entry pays once: a later commit that repeats its patch is untracked.
-    let entry = (pid && byPatch.get(pid)) || bySha.get(sha) || null;
-    if (entry && claimed.has(entry)) entry = null;
-    // A ledger entry wins over the subject: /commit can write a docs commit
-    // that reads like /ship's own.
-    if (!entry && isShipDocs(subjects.get(sha))) {
-      commits.push({ sha, patch_id: pid, matched: false, usd: null, docs: true });
-      continue;
-    }
-    if (entry) {
-      claimed.add(entry);
-      matchedUsd += entry.cost.usd;
-      matchedLead += entry.cost.lead_usd;
-      matchedSub += entry.cost.sub_usd;
-      if (entry.cost.partial) partial = true;
-    } else {
-      untracked++;
-    }
-    commits.push({ sha, patch_id: pid, matched: Boolean(entry), usd: entry ? entry.cost.usd : null });
-  }
-
+  const branch = gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const tags = tagsFor({ repo, branch }, project);
   // Everything since this session's last ledger entry is the ship's own cost.
-  const { startMs, endMs } = await windowFor(sess, rows, id);
-  const { lead, sub } = await collect(sess, startMs, endMs);
-  const o = summarise(lead, sub);
-  if (o.unknown.length) partial = true;
+  const start0 = await startFor(sess, readLedger(), id);
+  const scan0 = await scanOf(sess, start0, Date.now());
 
-  const total = matchedUsd + o.usd;
-  const leadUsd = matchedLead + o.leadUsd;
-  const subUsd = matchedSub + o.subUsd;
-  const plus = partial ? '+' : '';
+  // The matching, the entry and the marker cleanup sit between the lock's
+  // ledger read and its append.
+  const out = await withLock(async () => {
+    const rows = readLedger();
+    const w = await rescanIfMoved(sess, id, start0, scan0, rescanTo(sess, scan0), rows);
+    const { lead, sub } = w;
+    const byPatch = new Map();
+    const bySha = new Map();
+    // A commit an earlier ship already claimed is not this ship's: base..HEAD
+    // reaches back over it when a pull --rebase lands after ship-begin, or when
+    // this branch was stacked on one that shipped first. A sha is the same
+    // commit in any clone; a patch-id can recur in an unrelated repo, so it
+    // only counts within this project.
+    const shipped = new Set();
+    for (const r of rows) {
+      if (r.kind === 'ship') {
+        const here = inProject(r, project);
+        for (const c of r.commits || []) {
+          if (c.sha) shipped.add(c.sha);
+          if (c.patch_id && here) shipped.add(c.patch_id);
+        }
+      }
+      if (r.kind !== 'commit') continue;
+      if (r.patch_id) byPatch.set(r.patch_id, r);
+      if (r.sha) bySha.set(r.sha, r);
+    }
 
-  appendLedger({
-    v: 1,
-    kind: 'ship',
-    ts: new Date(endMs).toISOString(),
-    repo,
-    project,
-    branch: gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']),
-    range: `${base}..${head}`,
-    session: id,
-    window: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
-    commits,
-    overhead: {
-      lead: { calls: lead.calls, by_model: lead.byModel },
-      sub: { calls: sub.calls, by_model: sub.byModel },
-      usd: Number(o.usd.toFixed(4)),
-    },
-    cost: {
-      usd: Number(total.toFixed(4)),
-      lead_usd: Number(leadUsd.toFixed(4)),
-      sub_usd: Number(subUsd.toFixed(4)),
-      prices_version: PRICES.version,
-      partial,
-    },
-    untracked,
-    skipped,
+    const commits = [];
+    const claimed = new Set();
+    let matchedUsd = 0; let matchedLead = 0; let matchedSub = 0; let untracked = 0; let skipped = 0;
+    let partial = false;
+    for (const sha of shas) {
+      const pid = patchIds.get(sha);
+      if (shipped.has(sha) || (pid && shipped.has(pid))) { skipped++; continue; }
+      // Each entry pays once: a later commit that repeats its patch is untracked.
+      let entry = (pid && byPatch.get(pid)) || bySha.get(sha) || null;
+      if (entry && claimed.has(entry)) entry = null;
+      // A ledger entry wins over the subject: /commit can write a docs commit
+      // that reads like /ship's own.
+      if (!entry && isShipDocs(subjects.get(sha))) {
+        commits.push({ sha, patch_id: pid, matched: false, usd: null, docs: true });
+        continue;
+      }
+      if (entry) {
+        claimed.add(entry);
+        matchedUsd += entry.cost.usd;
+        matchedLead += entry.cost.lead_usd;
+        matchedSub += entry.cost.sub_usd;
+        if (entry.cost.partial) partial = true;
+      } else {
+        untracked++;
+      }
+      commits.push({ sha, patch_id: pid, matched: Boolean(entry), usd: entry ? entry.cost.usd : null });
+    }
+
+    const o = summarise(lead, sub);
+    if (o.unknown.length) partial = true;
+
+    const total = matchedUsd + o.usd;
+    const leadUsd = matchedLead + o.leadUsd;
+    const subUsd = matchedSub + o.subUsd;
+    const plus = partial ? '+' : '';
+
+    appendLedger({
+      v: 1,
+      kind: 'ship',
+      ts: new Date(w.endMs).toISOString(),
+      repo,
+      project,
+      branch,
+      ...tags,
+      range: `${base}..${head}`,
+      session: id,
+      window: windowOf(w),
+      commits,
+      overhead: {
+        ...usageOf(w),
+        usd: Number(o.usd.toFixed(4)),
+      },
+      cost: {
+        usd: Number(total.toFixed(4)),
+        lead_usd: Number(leadUsd.toFixed(4)),
+        sub_usd: Number(subUsd.toFixed(4)),
+        prices_version: PRICES.version,
+        partial,
+      },
+      untracked,
+      skipped,
+    });
+
+    if (marker) { delete markers[repo]; writeMarkers(markers); }
+
+    const n = codeCommits(commits);
+    let out = `**Ship cost:** ${fmtUsd(total)}${plus} across ${plural(n, 'commit')}`
+      + ` (+ ${fmtUsd(o.usd)} ship overhead) · ${pct(leadUsd, total)}% lead · ${pct(subUsd, total)}% subagent`;
+    if (untracked) {
+      out += `\n  ${plural(untracked, 'commit')} not tracked (committed outside /commit)`;
+    }
+    return out;
   });
-
-  if (marker) { delete markers[repo]; writeMarkers(markers); }
-
-  const n = codeCommits(commits);
-  let out = `**Ship cost:** ${fmtUsd(total)}${plus} across ${n} commit${n === 1 ? '' : 's'}`
-    + ` (+ ${fmtUsd(o.usd)} ship overhead) · ${pct(leadUsd, total)}% lead · ${pct(subUsd, total)}% subagent`;
-  if (untracked) {
-    out += `\n  ${untracked} commit${untracked === 1 ? '' : 's'} not tracked (committed outside /commit)`;
-  }
   process.stdout.write(out + '\n');
 }
 
@@ -500,15 +862,16 @@ function cmdReport(args) {
   const cutoff = sinceMs(args.since);
   const repo = args.all ? null : projectRoot();
   const by = args.by === 'commit' ? 'commit' : 'ship';
-  const rows = readLedger().filter((r) => {
-    if (r.kind !== by) return false;
-    if (repo && !inProject(r, repo)) return false;
-    return Date.parse(r.ts) >= cutoff;
-  });
+  const inScope = (r) => (!repo || inProject(r, repo)) && Date.parse(r.ts) >= cutoff;
+  const ledger = readLedger();
+  const rows = ledger.filter((r) => r.kind === by && inScope(r));
+  const outside = ledger.filter((r) => r.kind === 'session' && inScope(r));
+  const outsideUsd = outside.reduce((sum, r) => sum + ((r.cost && r.cost.usd) || 0), 0);
+  const footer = `${plural(outside.length, 'session')} · ${fmtUsd(outsideUsd)} outside any commit`;
 
   const scope = repo ? path.basename(repo) : 'all repos';
   const head = `${by === 'ship' ? 'Ships' : 'Commits'} — ${scope} — since ${new Date(cutoff).toISOString().slice(0, 10)}`;
-  if (!rows.length) { process.stdout.write(head + '\n  (nothing recorded)\n'); return; }
+  if (!rows.length) { process.stdout.write(head + '\n  (nothing recorded)\n' + footer + '\n'); return; }
 
   const lines = [head, ''];
   let total = 0; let lead = 0; let sub = 0; let units = 0;
@@ -542,11 +905,100 @@ function cmdReport(args) {
   lines.push('');
   const mean = units ? total / units : 0;
   const count = by === 'ship'
-    ? `${rows.length} ship${rows.length === 1 ? '' : 's'} · ${units} commit${units === 1 ? '' : 's'}`
-    : `${units} commit${units === 1 ? '' : 's'}`;
+    ? `${plural(rows.length, 'ship')} · ${plural(units, 'commit')}`
+    : plural(units, 'commit');
   lines.push(`${count} · ${fmtUsd(total)} total · ${fmtUsd(mean)} per commit`
     + ` · ${pct(lead, total)}% lead · ${pct(sub, total)}% subagent`);
+  lines.push(footer);
   process.stdout.write(lines.join('\n') + '\n');
+}
+
+async function cmdRecordSession(args) {
+  const id = args._[0];
+  if (typeof id !== 'string' || !SESSION_ID.test(id)) throw new Error('usage: token-ledger record-session <session id>');
+  await recordSession(id, { via: 'session-end' });
+}
+
+// Records every session on disk whose usage runs past its last window: the
+// sessions the hook missed. It skips the session it runs inside, whose tail
+// is still growing. `--dry-run` takes no lock and appends nothing; both print
+// one line per project and a total.
+async function cmdSweep(args) {
+  // A flag it does not know, or `--dry-run` given a value, would run a real
+  // sweep on an append-only ledger, so it refuses both.
+  const flags = Object.keys(args).filter((k) => k !== '_');
+  if (args._.length || flags.some((k) => k !== 'dry-run' || args[k] !== true)) {
+    throw new Error('usage: token-ledger sweep [--dry-run]');
+  }
+  const dryRun = args['dry-run'] === true;
+  const self = process.env.CLAUDE_CODE_SESSION_ID || null;
+  const rows = readLedger();
+  let dirs = [];
+  try { dirs = fs.readdirSync(PROJECTS).sort(); } catch { /* no transcripts */ }
+  const byProject = new Map();
+  for (const d of dirs) {
+    const dir = path.join(PROJECTS, d);
+    let files;
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort(); } catch { continue; }
+    for (const f of files) {
+      const id = f.slice(0, -'.jsonl'.length);
+      if (!SESSION_ID.test(id) || id === self) continue;
+      try {
+        const entry = await recordSession(id, { via: 'sweep', sess: sessionAt(dir, id), rows, sweep: true, dryRun });
+        if (!entry) continue;
+        const key = entry.project || '(no project)';
+        const t = byProject.get(key) || { usd: 0, n: 0 };
+        t.usd += entry.cost.usd; t.n++;
+        byProject.set(key, t);
+      } catch (err) {
+        process.stderr.write(`token-ledger: sweep: ${id}: ${err && err.message ? err.message : String(err)}\n`);
+      }
+    }
+  }
+  const lines = [dryRun ? 'Dry run: nothing recorded' : 'Recorded'];
+  let usd = 0; let n = 0;
+  for (const [project, t] of [...byProject].sort((a, b) => b[1].usd - a[1].usd)) {
+    lines.push(`${fmtUsd(t.usd)} · ${plural(t.n, 'session')} · ${project}`);
+    usd += t.usd; n += t.n;
+  }
+  lines.push(`total: ${fmtUsd(usd)} across ${plural(n, 'session')}`);
+  process.stdout.write(lines.join('\n') + '\n');
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let s = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (d) => { s += d; });
+    process.stdin.on('end', () => resolve(s));
+    process.stdin.on('error', () => resolve(s));
+  });
+}
+
+// The SessionEnd hook. A hook has a 1.5-second budget and a large transcript
+// takes longer to scan, so this starts `record-session` detached and returns.
+// The session comes from the hook's stdin, never CLAUDE_CODE_SESSION_ID, which
+// keeps its first value after /clear. Every refusal exits 0 and spawns
+// nothing; the sweep records that session later. The recorder's stderr goes
+// to <LEDGER>.errors, so a recorder that always fails leaves a trace.
+async function cmdSessionEnd() {
+  try {
+    const id = JSON.parse(await readStdin())?.session_id;
+    if (typeof id !== 'string' || !SESSION_ID.test(id)) return;
+    fs.mkdirSync(path.dirname(LEDGER), { recursive: true });
+    const errors = fs.openSync(LEDGER + '.errors', 'a');
+    let child;
+    try {
+      child = spawn(process.execPath, [__filename, 'record-session', id],
+        { detached: true, stdio: ['ignore', 'ignore', errors] });
+    } finally { fs.closeSync(errors); }
+    child.on('error', () => {});
+    // The suite waits for the recorder rather than polling for its entry.
+    if (process.env.TOKEN_LEDGER_SESSION_END_WAIT === '1') {
+      await new Promise((r) => { child.once('exit', r); child.once('error', r); });
+    }
+    else child.unref();
+  } catch { /* the sweep records this session later */ }
 }
 
 // Diagnostic: cost an arbitrary session or window without recording anything.
@@ -580,8 +1032,11 @@ async function main() {
     case 'ship': return cmdShip();
     case 'report': return cmdReport(args);
     case 'stats': return cmdStats(args);
+    case 'record-session': return cmdRecordSession(args);
+    case 'session-end': return cmdSessionEnd();
+    case 'sweep': return cmdSweep(args);
     default:
-      process.stderr.write('usage: token-ledger <commit|ship-begin|ship|report|stats> [options]\n');
+      process.stderr.write('usage: token-ledger <commit|ship-begin|ship|report|stats|record-session|session-end|sweep> [options]\n');
       process.exitCode = 2;
   }
 }
