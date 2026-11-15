@@ -42,7 +42,7 @@ import {
   statusLine,
   tileFace,
 } from '../hooks/board'
-import type { Deck } from '../types'
+import type { Deck, Run } from '../types'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -187,6 +187,23 @@ test('phases follow the chain: each cycle closes on its low review, then simplif
   expect(states(archiving, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live')
   expect(states(`${archiving}\npushes: 1a2b\nfinished: shipped; production is live (run 1).`, 3)).toBe(
     'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:done',
+  )
+})
+
+test('a run with step 0 opens on a savor phase that its own commit closes', async () => {
+  const savoring = 'skill: sittings:savor launch docs/briefs/kickoff-sitting-s608-gallery-id.md'
+  expect(states(savoring, 2)).toBe('savor:live c1:todo c2:todo simpl:todo xhigh:todo ship:todo arch:todo')
+  // The step-0 commit names no cycle and gets no low review: it closes the savor, not cycle 1.
+  const saved = `${savoring}\nskill: commit-skill:commit S608 step 0: savor at launch edits\ncommit: docs(briefs): tighten S608`
+  expect(states(saved, 2)).toBe('savor:done c1:live c2:todo simpl:todo xhigh:todo ship:todo arch:todo')
+  const cycle1 = `${saved}\nskill: commit-skill:commit S608 cycle 1: the id\nskill: code-review low a b`
+  expect(states(cycle1, 2)).toBe('savor:done c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
+  // Session 2 re-reads the same progress file, so its stages still follow the savor.
+  expect(states(`${cycle1}\nskill: code-review xhigh a b`, 2)).toBe(
+    'savor:done c1:done c2:done simpl:done xhigh:live ship:todo arch:todo',
+  )
+  expect(phaseLine({ phases: phasesOf(savoring, 2), stage: 'savor', tool: 'Agent: systems' } as Run)).toBe(
+    'savor · Agent: systems',
   )
 })
 

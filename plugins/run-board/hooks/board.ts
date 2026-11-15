@@ -169,9 +169,12 @@ export function cycleBlobs(lsTree: string, key: string): string[] {
 }
 
 /**
- * Where a run is in the fixed chain, from its progress file: each cycle, then
- * simplify, the xhigh review, the ship and the archive.
+ * Where a run is in the fixed chain, from its progress file: step 0's savor
+ * when the run has one, each cycle, then simplify, the xhigh review, the ship
+ * and the archive.
  *
+ * The savor runs from a `sittings:savor launch` line to the next `/commit`,
+ * which holds its edits and counts toward no cycle.
  * Cycle k is done when a `/commit` naming `cycle k` (or, naming none, the
  * next cycle) is followed by a `code-review low` line. The ship starts at
  * `/ship` or a push, and the archive at the first `/commit` after the ship's
@@ -179,6 +182,7 @@ export function cycleBlobs(lsTree: string, key: string): string[] {
  * count; without it the count is the highest cycle the progress file names.
  */
 export function phasesOf(progress: string, cycles?: number): Phase[] {
+  let savor: 'none' | 'live' | 'done' = 'none'
   let done = 0
   let pending: number | null = null
   let named = 0
@@ -192,7 +196,8 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
   for (const line of progress.split('\n')) {
     const commit = /^skill: commit-skill:commit\b(.*)$/.exec(line)
     if (commit) {
-      if (shipPushed) archive = true
+      if (savor === 'live') savor = 'done'
+      else if (shipPushed) archive = true
       else if (!simplify && !ship) {
         const k = /\bcycle (\d+)/i.exec(commit[1] ?? '')
         pending = k ? Number(k[1]) : done + 1
@@ -201,6 +206,8 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
     } else if (/^skill: code-review low\b/.test(line)) {
       if (pending !== null) done = Math.max(done, pending)
       pending = null
+    } else if (/^skill: sittings:savor launch\b/.test(line)) {
+      if (savor === 'none') savor = 'live'
     } else if (line.startsWith('cut: ')) cut = true
     else if (/^skill: simplify\b/.test(line)) simplify = true
     else if (/^skill: code-review xhigh\b/.test(line)) xhigh = true
@@ -229,16 +236,18 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
     ['shipping', 'ship'],
     ['archiving', 'arch'],
   ]
-  return names.map(([label, short], i) => {
-    const state: PhaseState = i < live ? 'done' : i === live ? 'live' : 'todo'
+  const phases = names.map(([label, short], i): Phase => {
+    const state: PhaseState = savor === 'live' ? 'todo' : i < live ? 'done' : i === live ? 'live' : 'todo'
     return { label, short, state }
   })
+  if (savor === 'none') return phases
+  return [{ label: 'savor', short: 'savor', state: savor }, ...phases]
 }
 
 // Stages the phase line leaves out: those that say no more than the phase,
 // and `review low`, which stays the last step line through the next
 // cycle's build, so it reads as the cycle before the one in flight.
-const QUIET_STAGES = new Set(['starting', 'working', 'review low', 'simplify', 'review xhigh', 'shipping'])
+const QUIET_STAGES = new Set(['savor', 'starting', 'working', 'review low', 'simplify', 'review xhigh', 'shipping'])
 
 /**
  * A running card's phase line: the phase in flight, `cycle 2 of 2` for a
