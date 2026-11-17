@@ -44,10 +44,11 @@ invocation as `Usage:` and stop. Launch mode's two trailing arguments come as a 
 usage error. Neither mode searches `docs/backlog/`, and launch mode needs the findings file
 because a caller that runs headless reads the findings from it.
 
-Decision and launch modes read the repo's checks doc (§ Repo checks) for three things the skill does not name:
-the status line each mode writes, the lines launch mode may not change, and the size check launch mode runs after
-its edits. Where the doc names none of them, each mode leaves the status line as it is, and launch mode runs no
-size check and protects the spec's decisions only.
+Decision and launch modes read the repo's checks doc (§ Repo checks) for four things the skill does not name:
+the status line each mode writes, the lines launch mode may not change, the size check launch mode runs after
+its edits, and the rulings documents a spec draws on. Where the doc names none of them, each mode leaves the
+status line as it is, and launch mode runs no size check, protects the spec's decisions only, and reads only the
+rulings the spec cites.
 
 ## Phase 1: Context Gathering
 
@@ -549,6 +550,13 @@ doc says launch mode may not change, or would add a decision that is a one-way d
 brief defines one) and that the spec does not make. Phase 3's "make the choice" does not reach it. The agent
 records it and leaves the spec as it is: a decision belongs to whoever made it, and a run that makes or rewrites
 one has stopped being the run the user agreed to.
+
+**A fork that a ruling already settles is not `premise fails`.** Before the agent classifies a finding
+`premise fails`, it reads the rulings the spec draws on: each ruling the spec cites, and each rulings document
+the repo's checks doc names for the spec. When one of those rulings picks an option, the user has already made
+the choice. The agent applies that option as `fixed`, names the ruling and its document in the changed decision,
+and names them again in the findings row. The run does not stop on that finding. A finding stays `premise fails`
+only when no ruling picks an option, or when two rulings pick different ones.
 
 ### The findings file
 
