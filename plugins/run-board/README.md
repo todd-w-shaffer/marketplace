@@ -35,10 +35,10 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   sitting named on the right (`after S396, S401`). An entry that needs nothing running or queued is a root of
   its own under the dispatcher's reason (`a free slot`); one held only because a run touches the same
   paths reads `held · S518 shares CLAUDE.md` in yellow, with no joint, since a hold orders nothing. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
-  Then RECENT: the last 10 sittings that finished, newest first, one ledger row each: a green `●` or a
-  red `✗`, the sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
-  the cost, and how long ago it ended (`14m`, `5h`, `3d`). A run that stopped gets its reason on a second line
-  in red. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
+  Then RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
+  the sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
+  the cost, and how long ago it ended (`14m`, `5h`, `3d`). A stop and a `shipped; deploy failed` run are left
+  out: they belong to BLOCKED. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
   outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
   group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow
@@ -48,6 +48,20 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   gives the lane and epic, `after` and each named sitting still on deck, queued or running, and for `needs you`
   the text after the marker, which says why: `└╌◇ S436 retire-held-path  fix · after S434 · Removes a wrangler.toml line.`
   `/board` again closes it.
+- **BLOCKED.** A red-bordered card above the queue, drawn only when something is stuck: one block per root cause,
+  the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or
+  queues it, and its brief is still on `origin/main`, or it is a red deploy (`shipped; deploy failed`) with no live
+  run after it. Each block shows a kind tag by who acts (`? you` a decision, `÷ plan` a split, `✗ code` a red
+  deploy, `! run` anything else), a headline (a decision quotes the handoff's `**Question:**` line, read from
+  `handoff/<name>.md` in the run's worktree), one line of why, a pipeline strip (savor, cycles, push, staging,
+  prod) marking where it broke, the chain it holds in order with why each waits, and one `next` line. The kind is
+  status.json's `finished[].kind`, else the `kind:` line above the progress file's last `finished:` line. A queued
+  entry is held by status.json's `queued[].cause`; a dispatcher that writes no `cause` key is read through the
+  `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never
+  appears on deck. A red deploy's strip reads its failed jobs once per run with `gh run view`.
+- **Folding.** The headers of blocked, queued, on deck and recent are Buttons on `b`, `q`, `d` and `r` (with the
+  pane focused). A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
+  otherwise recent and on deck fold themselves while BLOCKED shows.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
   on base, each section in a card on mantle (the lanes, the queue, on deck, recent), green done, peach in flight, surface grey to come, lavender headings,
   blue queued, mauve on deck, and on deck's groups in green, yellow and red. The colours are fixed hex values and do not follow the terminal theme; the

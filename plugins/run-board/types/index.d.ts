@@ -52,16 +52,46 @@ export type Ended = {
   slug: string
   /** The lane from the dispatcher's finished list, or empty when it no longer lists the run. */
   lane: string
-  isShipped: boolean
   detail: string
   /** The run's minutes and cost from its outcome's totals, or null when the outcome has none. */
   minutes: number | null
   usd: number | null
-  /** Why a run that did not ship stopped: its outcome's sentence. Empty for a ship. */
-  reason: string
   /** When the progress file was last written. */
   endedMs: number
 }
+
+/** Who acts on a stuck run: `decision` you, `split` the plan, `deploy-red` the code, `run-broke` the run. */
+export type BlockKind = 'decision' | 'split' | 'deploy-red' | 'run-broke'
+
+export type Stage = 'savor' | 'cycles' | 'push' | 'staging' | 'prod'
+
+/** A stage on a block's pipeline strip: done, where the run broke, still to come, or skipped (no step 0). */
+export type StripCell = { stage: Stage; state: 'done' | 'broke' | 'todo' | 'skip' }
+
+/** A brief a root cause holds, and why it waits: `after S625`, `waits for a green deploy`. */
+export type Held = { sitting: string; slug: string; why: string }
+
+/** One root cause on the BLOCKED card. */
+export type Block = {
+  kind: BlockKind
+  /** The stuck sitting, or `run N` for a red deploy no stuck sitting names. */
+  sitting: string
+  slug: string
+  headline: string
+  why: string
+  /** Empty when no progress file names the root. */
+  strip: StripCell[]
+  /** The chain it holds, in order. */
+  holds: Held[]
+  next: string
+  endedMs: number
+}
+
+/** Each foldable card, by the hotkey its header answers. */
+export type FoldCard = 'recent' | 'deck' | 'queued' | 'blocked'
+
+/** The folds set by hand: true folded, false unfolded. A card absent follows its default. */
+export type Folds = Partial<Record<FoldCard, boolean>>
 
 /** The architecture loop while its lock names a live process. */
 export type Loop = {
@@ -102,10 +132,12 @@ export type Board = {
   finished: Done[]
   recent: Ended[]
   onDeck: Deck[]
+  /** Root causes of stuck runs, most held first; empty when nothing is stuck. */
+  blocked: Block[]
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    'run-board': { board: Shaped<Board | null> }
+    'run-board': { board: Shaped<Board | null>; folds: Shaped<Folds> }
   }
 }

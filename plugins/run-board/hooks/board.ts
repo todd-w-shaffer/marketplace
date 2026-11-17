@@ -1,12 +1,35 @@
-import type { Board, Deck, DeckMode, Done, Ended, Loop, Phase, PhaseState, Run, Waiting } from '../types'
+import type { Block, BlockKind, Board, Deck, DeckMode, Done, Ended, FoldCard, Folds, Held, Loop, Phase, PhaseState, Run, Stage, StripCell, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
 export type RawStatus = {
   dispatcher: number | null
   running: { entry: number; brief: string; lane: string; pid: number | null; started: string; cost: number }[]
-  queued: { entry: number; brief: string; lane: string; reason: string }[]
-  finished: { entry: number; brief: string; lane: string; status: number; outcome: string }[]
+  queued: { entry: number; brief: string; lane: string; reason: string; cause?: Cause | null }[]
+  finished: { entry: number; brief: string; lane: string; status: number; outcome: string; kind: string | null }[]
+}
+
+/**
+ * The root cause the dispatcher says holds a queued entry back: a red deploy
+ * by its run, or a sitting that stopped, with that stop's kind. `sitting` is
+ * `S625` for an `After:` sitting and the run name for an `--after` brief.
+ */
+export type Cause = { kind: 'deploy-red'; run: number } | { kind: string; sitting: string }
+
+/**
+ * A queued entry's `cause`: undefined when the record has no such key, as a
+ * dispatcher older than the field writes it, and null when the dispatcher
+ * says nothing holds the entry.
+ */
+function parseCause(q: Record<string, unknown>): Cause | null | undefined {
+  if (!('cause' in q)) return undefined
+  const c = q.cause
+  if (typeof c !== 'object' || c === null || Array.isArray(c)) return null
+  const r = c as Record<string, unknown>
+  const run = num(r.run)
+  if (r.kind === 'deploy-red' && run !== null) return { kind: 'deploy-red', run }
+  if (typeof r.kind === 'string' && typeof r.sitting === 'string' && r.sitting !== '') return { kind: r.kind, sitting: r.sitting }
+  return null
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -38,6 +61,7 @@ export function parseStatus(text: string): RawStatus | null {
       brief: str(q.brief),
       lane: str(q.lane),
       reason: str(q.reason),
+      cause: parseCause(q),
     })),
     finished: list(d.finished).map(f => ({
       entry: num(f.entry) ?? 0,
@@ -45,6 +69,7 @@ export function parseStatus(text: string): RawStatus | null {
       lane: str(f.lane),
       status: num(f.status) ?? 1,
       outcome: str(f.outcome),
+      kind: typeof f.kind === 'string' && f.kind !== '' ? f.kind : null,
     })),
   }
 }
@@ -428,9 +453,18 @@ export function buildBoard(
     spend?: Board['spend']
     /** Each brief's `After:` sittings, read from `origin/main`. */
     afters?: Readonly<Record<string, string[]>>
+    /** The progress files read for RECENT and BLOCKED. */
+    endings?: readonly Ending[]
+    /** Each stopped run's handoff text, by run name. */
+    handoffs?: Readonly<Record<string, string>>
+    /** Each red deploy's failed strip stage, by run. */
+    deployStages?: Readonly<Record<string, string>>
   } = {},
 ): Board {
-  const { loop = null, recent = [], onDeck = [], tools = {}, cycles = {}, utcOffset = '', spend = null, afters = {} } = extra
+  const { loop = null, recent = [], tools = {}, cycles = {}, utcOffset = '', spend = null, afters = {} } = extra
+  const { blocks, drawn } = blockedOf({ raw, endings: extra.endings ?? [], afters, handoffs: extra.handoffs, deployStages: extra.deployStages })
+  // A held brief, and a stopped one, sits under BLOCKED and never on deck.
+  const onDeck = (extra.onDeck ?? []).filter(d => !drawn.has(d.sitting))
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { note, cost } = noteOf(text)
@@ -474,6 +508,7 @@ export function buildBoard(
     finished,
     recent,
     onDeck,
+    blocked: blocks,
   }
 }
 
@@ -813,8 +848,9 @@ export function recentCandidates(files: readonly ProgressFile[], running: readon
 }
 
 /**
- * The newest finished sittings, one each, from their progress files' last
- * `finished:` line. These files outlive the dispatcher, whose finished list
+ * The newest sittings live in production, one each, from their progress
+ * files' last `finished:` line. A stop and a red deploy are left out: they
+ * belong to BLOCKED. These files outlive the dispatcher, whose finished list
  * starts empty each time one starts. The lane comes from that list while it
  * still holds the run.
  */
@@ -826,28 +862,269 @@ export function recentOf(
   for (const f of [...finished].sort((a, b) => a.entry - b.entry)) laneOf.set(baseName(f.brief), f.lane)
   const out: Ended[] = []
   for (const f of [...files].sort((a, b) => b.mtimeMs - a.mtimeMs)) {
-    const line = f.text
-      .split('\n')
-      .reverse()
-      .find(l => l.startsWith('finished: '))
-    if (line === undefined) continue
-    const outcome = line.slice('finished: '.length)
+    const end = lastEnd(f.text)
+    if (end === null || !end.isLive) continue
     const base = f.name.replace(/\.progress$/, '')
-    const totals = TOTALS.exec(outcome)
-    const isShipped = outcome.startsWith('shipped')
+    const totals = TOTALS.exec(end.outcome)
     out.push({
       ...sittingOf(base),
       lane: laneOf.get(base) ?? '',
-      isShipped,
-      detail: outcomeDetail(outcome),
+      detail: outcomeDetail(end.outcome),
       minutes: totals === null ? null : Number(totals[2]),
       usd: totals === null ? null : Number(totals[1]),
-      reason: isShipped ? '' : totals === null ? outcome : outcome.slice(0, totals.index),
       endedMs: f.mtimeMs,
     })
     if (out.length === RECENT_LIMIT) break
   }
   return out
+}
+
+/** A run's last end in its progress file: the outcome, the kind written above it, and whether production is live. */
+export type RunEnd = { outcome: string; kind: string; isLive: boolean }
+
+// An outcome that put the run live in production. `shipped; deploy failed`
+// pushed code that never went live.
+const LIVE = /^shipped; production is live\b/
+
+/**
+ * The last `finished:` line of a progress file, or null when it has none.
+ * The kind is the `kind:` line directly above it, as scripts/autopilot.sh
+ * writes it. A file without that line reads `deploy-red` for a failed deploy
+ * and `run-broke` for any other end that is not live.
+ */
+export function lastEnd(progress: string): RunEnd | null {
+  const lines = progress.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? ''
+    if (!line.startsWith('finished: ')) continue
+    const outcome = line.slice('finished: '.length)
+    const isLive = LIVE.test(outcome)
+    const above = /^kind: (\S+)/.exec(lines[i - 1] ?? '')
+    const kind = isLive ? '' : (above?.[1] ?? (outcome.startsWith('shipped;') ? 'deploy-red' : 'run-broke'))
+    return { outcome, kind, isLive }
+  }
+  return null
+}
+
+/** The run a failed deploy names: `shipped; deploy failed (run 44071838536).` gives `44071838536`. */
+export const deployRunOf = (outcome: string): string => /deploy failed \(run (\d+)\)/.exec(outcome)?.[1] ?? ''
+
+/** A sitting's progress file as the poll read it: its run name, text and mtime. */
+export type Ending = { base: string; text: string; mtimeMs: number }
+
+/** Each kind's tag, by who acts. */
+export const KIND_TAG: Record<BlockKind, string> = { decision: '? you', split: '÷ plan', 'deploy-red': '✗ code', 'run-broke': '! run' }
+
+/** The pipeline strip's stages, in order. */
+export const STAGES: readonly Stage[] = ['savor', 'cycles', 'push', 'staging', 'prod']
+
+const blockKind = (k: string): BlockKind => (k === 'decision' || k === 'split' || k === 'deploy-red' ? k : 'run-broke')
+
+/**
+ * The pipeline strip of a run that stopped: each stage done, where it broke,
+ * or still to come. A run without step 0 skips the savor. A red deploy broke
+ * at `deployStage`, staging unless the production job failed. Any other end
+ * broke at the savor when no commit followed the savor's own, at the push
+ * when a broken run pushed, and in the cycles otherwise.
+ */
+export function stripOf(text: string, kind: BlockKind, deployStage = ''): StripCell[] {
+  const lines = text.split('\n')
+  const savorAt = lines.findIndex(l => /^skill: sittings:savor launch\b/.test(l))
+  const commitsAfter = lines.slice(savorAt + 1).filter(l => /^skill: commit-skill:commit\b/.test(l)).length
+  const pushed = lines.some(l => l.startsWith('bash: ') && l.includes('push:checked'))
+  const broke: Stage =
+    kind === 'deploy-red'
+      ? deployStage === 'prod'
+        ? 'prod'
+        : 'staging'
+      : pushed && kind === 'run-broke'
+        ? 'push'
+        : savorAt !== -1 && commitsAfter <= 1
+          ? 'savor'
+          : 'cycles'
+  const at = STAGES.indexOf(broke)
+  return STAGES.map((stage, i) => ({
+    stage,
+    state: i === at ? 'broke' : i > at ? 'todo' : stage === 'savor' && savorAt === -1 ? 'skip' : 'done',
+  }))
+}
+
+/**
+ * The strip stage a deploy run's failed jobs stand for: `prod` when the
+ * production deploy failed, else `staging`; empty when none failed. If
+ * deploy.yml renames its jobs, update the pattern.
+ */
+export const deployStageOf = (failedJobs: readonly string[]): string =>
+  failedJobs.some(j => /cloudflare workers|record the release/i.test(j)) ? 'prod' : failedJobs.length > 0 ? 'staging' : ''
+
+/** The question a stop handoff asks on its `**Question: …**` line, or empty. */
+export const handoffQuestion = (handoff: string): string => /\*\*Question: (.+?)\*\*/.exec(handoff)?.[1]?.trim() ?? ''
+
+/** The stop a handoff names on its last `**Stop:**` line, or empty. */
+export const handoffStop = (handoff: string): string => [...handoff.matchAll(/\*\*Stop:\*\* (\d+)/g)].pop()?.[1] ?? ''
+
+/**
+ * The BLOCKED card: one block per root cause, most held first, and every
+ * sitting the card draws, none of which ON DECK lists.
+ *
+ * A sitting is stuck when its last end is not live, nothing runs or queues
+ * it, and either its brief is still on `origin/main`, or it is a red deploy
+ * with no live run after it. A queued entry is held by the cause the
+ * dispatcher names; a record without the `cause` key, from a dispatcher older
+ * than the field, is held when an `After:` sitting is stuck or held. A brief
+ * on main that nothing runs or queues is held the same way. A stuck sitting
+ * that is held is a hold under its cause, never a root of its own. Each hold
+ * names the nearest sitting it waits on, and the holds go in chain order.
+ */
+export function blockedOf(input: {
+  raw: RawStatus
+  endings: readonly Ending[]
+  /** Every brief on `origin/main` by its key, with the sittings on its `After:` line. */
+  afters: Readonly<Record<string, string[]>>
+  /** Each stopped run's handoff text, by run name. */
+  handoffs?: Readonly<Record<string, string>>
+  /** Each red deploy's failed strip stage, by run. */
+  deployStages?: Readonly<Record<string, string>>
+}): { blocks: Block[]; drawn: Set<string> } {
+  const { raw, endings, afters, handoffs = {}, deployStages = {} } = input
+  const running = new Set(raw.running.map(r => sittingOf(r.brief).sitting))
+  const queued = new Map(raw.queued.map(q => [sittingOf(q.brief).sitting, q]))
+  const onMain = new Map(Object.keys(afters).map(k => [sittingOf(k).sitting, k]))
+  const slugOf = new Map<string, string>()
+  for (const k of [...onMain.values(), ...raw.queued.map(q => q.brief)]) slugOf.set(sittingOf(k).sitting, sittingOf(k).slug)
+
+  // The kind status.json gives a run, from its newest finished record.
+  const statusKind = new Map<string, string | null>()
+  for (const f of [...raw.finished].sort((a, b) => a.entry - b.entry)) statusKind.set(baseName(f.brief), f.kind)
+
+  type Info = { slug: string; base: string; text: string; mtimeMs: number; end: RunEnd; kind: BlockKind }
+  const ends = new Map<string, Info>()
+  let newestLive = Number.NEGATIVE_INFINITY
+  for (const e of endings) {
+    const end = lastEnd(e.text)
+    if (end === null) continue
+    if (end.isLive) {
+      newestLive = Math.max(newestLive, e.mtimeMs)
+      continue
+    }
+    const { sitting, slug } = sittingOf(e.base)
+    const known = ends.get(sitting)
+    if (known !== undefined && known.mtimeMs >= e.mtimeMs) continue
+    ends.set(sitting, { slug, base: e.base, text: e.text, mtimeMs: e.mtimeMs, end, kind: blockKind(statusKind.get(e.base) ?? end.kind) })
+  }
+  const stuck = new Map<string, Info>()
+  for (const [s, i] of ends) {
+    if (running.has(s) || queued.has(s)) continue
+    if (i.kind === 'deploy-red' ? i.mtimeMs > newestLive : onMain.has(s)) stuck.set(s, i)
+  }
+
+  // A root is a stuck sitting, or `run N` for a red deploy no stuck sitting names.
+  const rootOfCause = (c: Cause): string => {
+    if ('run' in c) {
+      for (const [s, i] of stuck) if (i.kind === 'deploy-red' && deployRunOf(i.end.outcome) === String(c.run)) return s
+      return `run ${c.run}`
+    }
+    return sittingOf(c.sitting).sitting
+  }
+  const afterOf = (s: string): string[] => afters[onMain.get(s) ?? ''] ?? []
+  const held = new Map<string, string | null>()
+  const heldBy = (s: string, seen: Set<string>): string | null => {
+    const known = held.get(s)
+    if (known !== undefined) return known
+    if (seen.has(s) || running.has(s)) return null
+    seen.add(s)
+    const q = queued.get(s)
+    let root: string | null = null
+    if (q?.cause !== undefined) root = q.cause === null ? null : rootOfCause(q.cause)
+    else
+      for (const a of afterOf(s)) {
+        // A sitting off main that nothing queues has shipped and holds nothing.
+        if (a === s || running.has(a) || !(onMain.has(a) || queued.has(a) || stuck.has(a))) continue
+        root = heldBy(a, seen) ?? (stuck.has(a) ? a : null)
+        if (root !== null) break
+      }
+    held.set(s, root)
+    return root
+  }
+
+  const candidates = [...new Set([...queued.keys(), ...onMain.keys(), ...stuck.keys()])].filter(s => !running.has(s))
+  for (const s of candidates) heldBy(s, new Set())
+  const roots = new Map<string, string[]>()
+  for (const s of stuck.keys()) if ((held.get(s) ?? null) === null) roots.set(s, [])
+  for (const s of candidates) {
+    const r = held.get(s) ?? null
+    if (r === null || roots.has(s)) continue
+    roots.set(r, [...(roots.get(r) ?? []), s])
+  }
+
+  const blocks: Block[] = []
+  for (const [root, members] of roots) {
+    const group = new Set([root, ...members])
+    const parentOf = (s: string): string => afterOf(s).find(a => a !== s && group.has(a)) ?? ''
+    const depthOf = (s: string, seen: Set<string>): number => {
+      const p = parentOf(s)
+      if (p === '' || p === root || seen.has(p)) return 1
+      seen.add(s)
+      return depthOf(p, seen) + 1
+    }
+    const info = stuck.get(root)
+    const kind: BlockKind = info?.kind ?? 'deploy-red'
+    const holds: Held[] = members
+      .map(s => {
+        const p = parentOf(s)
+        const why = p !== '' ? `after ${p}` : kind === 'deploy-red' ? 'waits for a green deploy' : `after ${root}`
+        return { sitting: s, slug: slugOf.get(s) ?? stuck.get(s)?.slug ?? '', why, depth: depthOf(s, new Set()) }
+      })
+      .sort((a, b) => a.depth - b.depth || sittingNumber(a.sitting) - sittingNumber(b.sitting))
+      .map(h => ({ sitting: h.sitting, slug: h.slug, why: h.why }))
+    blocks.push(blockFace(root, info, kind, holds, handoffs, deployStages))
+  }
+  blocks.sort((a, b) => b.holds.length - a.holds.length || b.endedMs - a.endedMs)
+  const drawn = new Set<string>()
+  for (const b of blocks) for (const s of [b.sitting, ...b.holds.map(h => h.sitting)]) drawn.add(s)
+  return { blocks, drawn }
+}
+
+/** A block's words by kind: its headline, the line of why, the strip and the next line. */
+function blockFace(
+  root: string,
+  info: { slug: string; base: string; text: string; mtimeMs: number; end: RunEnd } | undefined,
+  kind: BlockKind,
+  holds: Held[],
+  handoffs: Readonly<Record<string, string>>,
+  deployStages: Readonly<Record<string, string>>,
+): Block {
+  const outcome = info?.end.outcome ?? ''
+  const totals = TOTALS.exec(outcome)
+  const sentence = totals === null ? outcome : outcome.slice(0, totals.index)
+  const spent = totals === null ? [] : [hoursMinutes(Number(totals[2])), `$${totals[1] ?? ''}`]
+  const run = deployRunOf(outcome) || (root.startsWith('run ') ? root.slice('run '.length) : '')
+  const handoff = info === undefined ? '' : (handoffs[info.base] ?? '')
+  const strip = info === undefined ? [] : stripOf(info.text, kind, deployStages[run] ?? '')
+  const broke = strip.find(p => p.state === 'broke')?.stage
+  const pushed = strip.some(p => p.stage === 'push' && p.state === 'done')
+  const base = { kind, sitting: root, slug: info?.slug ?? '', strip, holds, endedMs: info?.mtimeMs ?? 0 }
+  if (kind === 'deploy-red') {
+    const releases = holds.length === 0 ? '' : holds.length === 1 ? ' and releases the one it holds' : ` and releases all ${holds.length}, in order`
+    return {
+      ...base,
+      headline: info === undefined ? `Deploy red: run ${run}` : `Deploy red: ${root} never went live`,
+      why: ['deploy failed', broke === 'prod' ? 'at production' : 'before production', run === '' ? '' : `run ${run}`, ...spent]
+        .filter(p => p !== '')
+        .join(' · '),
+      next: `re-run it if it is a flake, else fix main; the next green deploy clears it${releases}`,
+    }
+  }
+  const stop = handoffStop(handoff)
+  const why = [broke === 'savor' ? 'step 0 savor' : (broke ?? ''), stop === '' ? '' : `stop ${stop}`, pushed ? 'pushed' : 'nothing pushed', ...spent]
+    .filter(p => p !== '')
+    .join(' · ')
+  if (kind === 'decision') {
+    const q = handoffQuestion(handoff)
+    return { ...base, headline: q === '' ? `${root} needs a decision` : `${root} asks: ${q}`, why, next: `answer in the handoff, then relaunch ${root}` }
+  }
+  if (kind === 'split') return { ...base, headline: `${root} is over its size ceiling`, why, next: `split the brief, then relaunch ${root}` }
+  return { ...base, headline: `${root}: the run broke`, why: sentence, next: `read the log, then relaunch ${root}` }
 }
 
 /** How long ago an instant was: `24m ago`, `5h12m ago`, `3d ago` past two days. */
@@ -1102,6 +1379,36 @@ export function statusLine(b: Board): string | undefined {
   const cost = inFlight(b)
   if (cost > 0) parts.push(money(cost))
   return parts.join(' │ ')
+}
+
+/** Each foldable card's header hotkey. */
+export const FOLD_KEY: Record<FoldCard, string> = { recent: 'r', deck: 'd', queued: 'q', blocked: 'b' }
+
+/**
+ * Whether a card is folded: as set by hand, else folded for recent and on
+ * deck while BLOCKED shows, so the stuck work leads the pane.
+ */
+export const isFolded = (card: FoldCard, folds: Folds, hasBlocked: boolean): boolean =>
+  folds[card] ?? (hasBlocked && (card === 'recent' || card === 'deck'))
+
+/** The one line a folded card keeps. */
+export function foldSummary(card: FoldCard, b: Board): string {
+  const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
+  if (card === 'blocked') {
+    const held = b.blocked.reduce((n, k) => n + k.holds.length, 0)
+    const first = b.blocked[0]
+    return [plural(b.blocked.length, 'cause', 'causes'), `holds ${held}`, first === undefined ? '' : `${KIND_TAG[first.kind]} ${first.sitting}`]
+      .filter(p => p !== '')
+      .join(' · ')
+  }
+  if (card === 'queued') return plural(b.queued.length, 'waiting', 'waiting')
+  if (card === 'deck')
+    return DECK_GROUPS.map(g => [g.label, b.onDeck.filter(d => d.mode === g.mode).length] as const)
+      .filter(([, n]) => n > 0)
+      .map(([label, n]) => `${label} ${n}`)
+      .join(' · ')
+  const last = b.recent[0]
+  return last === undefined ? 'none live' : `${b.recent.length} live · last ${last.sitting} ${agoShort(last.endedMs, b.checkedAt)} ago`
 }
 
 /** A finished run's lane as a tag, ` (fix)`, or nothing when the dispatcher wrote none. */

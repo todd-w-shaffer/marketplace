@@ -1,8 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Board, Deck, DeckMode, Ended, Loop, Phase, Run } from '../types'
+import type { BlockKind, Board, Deck, DeckMode, Ended, FoldCard, Folds, Loop, Phase, Run, StripCell } from '../types'
 import {
+  FOLD_KEY,
+  KIND_TAG,
+  deployRunOf,
+  deployStageOf,
+  foldSummary,
+  isFolded,
+  lastEnd,
   LOG_TAIL_BYTES,
   LOOP_LANE,
   agoShort,
@@ -42,7 +49,7 @@ import {
   statusLine,
   tileFace,
 } from './board'
-import type { LoopFile, RawStatus, Spend } from './board'
+import type { Ending, LoopFile, RawStatus, Spend } from './board'
 
 // Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
 // paints comes from here, the pane's own ground included, so the pane reads
@@ -103,7 +110,26 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-9' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-10' })
+
+// The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
+// the session; seeded from it at session start.
+const folds = atom({ plugin: 'run-board', key: 'folds' } as const, {} as Folds, { shape: 'folds-1' })
+const FOLDS_KEY = 'folds'
+
+/** The folds `$.store` holds, each field checked, since the file outlives this code. */
+function parseFolds(v: unknown): Folds {
+  if (typeof v !== 'object' || v === null) return {}
+  const out: Folds = {}
+  for (const card of Object.keys(FOLD_KEY) as FoldCard[]) {
+    const f = (v as Record<string, unknown>)[card]
+    if (typeof f === 'boolean') out[card] = f
+  }
+  return out
+}
+
+// Each kind's tag colour: yellow you, mauve the plan, red the code, peach the run.
+const KIND_COLOR: Record<BlockKind, string> = { decision: '#eed49f', split: '#c6a0f6', 'deploy-red': '#ed8796', 'run-broke': '#f5a97f' }
 
 async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number>> {
   if (pids.length === 0) return new Set()
@@ -183,24 +209,76 @@ async function readSpend($: EngineInterface, home: string, now: number): Promise
   return spendTotals(ledger.spends, now)
 }
 
-// Progress files read for RECENT, by name, kept while their mtime holds.
-const recentCache = new Map<string, { mtimeMs: number; text: string }>()
+// Progress files read for RECENT and BLOCKED, by name, kept while their mtime holds.
+const progressCache = new Map<string, { mtimeMs: number; text: string }>()
 
-/** The newest finished sittings, from the progress files in `dir`. */
-async function readRecent($: EngineInterface, dir: string, raw: RawStatus): Promise<Ended[]> {
+/**
+ * The progress files RECENT and BLOCKED read: the newest sittings', and each
+ * brief's on `origin/main`, since a stop that waits for a person can be older
+ * than every recent run. None that runs: a run truncates its file at start.
+ */
+async function readEndings($: EngineInterface, dir: string, raw: RawStatus, onMain: readonly string[]): Promise<{ recent: Ended[]; endings: Ending[] }> {
   const files = (await $.fs.list(dir).catch(() => []))
     .filter(e => e.kind === 'file')
     .map(e => ({ name: e.name, mtimeMs: e.mtimeMs }))
+  const running = new Set(raw.running.map(r => `${baseName(r.brief)}.progress`))
+  const wanted = new Set(onMain.map(k => `${baseName(k)}.progress`))
+  const picked = new Map(recentCandidates(files, raw.running.map(r => r.brief)).map(f => [f.name, f]))
+  for (const f of files) if (wanted.has(f.name) && !running.has(f.name)) picked.set(f.name, f)
   const texts: { name: string; mtimeMs: number; text: string }[] = []
-  for (const f of recentCandidates(files, raw.running.map(r => r.brief))) {
-    let hit = recentCache.get(f.name)
+  for (const f of picked.values()) {
+    let hit = progressCache.get(f.name)
     if (hit === undefined || hit.mtimeMs !== f.mtimeMs) {
       hit = { mtimeMs: f.mtimeMs, text: await $.fs.read(`${dir}/${f.name}`).catch(() => '') }
-      recentCache.set(f.name, hit)
+      progressCache.set(f.name, hit)
     }
     texts.push({ ...f, text: hit.text })
   }
-  return recentOf(texts, raw.finished)
+  return {
+    recent: recentOf(texts, raw.finished),
+    endings: texts.map(t => ({ base: t.name.replace(/\.progress$/, ''), text: t.text, mtimeMs: t.mtimeMs })),
+  }
+}
+
+/**
+ * The handoff of each run that stopped for a person or a split: scripts/autopilot.sh
+ * reads `handoff/<name>.md` in the run's worktree, `.claude/worktrees/<name
+ * without kickoff-sitting->`. If the launcher moves the handoff, update this.
+ */
+async function readHandoffs($: EngineInterface, home: string, endings: readonly Ending[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  for (const e of endings) {
+    const kind = lastEnd(e.text)?.kind
+    if (kind !== 'decision' && kind !== 'split') continue
+    const tree = `${home}/${REPO}/.claude/worktrees/${e.base.replace(/^kickoff-sitting-/, '')}`
+    const text = await $.fs.read(`${tree}/handoff/${e.base}.md`).catch(() => '')
+    if (text !== '') out[e.base] = text
+  }
+  return out
+}
+
+// Each red deploy run's failed strip stage; a finished run's jobs never change.
+const deployCache = new Map<string, string>()
+
+/** Where each red deploy broke, from its failed jobs through `gh`, asked once per run. */
+async function readDeployStages($: EngineInterface, home: string, endings: readonly Ending[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  for (const e of endings) {
+    const run = deployRunOf(lastEnd(e.text)?.outcome ?? '')
+    if (run === '') continue
+    if (!deployCache.has(run)) {
+      const r = await $.process
+        .run(['gh', 'run', 'view', run, '--json', 'jobs', '--jq', '.jobs[] | select(.conclusion == "failure") | .name'], {
+          cwd: `${home}/${REPO}`,
+          timeoutMs: 10000,
+        })
+        .catch(() => ({ exitCode: 1, stdout: '' }))
+      if (r.exitCode !== 0) continue
+      deployCache.set(run, deployStageOf(r.stdout.split('\n').filter(l => l.trim() !== '')))
+    }
+    out[run] = deployCache.get(run) ?? ''
+  }
+  return out
 }
 
 // Brief texts by blob id; a blob's text never changes. Pruned each poll to
@@ -282,12 +360,26 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const recent = await readRecent($, dir, raw).catch(() => [])
+  const { recent, endings } = await readEndings($, dir, raw, Object.keys(afters)).catch(() => ({ recent: [] as Ended[], endings: [] as Ending[] }))
+  const handoffs = await readHandoffs($, home, endings).catch(() => ({}))
+  const deployStages = await readDeployStages($, home, endings).catch(() => ({}))
   const offset = await $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' }))
   const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
   const now = await $.clock.now()
   const spend = await readSpend($, home, now).catch(() => null)
-  const next = buildBoard(raw, progress, alive, now, { loop, recent, onDeck, tools, cycles, utcOffset, spend, afters })
+  const next = buildBoard(raw, progress, alive, now, {
+    loop,
+    recent,
+    onDeck,
+    tools,
+    cycles,
+    utcOffset,
+    spend,
+    afters,
+    endings,
+    handoffs,
+    deployStages,
+  })
 
   await update($, board, () => next)
 
@@ -307,6 +399,8 @@ export const register: Register = on => {
     // The summary rides on the prompt hint line; clear any status pinned by
     // an earlier version, which the engine marks with a warning sign.
     $.ui.status(undefined)
+    const stored = parseFolds(await $.store.get(FOLDS_KEY).catch(() => undefined))
+    await update($, folds, () => stored)
     // The poll starts before the command registers: a refused command name
     // costs only the slash command, and the hint line keeps updating.
     void poll($).catch(() => undefined)
@@ -340,8 +434,9 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const b: Board | null = await read($, board)
+    const setByHand: Folds = await read($, folds)
 
     // A lane's name as a pill on the raised surface.
     const pill = (name: string) => (
@@ -405,6 +500,39 @@ export const register: Register = on => {
       { value: cost.toFixed(2), label: '$ in flight', color: F.text, isZero: cost === 0 },
     ]
     const recentMax = Math.max(0, ...b.recent.map(d => d.usd ?? 0))
+
+    // A foldable card's header: a Button on the card's hotkey that flips its
+    // fold and keeps the choice, with the one-line summary while folded.
+    const hasBlocked = b.blocked.length > 0
+    const folded = (card: FoldCard): boolean => isFolded(card, setByHand, hasBlocked)
+    const cardHead = (card: FoldCard, label: string, color: string) => {
+      const isClosed = folded(card)
+      const flip = async () => {
+        const next = { ...setByHand, [card]: !isClosed }
+        await update($, folds, () => next)
+        await $.store.set(FOLDS_KEY, next)
+      }
+      return (
+        <Button key={`fold-${card}`} hotkey={FOLD_KEY[card]} plain onPress={flip}>
+          <Text bold color={color}>
+            {isClosed ? '▸ ' : '▾ '}
+            {label}
+          </Text>
+          {isClosed && <Text color={F.overlay2}>{`  ${foldSummary(card, b)}`}</Text>}
+        </Button>
+      )
+    }
+
+    // A block's pipeline strip: green done, red where it broke, grey to come.
+    const stripCell = (c: StripCell) => (
+      <Text
+        backgroundColor={c.state === 'done' ? F.green : c.state === 'broke' ? F.red : F.surface0}
+        color={c.state === 'todo' || c.state === 'skip' ? F.overlay0 : F.mantle}
+        bold={c.state === 'broke'}
+      >
+        {` ${c.stage}${c.state === 'broke' ? ' ✗' : c.state === 'skip' ? ' –' : ''} `}
+      </Text>
+    )
 
     // The second row: spend in whole dollars over the last 24 hours, 7 days
     // and 30 days, and in all, from token-ledger. The windows roll, so the
@@ -512,10 +640,63 @@ export const register: Register = on => {
           </Box>
         ))}
 
+        {hasBlocked && (
+          <Box {...CARD} borderColor={F.red}>
+            {cardHead('blocked', 'blocked', F.red)}
+            {!folded('blocked') &&
+              b.blocked.map((k, i) => (
+                <Box flexDirection="column" marginTop={1}>
+                  {i > 0 && <Text color={F.surface1}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>}
+                  <Text wrap="wrap">
+                    <Text backgroundColor={KIND_COLOR[k.kind]} color={F.mantle} bold>
+                      {` ${KIND_TAG[k.kind]} `}
+                    </Text>
+                    <Text bold color={F.text}>{`  ${k.headline}`}</Text>
+                  </Text>
+                  {k.why !== '' && (
+                    <Text color={F.subtext0} wrap="wrap">
+                      {k.why}
+                    </Text>
+                  )}
+                  {k.strip.length > 0 && (
+                    <Text wrap="truncate-end">
+                      <Text color={F.overlay2}>{`${k.sitting} ${k.slug}  `}</Text>
+                      {k.strip.map(c => (
+                        <Text>
+                          {stripCell(c)}
+                          {' '}
+                        </Text>
+                      ))}
+                    </Text>
+                  )}
+                  {k.holds.length > 0 && <Text color={F.overlay2}>{`holds ${k.holds.length}, in order`}</Text>}
+                  {k.holds.map(w => (
+                    <Box justifyContent="space-between" columnGap={2}>
+                      <Text wrap="truncate-end">
+                        <Text color={F.yellow}>{'  ⏸ '}</Text>
+                        <Text bold color={F.text}>{w.sitting}</Text>
+                        <Text color={F.subtext0}> {w.slug}</Text>
+                      </Text>
+                      <Text wrap="truncate-end" color={w.why.startsWith('after ') ? F.overlay0 : F.yellow}>
+                        {w.why}
+                      </Text>
+                    </Box>
+                  ))}
+                  <Text wrap="wrap">
+                    <Text bold color={F.red}>
+                      next{'  '}
+                    </Text>
+                    <Text color={F.text}>{k.next}</Text>
+                  </Text>
+                </Box>
+              ))}
+          </Box>
+        )}
+
         {b.queued.length > 0 && (
           <Box {...CARD}>
-            {heading('queued')}
-            {queueTree(b.running, b.queued).map(r => (
+            {cardHead('queued', 'queued', F.lavender)}
+            {!folded('queued') && queueTree(b.running, b.queued).map(r => (
               // A joint means the entry needs its parent shipped.
               <Box justifyContent="space-between" columnGap={2}>
                 <Text wrap="truncate-end">
@@ -542,8 +723,8 @@ export const register: Register = on => {
 
         {b.onDeck.length > 0 && (
           <Box {...CARD}>
-            {heading('on deck')}
-            {deckTree(b.onDeck, [...b.running, ...b.queued].map(r => r.sitting)).map(r =>
+            {cardHead('deck', 'on deck', F.lavender)}
+            {!folded('deck') && deckTree(b.onDeck, [...b.running, ...b.queued].map(r => r.sitting)).map(r =>
               r.kind === 'group' ? (
                 <Text>
                   <Text bold color={DECK_COLOR[r.mode]}>{r.slug}</Text>
@@ -570,8 +751,8 @@ export const register: Register = on => {
 
         {b.recent.length > 0 && (
           <Box {...CARD}>
-            {heading('recent')}
-            {b.recent.map(d => {
+            {cardHead('recent', 'recent', F.lavender)}
+            {!folded('recent') && b.recent.map(d => {
               // One row per run: outcome, sitting, then time, a cost meter
               // scaled to the costliest run listed, the cost and the age.
               const meter = costMeter(d.usd ?? 0, recentMax, RECENT_METER_CELLS)
@@ -581,7 +762,7 @@ export const register: Register = on => {
                     {/* The slug gives way first, so the figures keep one line and one column. */}
                     <Box flexGrow={1} flexShrink={1} minWidth={0}>
                       <Text wrap="truncate-end">
-                        <Text color={d.isShipped ? F.green : F.red}>{d.isShipped ? '●' : '✗'} </Text>
+                        <Text color={F.green}>● </Text>
                         <Text bold color={F.text}>{d.sitting}</Text>
                         <Text color={F.subtext0}> {d.slug}</Text>
                       </Text>
@@ -596,13 +777,6 @@ export const register: Register = on => {
                       </Text>
                     </Box>
                   </Box>
-                  {!d.isShipped && d.reason !== '' && (
-                    <Box paddingLeft={2}>
-                      <Text color={F.overlay0} wrap="truncate-end">
-                        └ {d.reason}
-                      </Text>
-                    </Box>
-                  )}
                 </Box>
               )
             })}

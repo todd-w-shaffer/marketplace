@@ -42,6 +42,11 @@ import {
   stageOf,
   statusLine,
   tileFace,
+  KIND_TAG,
+  deployStageOf,
+  foldSummary,
+  isFolded,
+  lastEnd,
 } from '../hooks/board'
 import type { Deck, Run } from '../types'
 
@@ -473,18 +478,17 @@ test('recent reads the last finished line of each sitting, newest first, and ski
       'finished: shipped; production is live (run 1). ($1.00, 5 min)\nfinished: stopped: the brief is still in docs/briefs. Read the handoff.',
     'kickoff-sitting-s336-no-outcome.progress': 'skill: simplify x',
   }
+  // A deploy that failed shipped code but put nothing live, so it is no ship.
+  text['kickoff-sitting-s338-red-deploy.progress'] =
+    'kind: deploy-red\nfinished: shipped; deploy failed (run 44071838536). ($80.79, 140 min)'
   const recent = recentOf(
-    picked.map(f => ({ ...f, text: text[f.name] ?? '' })),
-    [{ entry: 51, brief: 'docs/briefs/kickoff-sitting-s337-gallery-arrange-page.md', lane: 'epic', status: 0, outcome: '' }],
+    [...picked, { name: 'kickoff-sitting-s338-red-deploy.progress', mtimeMs: 35 }].map(f => ({ ...f, text: text[f.name] ?? '' })),
+    [{ entry: 51, brief: 'docs/briefs/kickoff-sitting-s337-gallery-arrange-page.md', lane: 'epic', status: 0, outcome: '', kind: null }],
   )
-  expect(recent.map(d => `${d.sitting}:${d.isShipped}${laneTag(d)}:${d.endedMs}`)).toEqual(['S337:true (epic):40', 'S339:false:30'])
+  // RECENT lists only runs live in production: a stop and a red deploy are left out.
+  expect(recent.map(d => `${d.sitting}${laneTag(d)}:${d.endedMs}`)).toEqual(['S337 (epic):40'])
   expect(recent[0]?.detail).toBe('shipped · 1h48m · $32.71 · peak 360k · run 41585826609')
-  expect(recent[1]?.detail).toBe('stopped: the brief is still in docs/briefs. Read the handoff.')
-  // The ledger row reads the outcome's totals; a stop reads its reason and has none.
-  expect(recent.map(d => [d.minutes, d.usd, d.reason])).toEqual([
-    [108, 32.71, ''],
-    [null, null, 'stopped: the brief is still in docs/briefs. Read the handoff.'],
-  ])
+  expect(recent.map(d => [d.minutes, d.usd])).toEqual([[108, 32.71]])
 })
 
 test('a cost meter fills braille cells to scale, then the baseline', async () => {
@@ -686,4 +690,175 @@ test('an empty group draws nothing, and a ring of waits still draws every brief'
   expect(rows[0]).toBe('enrich 2')
   expect(rows.length).toBe(3)
   expect(rows.some(r => r.includes('S500')) && rows.some(r => r.includes('S501'))).toBe(true)
+})
+
+// S625's real stop: its progress file as the launcher wrote it, and the status
+// file of the dispatcher that ran it, which writes no `kind` and no `cause`.
+const S625_PROGRESS = [
+  'skill: sittings:savor launch /Users/toddwshaffer/Desktop/apps/shootsfilm/.claude/worktrees/s625-galler',
+  'skill: commit-skill:commit Stop 6 handoff for S625 (autopilot session 0). Commit both changed paths: docs/b',
+  "commit: docs(handoff): hand off S625 at step 0's failed premise on the empty panel",
+  'turn ended: success, 23 turns, $9.56 so far: Four reviewers running: systems, integration, testing strategy, and history.',
+  "woke for a background task: success, 17 turns, $9.56 so far: **Subject:** docs(handoff): hand off S625 at step 0's failed premise on the empty panel",
+  'pushes:',
+  'kind: decision',
+  'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($9.56, 12 min, peak 159k context)',
+].join('\n')
+const S625_HANDOFF = [
+  '# S625 handoff: stop 6, step 0 finds that an added empty panel does not survive the sort',
+  '',
+  '**Stop:** 6. The step 0 savor at launch (`/savor launch`) classified one finding as `premise fails`.',
+  '',
+  '**Question: how long does an empty panel the photographer added last, and what may the sort do to it?**',
+].join('\n')
+const BRIEFS = 'docs/briefs/kickoff-sitting-'
+const S625_AFTERS = {
+  [`${BRIEFS}s625-gallery-arrange-doors.md`]: ['S624'],
+  [`${BRIEFS}s626-gallery-arrange-page.md`]: ['S625'],
+  [`${BRIEFS}s627-gallery-arrange-options.md`]: ['S626'],
+}
+const S625_STATUS = {
+  dispatcher: 927,
+  running: [],
+  queued: [],
+  finished: [
+    { entry: 281, brief: `${BRIEFS}s624-gallery-sort.md`, lane: '', status: 0, outcome: 'autopilot: kickoff-sitting-s624-gallery-sort shipped; production is live (run 44101392229). ($70.28, 114 min)', kind: null },
+    { entry: 282, brief: `${BRIEFS}s625-gallery-arrange-doors.md`, lane: '', status: 1, outcome: 'autopilot: kickoff-sitting-s625-gallery-arrange-doors stopped: the brief is still in docs/briefs. Read the handoff. ($9.56, 12 min, peak 159k context)', kind: null },
+    { entry: 283, brief: `${BRIEFS}s626-gallery-arrange-page.md`, lane: '', status: 1, outcome: 'autopilot: kickoff-sitting-s626-gallery-arrange-page refused: S625 stopped before it shipped.', kind: null },
+  ],
+}
+const S625_ENDINGS = [
+  { base: 'kickoff-sitting-s624-gallery-sort', text: 'finished: shipped; production is live (run 44101392229). ($70.28, 114 min)', mtimeMs: 10 },
+  { base: 'kickoff-sitting-s625-gallery-arrange-doors', text: S625_PROGRESS, mtimeMs: 20 },
+  { base: 'kickoff-sitting-s626-gallery-arrange-page', text: 'finished: refused: S625 stopped before it shipped (stopped: the brief is still in docs/briefs. Read the handoff.).', mtimeMs: 21 },
+]
+const heldDeck = (sitting: string, slug: string): Deck => ({ sitting, slug, lane: 'epic', epic: 'gallery', after: '', mode: 'ready', why: '' })
+
+test("S625's decision stop is one block that holds S626 and S627, which leave on deck", async () => {
+  const b = buildBoard(S625_STATUS, {}, new Set([927]), NOW, {
+    endings: S625_ENDINGS,
+    afters: S625_AFTERS,
+    handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': S625_HANDOFF },
+    onDeck: [heldDeck('S625', 'gallery-arrange-doors'), heldDeck('S626', 'gallery-arrange-page'), heldDeck('S627', 'gallery-arrange-options'), heldDeck('S640', 'other')],
+  })
+  expect(b.blocked.length).toBe(1)
+  const k = b.blocked[0]
+  if (k === undefined) throw new Error('no block')
+  // The kind comes from the progress file's `kind:` line: status.json has none.
+  expect(`${KIND_TAG[k.kind]} ${k.headline}`).toBe(
+    '? you S625 asks: how long does an empty panel the photographer added last, and what may the sort do to it?',
+  )
+  expect(k.why).toBe('step 0 savor · stop 6 · nothing pushed · 12m · $9.56')
+  expect(k.strip.map(c => `${c.stage}:${c.state}`)).toEqual(['savor:broke', 'cycles:todo', 'push:todo', 'staging:todo', 'prod:todo'])
+  // The refused S626 is a hold, never a root of its own.
+  expect(k.holds).toEqual([
+    { sitting: 'S626', slug: 'gallery-arrange-page', why: 'after S625' },
+    { sitting: 'S627', slug: 'gallery-arrange-options', why: 'after S626' },
+  ])
+  expect(k.next).toBe('answer in the handoff, then relaunch S625')
+  expect(b.onDeck.map(d => d.sitting)).toEqual(['S640'])
+  expect(foldSummary('blocked', b)).toBe('1 cause · holds 2 · ? you S625')
+  expect(b.recent).toEqual([])
+})
+
+test('a relaunched sitting is no longer stuck, and its chain waits in the queue', async () => {
+  const raw = {
+    ...S625_STATUS,
+    queued: [
+      { entry: 289, brief: `${BRIEFS}s625-gallery-arrange-doors.md`, lane: '', reason: 'a free slot' },
+      { entry: 290, brief: `${BRIEFS}s626-gallery-arrange-page.md`, lane: '', reason: 'S625' },
+    ],
+  }
+  const b = buildBoard(raw, {}, new Set(), NOW, { endings: S625_ENDINGS, afters: S625_AFTERS })
+  expect(b.blocked).toEqual([])
+})
+
+test("the dispatcher's cause holds a queued entry, and a null cause holds none", async () => {
+  const raw = parseStatus(
+    JSON.stringify({
+      dispatcher: 1,
+      running: [],
+      queued: [
+        { entry: 1, brief: `${BRIEFS}s626-gallery-arrange-page.md`, lane: '', reason: 'S625', cause: { kind: 'decision', sitting: 'S625' } },
+        { entry: 2, brief: `${BRIEFS}s640-other.md`, lane: '', reason: 'a free slot', cause: null },
+        { entry: 3, brief: `${BRIEFS}s641-migrate.md`, lane: '', reason: 'a deploy newer than run 77', cause: { kind: 'deploy-red', run: 77 } },
+      ],
+      finished: [],
+    }),
+  )
+  if (raw === null) throw new Error('no status')
+  const endings = [
+    { base: 'kickoff-sitting-s625-gallery-arrange-doors', text: S625_PROGRESS, mtimeMs: 20 },
+    { base: 'kickoff-sitting-s623-gallery-pins', text: 'bash: npm run push:checked\nkind: deploy-red\nfinished: shipped; deploy failed (run 77). ($80.79, 140 min)', mtimeMs: 30 },
+  ]
+  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: S625_AFTERS, deployStages: { '77': 'staging' } })
+  expect(b.blocked.map(k => `${k.kind} ${k.sitting} holds ${k.holds.map(h => `${h.sitting}(${h.why})`).join(',')}`)).toEqual([
+    'decision S625 holds S626(after S625),S627(after S626)',
+    'deploy-red S623 holds S641(waits for a green deploy)',
+  ])
+  const red = b.blocked[1]
+  expect(red?.headline).toBe('Deploy red: S623 never went live')
+  expect(red?.strip.map(c => `${c.stage}:${c.state}`)).toEqual(['savor:skip', 'cycles:done', 'push:done', 'staging:broke', 'prod:todo'])
+  expect(red?.next).toBe('re-run it if it is a flake, else fix main; the next green deploy clears it and releases the one it holds')
+})
+
+test('a red deploy stops being stuck once a later run goes live', async () => {
+  const endings = [
+    { base: 'kickoff-sitting-s623-gallery-pins', text: 'finished: shipped; deploy failed (run 77). ($8.00, 14 min)', mtimeMs: 30 },
+    { base: 'kickoff-sitting-s624-gallery-sort', text: 'finished: shipped; production is live (run 78). ($8.00, 14 min)', mtimeMs: 40 },
+  ]
+  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { endings })
+  expect(b.blocked).toEqual([])
+  expect(lastEnd(endings[0]?.text ?? '')).toEqual({ outcome: 'shipped; deploy failed (run 77). ($8.00, 14 min)', kind: 'deploy-red', isLive: false })
+})
+
+test('recent and on deck fold themselves while BLOCKED shows, unless set by hand', async () => {
+  expect(isFolded('recent', {}, true)).toBe(true)
+  expect(isFolded('deck', {}, true)).toBe(true)
+  expect(isFolded('queued', {}, true)).toBe(false)
+  expect(isFolded('recent', { recent: false }, true)).toBe(false)
+  expect(isFolded('recent', {}, false)).toBe(false)
+  expect(isFolded('blocked', { blocked: true }, true)).toBe(true)
+  expect(deployStageOf(['Deploy to Staging & E2E'])).toBe('staging')
+  expect(deployStageOf(['Deploy to Cloudflare Workers'])).toBe('prod')
+})
+
+test("the pane draws S625's block above a folded recent, and a header press keeps the fold", async ($, on) => {
+  const endings = [...S625_ENDINGS, { base: 'kickoff-sitting-s629-board-blocked-hold', text: 'finished: shipped; production is live (run 9). ($27.48, 72 min)', mtimeMs: 5 }]
+  const b = buildBoard(S625_STATUS, {}, new Set([927]), NOW, {
+    endings,
+    afters: S625_AFTERS,
+    handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': S625_HANDOFF },
+    recent: recentOf(endings.map(x => ({ name: `${x.base}.progress`, mtimeMs: x.mtimeMs, text: x.text })), []),
+  })
+  const sets: unknown[] = []
+  on('state.get', (_, e) => ({
+    value: {
+      value: (e as { key: string }).key === 'board' ? { shape: 'board-10', value: b } : { shape: 'folds-1', value: {} },
+      version: 1,
+    },
+  }))
+  on('state.set', (_, e) => {
+    sets.push(((e as { value: { value: unknown } }).value ?? {}).value)
+    return { value: { isSet: true, version: 2 } }
+  })
+  on('store.set', (_, e) => {
+    sets.push((e as { value: unknown }).value)
+    return { value: undefined }
+  })
+  const ui = await $.ui.mount({
+    plugin: 'run-board',
+    component: 'Pane',
+    requestId: 'run-board',
+    surface: 'terminal',
+    props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  })
+  expect((await ui.find({ type: 'Text', text: /^ \? you $/ })) === undefined).toBe(false)
+  expect((await ui.find({ type: 'Text', text: /⏸ S626/ })) === undefined).toBe(false)
+  // Recent folds itself while BLOCKED shows, and keeps its one line.
+  expect((await ui.find({ type: 'Text', text: /2 live · last S624/ })) === undefined).toBe(false)
+  expect((await ui.findAll({ type: 'Button' })).length).toBe(2)
+  await ui.press({ key: 'fold-recent' })
+  expect(sets).toEqual([{ recent: false }, { recent: false }])
+  await ui.unmount()
 })
