@@ -184,6 +184,24 @@ test('commit tallies lead and subagent calls once each, priced by cost share', (
   assert.deepEqual([row.files, row.insertions, row.deletions], [1, 2, 0]);
 });
 
+test('lead context peak and end come from lead steps only, not a larger subagent step', (t) => {
+  const sb = sandbox(t);
+  const dir = sb.repo();
+
+  // Contexts 30K, 500K, 200K on the lead; 900K on the subagent, written last.
+  sb.spend('s1', { input_tokens: 1e4, cache_creation_input_tokens: 2e4 });
+  sb.spend('s1', { input_tokens: 1e3, cache_read_input_tokens: 4.89e5, cache_creation_input_tokens: 1e4 });
+  sb.spend('s1', { input_tokens: 2e3, cache_read_input_tokens: 1.98e5 });
+  sb.spend('s1', { sub: true, input_tokens: 1e5, cache_read_input_tokens: 8e5 });
+  sb.ledger(dir, 's1', 'commit', '--sha', sb.commit(dir, 'a.txt'));
+
+  const row = last(sb.rows(), 'commit');
+  assert.equal(row.lead.calls, 3);
+  assert.equal(row.lead.context_peak, 5e5);
+  assert.equal(row.lead.context_end, 2e5);
+  assert.ok(!('context_peak' in row.sub) && !('context_end' in row.sub));
+});
+
 test('consecutive commits get contiguous windows and count each call once', (t) => {
   const sb = sandbox(t);
   const dir = sb.repo();

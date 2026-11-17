@@ -181,9 +181,15 @@ function findSession(sessionId) {
 }
 
 // `lastMs` is the latest counted usage line in the window; `where` is the cwd and branch of the
-// latest usage line up to the window's end, counted or not.
+// latest usage line up to the window's end, counted or not. A step's context is the prompt it
+// sent: input plus cache read plus cache write. `contextPeak` is the largest counted one and
+// `contextEnd` the one at `lastMs`.
 function newBucket() {
-  return { calls: 0, byModel: {}, lastMs: -Infinity, where: null };
+  return { calls: 0, byModel: {}, lastMs: -Infinity, where: null, contextPeak: null, contextEnd: null };
+}
+
+function contextOf(u) {
+  return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
 }
 
 function addUsage(bucket, model, u) {
@@ -222,7 +228,9 @@ async function scanFile(file, bucket, seen, startMs, endMs) {
     if (ts <= startMs) { if (id) seen.add(id); continue; }
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    bucket.lastMs = Math.max(bucket.lastMs, ts);
+    const ctx = contextOf(row.message.usage);
+    if (ts >= bucket.lastMs) { bucket.lastMs = ts; bucket.contextEnd = ctx; }
+    if (bucket.contextPeak === null || ctx > bucket.contextPeak) bucket.contextPeak = ctx;
     addUsage(bucket, model, row.message.usage);
   }
 }
@@ -539,9 +547,13 @@ function windowOf(scan) {
   return { start: new Date(scan.startMs).toISOString(), end: new Date(scan.endMs).toISOString() };
 }
 
+// The lead's context_peak and context_end are absent when it made no counted
+// call, and in entries written before they existed; a reader takes absent as unknown.
 function usageOf(scan) {
+  const { lead } = scan;
+  const context = lead.contextPeak === null ? {} : { context_peak: lead.contextPeak, context_end: lead.contextEnd };
   return {
-    lead: { calls: scan.lead.calls, by_model: scan.lead.byModel },
+    lead: { calls: lead.calls, by_model: lead.byModel, ...context },
     sub: { calls: scan.sub.calls, by_model: scan.sub.byModel },
   };
 }
