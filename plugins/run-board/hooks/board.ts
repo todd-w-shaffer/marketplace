@@ -174,7 +174,8 @@ export function cycleBlobs(lsTree: string, key: string): string[] {
  * and the archive.
  *
  * The savor runs from a `sittings:savor launch` line to the next `/commit`,
- * which holds its edits and counts toward no cycle.
+ * which holds its edits and counts toward no cycle, or to the launcher's
+ * `savored:` line, which a savor that made no edits ends on.
  * Cycle k is done when a `/commit` naming `cycle k` (or, naming none, the
  * next cycle) is followed by a `code-review low` line. The ship starts at
  * `/ship` or a push, and the archive at the first `/commit` after the ship's
@@ -208,6 +209,8 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
       pending = null
     } else if (/^skill: sittings:savor launch\b/.test(line)) {
       if (savor === 'none') savor = 'live'
+    } else if (line.startsWith('savored: ')) {
+      if (savor === 'live') savor = 'done'
     } else if (line.startsWith('cut: ')) cut = true
     else if (/^skill: simplify\b/.test(line)) simplify = true
     else if (/^skill: code-review xhigh\b/.test(line)) xhigh = true

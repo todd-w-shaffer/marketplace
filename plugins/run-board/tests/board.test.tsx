@@ -208,6 +208,14 @@ test('a run with step 0 opens on a savor phase that its own commit closes', asyn
   )
 })
 
+test('a savor file closes a savor that made no edits, so the first cycle commit counts as cycle 1', async () => {
+  const savoring = 'skill: sittings:savor launch docs/briefs/kickoff-sitting-s620-x.md'
+  const handed = `${savoring}\nsavored: session 0 handed over in /x.savored; session 1 starts at cycle 1 in /w`
+  expect(states(handed, 2)).toBe('savor:done c1:live c2:todo simpl:todo xhigh:todo ship:todo arch:todo')
+  const cycle1 = `${handed}\nskill: commit-skill:commit S620 cycle 1: the id\nskill: code-review low a b`
+  expect(states(cycle1, 2)).toBe('savor:done c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
+})
+
 test('bar blocks fit the pane, between 3 and 9 columns', async () => {
   expect(segmentWidth(60, 7)).toBe(7)
   expect(segmentWidth(40, 7)).toBe(4)
