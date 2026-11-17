@@ -8,7 +8,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   how many briefs wait and the cost so far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ ○ 1 │ $12.22`.
   It is empty when nothing runs or waits.
 - **Progress bar.** Each run's card has a braille block per phase of the fixed chain: step 0's `savor` when the run has one (from the
-  `sittings:savor launch` line to the `/commit` that holds its edits), each cycle, then `⋮` where session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is a full `⣿` run in green when done, a
+  `sittings:savor launch` line to the `/commit` that holds its edits, or to the launcher's `savored:` line), each cycle, then `⋮` where session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is a full `⣿` run in green when done, a
   peach taper in flight and a grey `⣀` baseline to come, and the bar ends in a `⡇` cap. The lane's name is a
   pill on the raised surface, in the lane's colour (pink epic, teal fix). The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
   on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
