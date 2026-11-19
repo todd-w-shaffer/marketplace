@@ -5,8 +5,9 @@ import type { BlockKind, Board, Deck, DeckMode, Ended, FoldCard, Folds, Loop, Ph
 import {
   FOLD_KEY,
   KIND_TAG,
+  DEPLOY_LIVE,
   deployRunOf,
-  deployStageOf,
+  deployStateOf,
   foldSummary,
   isFolded,
   lastEnd,
@@ -257,26 +258,43 @@ async function readHandoffs($: EngineInterface, home: string, endings: readonly 
   return out
 }
 
-// Each red deploy run's failed strip stage; a finished run's jobs never change.
-const deployCache = new Map<string, string>()
+// Each red deploy run's state through `gh`, and when it was asked. A re-run
+// of the same run can turn it green, so a red run that could still block is
+// asked again after DEPLOY_REASK_MS; a run once live is asked no more.
+const deployCache = new Map<string, { state: string; askedMs: number }>()
+const DEPLOY_REASK_MS = 60_000
 
-/** Where each red deploy broke, from its failed jobs through `gh`, asked once per run. */
-async function readDeployStages($: EngineInterface, home: string, endings: readonly Ending[]): Promise<Record<string, string>> {
+/**
+ * Each red deploy's state by run: where its latest attempt broke, or
+ * `DEPLOY_LIVE` once an attempt passed. A run older than the newest live run
+ * blocks nothing, so it is asked once.
+ */
+async function readDeployStages($: EngineInterface, home: string, endings: readonly Ending[], now: number): Promise<Record<string, string>> {
   const out: Record<string, string> = {}
+  let newestLive = Number.NEGATIVE_INFINITY
+  for (const e of endings) if (lastEnd(e.text)?.isLive) newestLive = Math.max(newestLive, e.mtimeMs)
   for (const e of endings) {
     const run = deployRunOf(lastEnd(e.text)?.outcome ?? '')
     if (run === '') continue
-    if (!deployCache.has(run)) {
+    const known = deployCache.get(run)
+    const reask = known !== undefined && known.state !== DEPLOY_LIVE && e.mtimeMs > newestLive && now - known.askedMs >= DEPLOY_REASK_MS
+    if (known === undefined || reask) {
       const r = await $.process
-        .run(['gh', 'run', 'view', run, '--json', 'jobs', '--jq', '.jobs[] | select(.conclusion == "failure") | .name'], {
+        .run(['gh', 'run', 'view', run, '--json', 'status,conclusion,jobs', '--jq', '(.status + "\\t" + .conclusion), (.jobs[] | select(.conclusion == "failure") | .name)'], {
           cwd: `${home}/${REPO}`,
           timeoutMs: 10000,
         })
         .catch(() => ({ exitCode: 1, stdout: '' }))
-      if (r.exitCode !== 0) continue
-      deployCache.set(run, deployStageOf(r.stdout.split('\n').filter(l => l.trim() !== '')))
+      if (r.exitCode === 0) {
+        const [head = '', ...failed] = r.stdout.split('\n').filter(l => l.trim() !== '')
+        const [status = '', conclusion = ''] = head.split('\t')
+        // An attempt in progress keeps the last finished state until it ends.
+        const state = status === 'completed' ? deployStateOf(conclusion, failed) : (known?.state ?? '')
+        deployCache.set(run, { state, askedMs: now })
+      }
     }
-    out[run] = deployCache.get(run) ?? ''
+    const state = deployCache.get(run)?.state
+    if (state !== undefined) out[run] = state
   }
   return out
 }
@@ -362,10 +380,10 @@ async function poll($: EngineInterface): Promise<void> {
   const alive = await alivePids($, pids).catch(() => new Set<number>())
   const { recent, endings } = await readEndings($, dir, raw, Object.keys(afters)).catch(() => ({ recent: [] as Ended[], endings: [] as Ending[] }))
   const handoffs = await readHandoffs($, home, endings).catch(() => ({}))
-  const deployStages = await readDeployStages($, home, endings).catch(() => ({}))
+  const now = await $.clock.now()
+  const deployStages = await readDeployStages($, home, endings, now).catch(() => ({}))
   const offset = await $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' }))
   const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
-  const now = await $.clock.now()
   const spend = await readSpend($, home, now).catch(() => null)
   const next = buildBoard(raw, progress, alive, now, {
     loop,

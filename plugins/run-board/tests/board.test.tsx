@@ -44,6 +44,8 @@ import {
   tileFace,
   KIND_TAG,
   deployStageOf,
+  deployStateOf,
+  DEPLOY_LIVE,
   foldSummary,
   isFolded,
   lastEnd,
@@ -810,6 +812,15 @@ test('a red deploy stops being stuck once a later run goes live', async () => {
   const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { endings })
   expect(b.blocked).toEqual([])
   expect(lastEnd(endings[0]?.text ?? '')).toEqual({ outcome: 'shipped; deploy failed (run 77). ($8.00, 14 min)', kind: 'deploy-red', isLive: false })
+})
+
+test('a red deploy stops being stuck once a re-run of its own run passes', async () => {
+  const endings = [{ base: 'kickoff-sitting-s658-dispatch-holds-on-held-gate', text: 'finished: shipped; deploy failed (run 77). ($8.00, 14 min)', mtimeMs: 30 }]
+  const raw = { dispatcher: null, running: [], queued: [], finished: [] }
+  expect(buildBoard(raw, {}, new Set(), NOW, { endings, deployStages: { '77': 'staging' } }).blocked.map(b => b.sitting)).toEqual(['S658'])
+  expect(buildBoard(raw, {}, new Set(), NOW, { endings, deployStages: { '77': DEPLOY_LIVE } }).blocked).toEqual([])
+  expect(deployStateOf('success', [])).toBe(DEPLOY_LIVE)
+  expect(deployStateOf('failure', ['Deploy to Staging & E2E'])).toBe('staging')
 })
 
 test('recent and on deck fold themselves while BLOCKED shows, unless set by hand', async () => {

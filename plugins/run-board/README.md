@@ -51,14 +51,15 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **BLOCKED.** A red-bordered card above the queue, drawn only when something is stuck: one block per root cause,
   the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or
   queues it, and its brief is still on `origin/main`, or it is a red deploy (`shipped; deploy failed`) with no live
-  run after it. Each block shows a kind tag by who acts (`? you` a decision, `÷ plan` a split, `✗ code` a red
+  run after it, whose run's latest attempt did not pass. Each block shows a kind tag by who acts (`? you` a decision, `÷ plan` a split, `✗ code` a red
   deploy, `! run` anything else), a headline (a decision quotes the handoff's `**Question:**` line, read from
   `handoff/<name>.md` in the run's worktree), one line of why, a pipeline strip (savor, cycles, push, staging,
   prod) marking where it broke, the chain it holds in order with why each waits, and one `next` line. The kind is
   status.json's `finished[].kind`, else the `kind:` line above the progress file's last `finished:` line. A queued
   entry is held by status.json's `queued[].cause`; a dispatcher that writes no `cause` key is read through the
   `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never
-  appears on deck. A red deploy's strip reads its failed jobs once per run with `gh run view`.
+  appears on deck. A red deploy's strip reads its latest attempt with `gh run view`: once for a run older than the
+  newest live run, and again each minute for one that still blocks, so a re-run that passes clears its block.
 - **Folding.** The headers of blocked, queued, on deck and recent are Buttons on `b`, `q`, `d` and `r` (with the
   pane focused). A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
   otherwise recent and on deck fold themselves while BLOCKED shows.

@@ -957,6 +957,16 @@ export function stripOf(text: string, kind: BlockKind, deployStage = ''): StripC
 export const deployStageOf = (failedJobs: readonly string[]): string =>
   failedJobs.some(j => /cloudflare workers|record the release/i.test(j)) ? 'prod' : failedJobs.length > 0 ? 'staging' : ''
 
+/** The `deployStages` value of a red deploy run whose latest attempt passed, as a re-run of a flake does. */
+export const DEPLOY_LIVE = 'live'
+
+/**
+ * A finished deploy run's state from its latest attempt: `DEPLOY_LIVE` when
+ * it concluded `success`, else the strip stage its failed jobs stand for.
+ */
+export const deployStateOf = (conclusion: string, failedJobs: readonly string[]): string =>
+  conclusion === 'success' ? DEPLOY_LIVE : deployStageOf(failedJobs)
+
 /** The question a stop handoff asks on its `**Question: …**` line, or empty. */
 export const handoffQuestion = (handoff: string): string => /\*\*Question: (.+?)\*\*/.exec(handoff)?.[1]?.trim() ?? ''
 
@@ -969,7 +979,7 @@ export const handoffStop = (handoff: string): string => [...handoff.matchAll(/\*
  *
  * A sitting is stuck when its last end is not live, nothing runs or queues
  * it, and either its brief is still on `origin/main`, or it is a red deploy
- * with no live run after it. A queued entry is held by the cause the
+ * with no live run after it and whose run's latest attempt did not pass. A queued entry is held by the cause the
  * dispatcher names; a record without the `cause` key, from a dispatcher older
  * than the field, is held when an `After:` sitting is stuck or held. A brief
  * on main that nothing runs or queues is held the same way. A stuck sitting
@@ -1015,7 +1025,8 @@ export function blockedOf(input: {
   const stuck = new Map<string, Info>()
   for (const [s, i] of ends) {
     if (running.has(s) || queued.has(s)) continue
-    if (i.kind === 'deploy-red' ? i.mtimeMs > newestLive : onMain.has(s)) stuck.set(s, i)
+    const redDeploy = i.mtimeMs > newestLive && deployStages[deployRunOf(i.end.outcome)] !== DEPLOY_LIVE
+    if (i.kind === 'deploy-red' ? redDeploy : onMain.has(s)) stuck.set(s, i)
   }
 
   // A root is a stuck sitting, or `run N` for a red deploy no stuck sitting names.
