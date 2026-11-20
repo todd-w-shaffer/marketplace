@@ -589,8 +589,8 @@ caller does next.
 
 ### The delta pass
 
-Launch mode given `<since sha>` and `<spec sha>` reviews only what changed since an earlier launch savor of this
-spec. `<since sha>` is the base that savor ran at. `<spec sha>` is the commit that holds the spec as that savor
+Launch mode given `<since sha>` and `<spec sha>` reviews only what changed since an earlier savor of this
+spec, a full savor at planning or a launch savor. `<since sha>` is the base that savor ran at. `<spec sha>` is the commit that holds the spec as that savor
 left it. The caller supplies both; the skill reads neither from the spec.
 
 1. **Check the pair.** If `<since sha>` is not an ancestor of `HEAD`
