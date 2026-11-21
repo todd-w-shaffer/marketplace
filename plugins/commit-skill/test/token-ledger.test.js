@@ -9,55 +9,45 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
 const BIN = path.join(__dirname, '..', 'bin', 'token-ledger');
 const { SHIP_DOCS, shipDocsSubjects } = require('./cases');
+const { baseSandbox, run } = require('./gate-sandbox');
 
 // ---------- sandbox ----------
 
 function sandbox(t) {
-  // realpath: macOS tmpdir is a symlink, and git reports the resolved path.
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'token-ledger-')));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const home = path.join(root, 'home');
+  // No GIT_CONFIG_GLOBAL: the color.ui test writes $HOME/.gitconfig. The
+  // runner's PATH, since the ledger has no installed copy to shadow.
+  const base = baseSandbox(t, {
+    prefix: 'token-ledger-',
+    env: (root) => ({
+      PATH: process.env.PATH,
+      TOKEN_LEDGER_FILE: path.join(root, 'ledger.jsonl'),
+      TOKEN_LEDGER_MARKERS: path.join(root, 'markers.json'),
+    }),
+  });
+  const { root, home, env, envWith } = base;
   const projects = path.join(home, '.claude', 'projects', '-sandbox');
   fs.mkdirSync(projects, { recursive: true });
 
-  const env = {
-    PATH: process.env.PATH,
-    HOME: home,
-    TOKEN_LEDGER_FILE: path.join(root, 'ledger.jsonl'),
-    TOKEN_LEDGER_MARKERS: path.join(root, 'markers.json'),
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
-    GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com',
-  };
-
   let nextId = 0;
   const sb = {
-    root,
-    env,
+    ...base,
     projects,
     lockFile: env.TOKEN_LEDGER_FILE + '.lock',
     errorsFile: env.TOKEN_LEDGER_FILE + '.errors',
 
-    git(cwd, ...args) {
-      const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
-      if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed:\n${r.stderr}`);
-      return r.stdout.trim();
-    },
-
     gitStatus(cwd, ...args) {
-      return spawnSync('git', args, { cwd, env, encoding: 'utf8' }).status;
+      return run('git', args, { cwd, env }).status;
     },
 
     // A run with its status and stderr kept, which `ledger` drops.
     run(cwd, session, args, { env: extra = {}, input } = {}) {
-      return spawnSync(process.execPath, [BIN, ...args], {
-        cwd, env: { ...env, CLAUDE_CODE_SESSION_ID: session, ...extra }, encoding: 'utf8', input,
+      return run(process.execPath, [BIN, ...args], {
+        cwd, env: envWith({ CLAUDE_CODE_SESSION_ID: session, ...extra }), input,
       });
     },
 
@@ -269,7 +259,7 @@ function worktree(sb, branch = 'feature') {
   sb.git(main, 'remote', 'set-head', 'origin', 'main');
   const wt = path.join(sb.root, 'work-feature');
   sb.git(main, 'worktree', 'add', '-q', '-b', branch, wt);
-  assert.equal(spawnSync('git', ['rev-parse', '@{u}'], { cwd: wt, env: sb.env }).status, 128, `${branch} has no upstream`);
+  assert.equal(sb.gitStatus(wt, 'rev-parse', '@{u}'), 128, `${branch} has no upstream`);
   return { main, wt };
 }
 
@@ -313,9 +303,7 @@ test('ship with no marker and nothing pushed refuses rather than guessing', (t) 
   const sb = sandbox(t);
   const dir = sb.repo();
   sb.tracked(dir, 's1', 'a.txt');
-  const r = spawnSync(process.execPath, [BIN, 'ship'], {
-    cwd: dir, env: { ...sb.env, CLAUDE_CODE_SESSION_ID: 's1' }, encoding: 'utf8',
-  });
+  const r = sb.run(dir, 's1', ['ship']);
   assert.equal(r.status, 1);
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /no ship base/);

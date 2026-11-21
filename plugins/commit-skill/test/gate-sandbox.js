@@ -3,7 +3,8 @@
 // The sandbox the commit gate's two suites share: throwaway repositories, a
 // whitelisted environment, and the gate's hooks run the way Claude Code runs
 // them. Never this checkout: a commit-msg hook in its hooks directory would
-// gate every session working here.
+// gate every session working here. The token-ledger suite builds on
+// baseSandbox.
 
 const fs = require('fs');
 const os = require('os');
@@ -64,31 +65,37 @@ function hookCommands(event, matcher) {
     .flatMap((entry) => entry.hooks.map((h) => h.command));
 }
 
-function sandbox(t) {
+/**
+ * What both the gate and ledger suites start from: a throwaway root removed
+ * after the test, a home inside it, and git run with a fixed identity and no
+ * system config. `env` adds to that environment (PATH, and GIT_CONFIG_GLOBAL
+ * where a suite wants it); pass a function to build it from the root.
+ */
+function baseSandbox(t, { prefix, env: extra = {} }) {
   // realpath: macOS tmpdir is a symlink, and git reports the resolved path.
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'commit-gate-')));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, 'home');
   fs.mkdirSync(home);
 
   const env = {
-    PATH: PATH_ENV,
     HOME: home,
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
     GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com',
+    ...(typeof extra === 'function' ? extra(root) : extra),
   };
 
-  // `extra` overrides the environment; an empty value unsets a variable.
-  const envWith = (extra = {}) => {
-    const vars = { ...env, ...extra };
+  // `more` overrides the environment; an empty value unsets a variable.
+  const envWith = (more = {}) => {
+    const vars = { ...env, ...more };
     for (const k of Object.keys(vars)) if (vars[k] === '') delete vars[k];
     return vars;
   };
 
-  const sb = {
+  return {
     root,
+    home,
     env,
     envWith,
 
@@ -97,6 +104,18 @@ function sandbox(t) {
       if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed:\n${r.stderr}`);
       return r.stdout.trim();
     },
+  };
+}
+
+function sandbox(t) {
+  const base = baseSandbox(t, {
+    prefix: 'commit-gate-',
+    env: { PATH: PATH_ENV, GIT_CONFIG_GLOBAL: '/dev/null' },
+  });
+  const { root, envWith } = base;
+
+  const sb = {
+    ...base,
 
     head(cwd) {
       return sb.git(cwd, 'rev-parse', 'HEAD');
@@ -176,5 +195,5 @@ function sandbox(t) {
 
 module.exports = {
   ROOT, GATE, SESSION, OTHER, RECIPE, NO_TOKEN, NO_RECIPE, NO_SESSION, NOT_ENABLED,
-  claude, hookCommands, run, sandbox,
+  baseSandbox, claude, hookCommands, run, sandbox,
 };
