@@ -247,16 +247,9 @@ adding a **historical reviewer**."*
 >    file"), note that — eroded-rationale findings need a quotable stated
 >    reason to land.
 >
->    **Do not add `-1` to this command.** It looks like the obvious way to
->    ask for one commit and it returns **nothing at all** — verified on git
->    2.50.1: `-1` truncates before `--follow` resolves the rename chain, so
->    the pipeline empties. It fails silently, which is the dangerous part:
->    the step reports "empty" rather than erroring, the reviewer records it
->    under `empty mining steps`, and the whole **eroded-rationale** category
->    — the only one that needs a quotable origin body — goes quietly dead
->    while the run still looks healthy. The `sed` above is what bounds the
->    output to one record instead; the body is multi-line, so `head -1` is
->    not a substitute.
+>    **Do not add `-1` to this command.** `-1` truncates before `--follow`
+>    resolves renames, so it silently returns nothing. The `sed` bounds the
+>    output to one record; `head -1` can't, because the body is multi-line.
 >
 >    **Known limitation:** `--follow` may still resolve to the rename commit
 >    rather than the true origin when a file has been renamed. If the

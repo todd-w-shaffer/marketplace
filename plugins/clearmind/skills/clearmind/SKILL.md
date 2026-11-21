@@ -160,20 +160,10 @@ List any registered skills or enabled plugins. Note which ones haven't been
 invoked recently in this project — not as a "delete these" but as a
 "these are loaded, are they earning it?" nudge. Low priority, low pressure.
 
-## Phase 6: Token Discrepancy (reference only)
+## Phase 6: Token Discrepancy
 
 If `/context` and the thinking status line disagree on token count, note it
-in the report but don't chase it — a prior investigation (2026-04-11) found:
-
-- `--debug "api"` logs request routing, **not** response `usage` blocks —
-  it cannot confirm actual wire token counts
-- OTEL telemetry is noisy and may not surface `input_tokens` reliably
-- The one confirmed case was a Heisenbug (stale session state, vanished
-  under observation)
-
-If a user reports this, recommend restarting the session first. If it
-persists across fresh sessions, it's worth filing with Anthropic — but the
-debug tooling available today can't isolate it.
+in the report and suggest a fresh session. Don't investigate it.
 
 ## Rules
 
