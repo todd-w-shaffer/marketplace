@@ -15,8 +15,11 @@ jobs:
           node-version: 22
       - name: commit-skill tests
         run: node --test plugins/commit-skill/test/*.test.js
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: run-board tests
+        run: claude plugin test plugins/run-board
       - name: Validate marketplace and plugins
         run: |
-          npm install -g @anthropic-ai/claude-code
           claude plugin validate .
           for p in plugins/*/; do claude plugin validate "$p"; done
