@@ -14,7 +14,7 @@ export type RawStatus = {
  * took and released it in milliseconds. Each is absent from a record an older
  * dispatcher wrote, and null when the record says none.
  */
-export type SlotFields = { slot?: number | null; slotTakenMs?: number | null; slotReleasedMs?: number | null }
+type SlotFields = { slot?: number | null; slotTakenMs?: number | null; slotReleasedMs?: number | null }
 
 // The highest slot the board draws a lane for. The dispatcher runs a handful
 // of slots, so a number past this one is a corrupt line, and the timeline
@@ -27,14 +27,10 @@ const slotNumber = (v: number | null): number | null =>
 
 /** A record's slot fields, each checked: a slot is a slot number, a time parses. */
 function parseSlot(r: Record<string, unknown>): SlotFields {
-  const at = (v: unknown): number | null => {
-    const ms = typeof v === 'string' ? Date.parse(v) : NaN
-    return Number.isFinite(ms) ? ms : null
-  }
   return {
     slot: slotNumber(num(r.slot)),
-    slotTakenMs: at(r.slot_taken),
-    slotReleasedMs: at(r.slot_released),
+    slotTakenMs: parseMs(r.slot_taken),
+    slotReleasedMs: parseMs(r.slot_released),
   }
 }
 
@@ -65,6 +61,13 @@ const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 const list = (v: unknown): Record<string, unknown>[] =>
   Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null) : []
+/** A value as an object to read fields from, an array included, else null. */
+const obj = (v: unknown): Record<string, unknown> | null => (typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null)
+/** A time string in milliseconds, or null when it is no string or `Date.parse` cannot read it. */
+const parseMs = (v: unknown): number | null => {
+  const ms = typeof v === 'string' ? Date.parse(v) : NaN
+  return Number.isFinite(ms) ? ms : null
+}
 
 export function parseStatus(text: string): RawStatus | null {
   let data: unknown
@@ -109,6 +112,10 @@ export function parseStatus(text: string): RawStatus | null {
 export function baseName(brief: string): string {
   return brief.replace(/^.*\//, '').replace(/\.md$/, '')
 }
+
+/** A finished record's outcome without the launcher's `autopilot: ` prefix and the run name before the sentence. */
+const outcomeOf = (f: { brief: string; outcome: string }): string =>
+  f.outcome.replace(/^autopilot: /, '').replace(`${baseName(f.brief)} `, '')
 
 /** Splits a brief path into its sitting label and slug: `S299`, `one-full-check`. */
 export function sittingOf(brief: string): { sitting: string; slug: string } {
@@ -315,10 +322,7 @@ export function lineTimes(progress: string): (number | null)[] {
   let at: number | null = null
   return progress.split('\n').map(line => {
     const m = STAMP.exec(line)
-    if (m) {
-      const ms = Date.parse((m[1] ?? '').trim())
-      at = Number.isFinite(ms) ? ms : null
-    }
+    if (m) at = parseMs((m[1] ?? '').trim())
     return at
   })
 }
@@ -493,8 +497,7 @@ export function newestRunDir(names: readonly string[]): string | null {
 export function runStartedMs(name: string): number | null {
   const m = RUN_DIR.exec(name)
   if (!m) return null
-  const t = Date.parse(`${m[1] ?? ''}T${m[2] ?? ''}:${m[3] ?? ''}:00Z`)
-  return Number.isFinite(t) ? t : null
+  return parseMs(`${m[1] ?? ''}T${m[2] ?? ''}:${m[3] ?? ''}:00Z`)
 }
 
 /** A session log or a landing's output in a run directory, its path relative to it. */
@@ -581,8 +584,8 @@ export function buildBoard(
     deployStages?: Readonly<Record<string, string>>
     /** Each sitting's plan cost by sitting, from token-ledger, or null when it could not be read. */
     plans?: Readonly<Record<string, number>> | null
-    /** Each run's `.launches` file, by run name. */
-    launchLogs?: Readonly<Record<string, string>>
+    /** Each run's launch count from its `.launches` file, by run name. */
+    launches?: Readonly<Record<string, number>>
     /** How many briefs were split from each sitting, by sitting. */
     splits?: Readonly<Record<string, number>>
   } = {},
@@ -595,7 +598,7 @@ export function buildBoard(
     handoffs: extra.handoffs,
     deployStages: extra.deployStages,
     plans,
-    launchLogs: extra.launchLogs,
+    launches: extra.launches,
   })
   const recent = (extra.recent ?? []).map(d => ({ ...d, plan: planOf(plans, d.sitting) }))
   // A held brief, and a stopped one, sits under BLOCKED and never on deck.
@@ -603,13 +606,12 @@ export function buildBoard(
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { cost } = noteOf(text)
-    const started = Date.parse(r.started)
     const stage = stageOf(text)
     return {
       entry: r.entry,
       ...sittingOf(r.brief),
       lane: r.lane,
-      startedMs: Number.isFinite(started) ? started : now,
+      startedMs: parseMs(r.started) ?? now,
       cost: Math.max(r.cost, cost ?? 0),
       stage,
       tool: tools[r.brief] ?? '',
@@ -626,11 +628,7 @@ export function buildBoard(
   }))
   const finished: Done[] = [...raw.finished]
     .sort((a, b) => b.entry - a.entry)
-    .map(f => {
-      const base = baseName(f.brief)
-      const detail = outcomeDetail(f.outcome.replace(/^autopilot: /, '').replace(`${base} `, ''))
-      return { entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped: f.status === 0, detail }
-    })
+    .map(f => ({ entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped: f.status === 0, detail: outcomeDetail(outcomeOf(f)) }))
   return {
     checkedAt: now,
     clock: localClock(now, utcOffset),
@@ -646,6 +644,7 @@ export function buildBoard(
     splits: { ...extra.splits },
     timeline: timelineOf({
       raw,
+      running,
       progress,
       endings: extra.endings ?? [],
       blocks,
@@ -671,7 +670,7 @@ export const TIMELINE_AHEAD_MS = 6 * HOUR_MS
 const SLOT_MATCH_MS = 5 * MINUTE_MS
 
 /** One launch in a progress file: its slot, or null for `slot: none`, and its span. */
-export type SlotSpan = { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }
+type SlotSpan = { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }
 
 /**
  * Each launch a progress file records: a stamped `slot: <k>` line, to the
@@ -680,7 +679,7 @@ export type SlotSpan = { slot: number | null; startMs: number; endMs: number | n
  * says the run never went live. A `slot:` line with no stamp above it opens
  * no launch.
  */
-export function slotSpans(progress: string): SlotSpan[] {
+function slotSpans(progress: string): SlotSpan[] {
   const times = lineTimes(progress)
   const out: SlotSpan[] = []
   let open: SlotSpan | null = null
@@ -732,16 +731,22 @@ function unslottedSpan(progress: string, mtimeMs: number): { startMs: number; en
 const overlaps = (a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }): boolean =>
   a.startMs < b.endMs && b.startMs < a.endMs
 
-/** `12a`, `2p`: an instant's local hour on a 12-hour face, in the offset `date +%z` prints. */
-function hourLabel(localMs: number): string {
+/** A local instant's hour on a 12-hour face, 1 to 12, and whether it is past noon. */
+function hour12(localMs: number): { hour: number; isPm: boolean } {
   const h = new Date(localMs).getUTCHours()
-  return `${h % 12 === 0 ? 12 : h % 12}${h < 12 ? 'a' : 'p'}`
+  return { hour: h % 12 === 0 ? 12 : h % 12, isPm: h >= 12 }
 }
 
-/** The offset `date +%z` prints, in minutes; 0 when it does not parse. */
-function offsetMinutes(utcOffset: string): number {
+/** `12a`, `2p`: an instant's local hour on a 12-hour face, in the offset `date +%z` prints. */
+function hourLabel(localMs: number): string {
+  const { hour, isPm } = hour12(localMs)
+  return `${hour}${isPm ? 'p' : 'a'}`
+}
+
+/** The offset `date +%z` prints, in minutes; null when it does not parse. */
+function offsetMinutes(utcOffset: string): number | null {
   const m = /^([+-])(\d{2})(\d{2})$/.exec(utcOffset.trim())
-  return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0
+  return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : null
 }
 
 /**
@@ -767,6 +772,8 @@ function offsetMinutes(utcOffset: string): number {
  */
 export function timelineOf(input: {
   raw: RawStatus
+  /** `raw.running` as buildBoard read it, in the same order. */
+  running: readonly Pick<Run, 'startedMs'>[]
   progress: Readonly<Record<string, string>>
   endings: readonly Ending[]
   blocks: readonly Block[]
@@ -804,16 +811,17 @@ export function timelineOf(input: {
     highest = Math.max(highest, r.slot)
   }
 
-  for (const r of raw.running) {
+  raw.running.forEach((r, i) => {
     const { sitting } = sittingOf(r.brief)
     const spans = slotSpans(progress[r.brief] ?? '').filter(s => s.slot !== null)
     const last = spans[spans.length - 1]
     const slot = r.slot ?? last?.slot ?? null
     const from = r.slot != null ? (r.slotTakenMs ?? null) : (last?.startMs ?? null)
     if (slot === null || from === null) {
-      const started = Date.parse(r.started)
-      if (Number.isFinite(started) && started < now) unslotted.push({ sitting, tone: 'running', startMs: started, endMs: now })
-      continue
+      // A run whose start does not parse starts at now, so it draws no bar.
+      const started = input.running[i]?.startedMs ?? now
+      if (started < now) unslotted.push({ sitting, tone: 'running', startMs: started, endMs: now })
+      return
     }
     highest = Math.max(highest, slot)
     const released = r.slot != null ? (r.slotReleasedMs ?? null) : null
@@ -823,10 +831,10 @@ export function timelineOf(input: {
     const end = isOver ? now : Math.max(liveEnd, projected)
     placed.push({ slot, bar: bar(sitting, 'running', from, end, liveEnd, isOver) })
     ends.set(sitting, end)
-  }
+  })
   for (const f of raw.finished) {
     if (f.slot == null || f.slotTakenMs == null || f.slotReleasedMs == null) continue
-    const outcome = f.outcome.replace(/^autopilot: /, '').replace(`${baseName(f.brief)} `, '')
+    const outcome = outcomeOf(f)
     const to = Math.max(f.slotTakenMs, f.slotReleasedMs)
     placed.push({ slot: f.slot, bar: bar(sittingOf(f.brief).sitting, LIVE.test(outcome) ? 'live' : 'stopped', f.slotTakenMs, to) })
   }
@@ -891,11 +899,16 @@ export function timelineOf(input: {
     for (const d of onDeck) if (d.mode === 'ready') project(d.sitting, afterSittings(d.after), 'deck')
   }
 
-  // The oldest decision stop, from its finish to now.
+  // The oldest decision stop, from its finish to now. A sitting's first ending stands for it.
+  const endingOf = new Map<string, Ending>()
+  for (const e of endings) {
+    const { sitting } = sittingOf(e.base)
+    if (!endingOf.has(sitting)) endingOf.set(sitting, e)
+  }
   const stops = blocks
     .filter(k => k.kind === 'decision')
     .map(k => {
-      const e = endings.find(x => sittingOf(x.base).sitting === k.sitting)
+      const e = endingOf.get(k.sitting)
       return { sitting: k.sitting, sinceMs: (e === undefined ? null : finishedAt(e.text)) ?? k.endedMs }
     })
     .sort((a, b) => a.sinceMs - b.sinceMs)
@@ -903,12 +916,12 @@ export function timelineOf(input: {
   const you =
     oldest === undefined
       ? null
-      : { label: `${oldest.sitting} ? ${elapsed(oldest.sinceMs, now)}${stops.length > 1 ? ` +${stops.length - 1}` : ''}`, sinceMs: oldest.sinceMs }
+      : bar(`${oldest.sitting} ? ${elapsed(oldest.sinceMs, now)}${stops.length > 1 ? ` +${stops.length - 1}` : ''}`, 'stopped', oldest.sinceMs, now)
 
   const heldMs = medianMs === null ? null : held.size * medianMs
   const heldLabel = held.size === 0 ? '' : `${held.size} held${heldMs === null ? '' : ` · ~${hoursMinutes(heldMs / MINUTE_MS)}`}`
 
-  const shift = offsetMinutes(input.utcOffset) * MINUTE_MS
+  const shift = (offsetMinutes(input.utcOffset) ?? 0) * MINUTE_MS
   const hours: Timeline['hours'] = []
   for (let local = Math.ceil((startMs + shift) / (2 * HOUR_MS)) * 2 * HOUR_MS; local - shift <= endMs; local += 2 * HOUR_MS) {
     hours.push({ ms: local - shift, label: hourLabel(local) })
@@ -938,10 +951,21 @@ export type TimelineCell = { ch: string; tone: CellTone; isLabel: boolean }
 /** A bar's tone, `ahead` for a running bar's projection, then the idle track, the now-line, `held` and an empty cell. */
 export type CellTone = BarTone | 'ahead' | 'idle' | 'now' | 'held' | 'blank'
 
-// The braille bits of a cell's left and right dot columns, all four dots
-// each: DOT_BIT's columns added up.
-const LEFT_DOTS = 0x47
-const RIGHT_DOTS = 0xb8
+// The braille bit for the dot at column x (0-1) and row y (0-3) of a cell.
+const DOT_BIT = [
+  [0x01, 0x02, 0x04, 0x40],
+  [0x08, 0x10, 0x20, 0x80],
+] as const
+
+// The braille bits of a cell's left and right dot columns, all four dots each.
+const LEFT_DOTS = DOT_BIT[0].reduce((a: number, b) => a | b, 0)
+const RIGHT_DOTS = DOT_BIT[1].reduce((a: number, b) => a | b, 0)
+
+/** Draws the now-line at cell `at` of `out` when the cell is on the track and `isFree`. */
+function withNowLine(out: TimelineCell[], at: number, isFree = true): TimelineCell[] {
+  if (at >= 0 && at < out.length && isFree) out[at] = { ch: '│', tone: 'now', isLabel: false }
+  return out
+}
 
 /** The cell an instant falls in on a track `cells` wide, unclamped. */
 const cellOf = (t: Timeline, ms: number, cells: number): number => Math.floor(((ms - t.startMs) / (t.endMs - t.startMs)) * cells)
@@ -1006,9 +1030,7 @@ export function laneCells(t: Timeline, bars: readonly TimelineBar[], cells: numb
     }
   })
   const now = cellOf(t, t.nowMs, width)
-  const cell = out[now]
-  if (cell !== undefined && cellOwner[now] === -1 && !written.has(now)) out[now] = { ch: '│', tone: 'now', isLabel: false }
-  return out
+  return withNowLine(out, now, cellOwner[now] === -1 && !written.has(now))
 }
 
 /** The `held` lane: its label from now, then a dashed strip as long as the held work. */
@@ -1017,10 +1039,7 @@ export function heldCells(t: Timeline, cells: number): TimelineCell[] {
   const out: TimelineCell[] = Array.from({ length: width }, () => ({ ch: ' ', tone: 'blank', isLabel: false }))
   const now = Math.max(0, cellOf(t, t.nowMs, width))
   const { label, ms } = t.held
-  if (label === '') {
-    if (now < width) out[now] = { ch: '│', tone: 'now', isLabel: false }
-    return out
-  }
+  if (label === '') return withNowLine(out, now)
   const end = ms === null ? now : cellOf(t, t.nowMs + ms, width)
   for (let c = now; c < width && c <= end; c++) out[c] = { ch: '⠤', tone: 'held', isLabel: false }
   for (let j = 0; j < label.length && now + j < width; j++) out[now + j] = { ch: label[j] ?? ' ', tone: 'held', isLabel: false }
@@ -1129,17 +1148,19 @@ export function splitCounts(briefs: readonly { path: string; text: string }[], s
   } catch {
     data = null
   }
-  const claims = typeof data === 'object' && data !== null ? (data as Record<string, unknown>).claims : undefined
-  if (typeof claims === 'object' && claims !== null) {
-    for (const [id, claim] of Object.entries(claims as Record<string, unknown>)) {
-      const record = typeof claim === 'object' && claim !== null ? (claim as Record<string, unknown>).record : undefined
-      const from = typeof record === 'object' && record !== null ? (record as Record<string, unknown>).split_from : undefined
-      if (!Array.isArray(from)) continue
-      for (const p of from) if (typeof p === 'string') for (const parent of afterSittings(p)) add(parent, afterSittings(id)[0] ?? id)
-    }
+  for (const [id, claim] of Object.entries(obj(obj(data)?.claims) ?? {})) {
+    const from = obj(obj(claim)?.record)?.split_from
+    if (!Array.isArray(from)) continue
+    for (const p of from) if (typeof p === 'string') for (const parent of afterSittings(p)) add(parent, afterSittings(id)[0] ?? id)
   }
   return Object.fromEntries([...children].map(([parent, kids]) => [parent, kids.size]))
 }
+
+// The claims registry's blob in an `ls-tree -r` listing: each archived claim's record holds its `split_from` list.
+const SITTINGS_JSON = /^\d+ blob ([0-9a-f]+)\tdocs\/briefs\/sittings\.json$/m
+
+/** The blob of `docs/briefs/sittings.json` in an `ls-tree -r` listing, or null when it lists none. */
+export const sittingsBlob = (lsTree: string): string | null => SITTINGS_JSON.exec(lsTree)?.[1] ?? null
 
 /** A sitting's number for ordering, or none for an issue brief. */
 const sittingNumber = (sitting: string): number => {
@@ -1651,10 +1672,10 @@ export function blockedOf(input: {
   deployStages?: Readonly<Record<string, string>>
   /** Each sitting's plan cost, or null when the ledger could not be read. */
   plans?: Readonly<Record<string, number>> | null
-  /** Each run's `.launches` file, by run name. */
-  launchLogs?: Readonly<Record<string, string>>
+  /** Each run's launch count from its `.launches` file, by run name. */
+  launches?: Readonly<Record<string, number>>
 }): { blocks: Block[]; drawn: Set<string> } {
-  const { raw, endings, afters, handoffs = {}, deployStages = {}, plans = null, launchLogs = {} } = input
+  const { raw, endings, afters, handoffs = {}, deployStages = {}, plans = null, launches = {} } = input
   const running = new Set(raw.running.map(r => sittingOf(r.brief).sitting))
   const queued = new Map(raw.queued.map(q => [sittingOf(q.brief).sitting, q]))
   const onMain = new Map(Object.keys(afters).map(k => [sittingOf(k).sitting, k]))
@@ -1735,8 +1756,7 @@ export function blockedOf(input: {
       slug: slugOf.get(h.sitting) ?? stuck.get(h.sitting)?.slug ?? '',
       after: afterOf(h.sitting),
     }))
-    const log = info === undefined ? undefined : launchLogs[info.base]
-    const history = { plan: planOf(plans, root), launches: log === undefined ? null : launchCount(log) }
+    const history = { plan: planOf(plans, root), launches: info === undefined ? null : (launches[info.base] ?? null) }
     blocks.push({ ...blockFace(root, info, kind, holds, handoffs, deployStages), ...history })
   }
   blocks.sort((a, b) => b.holds.length - a.holds.length || b.endedMs - a.endedMs)
@@ -1874,13 +1894,12 @@ const ordinal = (n: number): string => `${n}${n % 100 >= 11 && n % 100 <= 13 ? '
 
 /**
  * What a block's why-line adds after its cost: the plan cost and which launch
- * stopped, ` +$11.36 plan · 1st launch`, each only where its data exists.
+ * stopped, `+$11.36 plan · 1st launch`, each only where its data exists.
  * Empty when neither does.
  */
 export function historyTag(k: Pick<Block, 'plan' | 'launches'>): string {
   const parts = [typeof k.plan === 'number' ? `+${money(k.plan)} plan` : '', k.launches !== null && k.launches > 0 ? `${ordinal(k.launches)} launch` : '']
-  const said = parts.filter(p => p !== '')
-  return said.length === 0 ? '' : ` ${said.join(' · ')}`
+  return parts.filter(p => p !== '').join(' · ')
 }
 
 /** How long ago an instant was: `24m ago`, `5h12m ago`, `3d ago` past two days. */
@@ -1937,12 +1956,6 @@ const DOT_FONT: Record<string, readonly string[]> = {
   '.': ['0', '0', '0', '0', '0', '0', '1'],
 }
 const DOT_HEIGHT = 7
-
-// The braille bit for the dot at column x (0-1) and row y (0-3) of a cell.
-const DOT_BIT = [
-  [0x01, 0x02, 0x04, 0x40],
-  [0x08, 0x10, 0x20, 0x80],
-] as const
 
 /**
  * A figure as dot-matrix numerals, two rows of braille: each glyph of
@@ -2017,11 +2030,11 @@ export function ledgerSpends(text: string): Spend[] {
       overhead?: { usd?: unknown }
     }
     const usd = r.kind === 'commit' ? r.cost?.usd : r.kind === 'ship' ? r.overhead?.usd : undefined
-    const endMs = typeof r.ts === 'string' ? Date.parse(r.ts) : NaN
-    if (typeof usd !== 'number' || !Number.isFinite(usd) || !Number.isFinite(endMs)) continue
-    const start = typeof r.window?.start === 'string' ? Date.parse(r.window.start) : NaN
+    const endMs = parseMs(r.ts)
+    if (typeof usd !== 'number' || !Number.isFinite(usd) || endMs === null) continue
+    const start = parseMs(r.window?.start)
     out.push({
-      startMs: Number.isFinite(start) && start < endMs ? start : endMs,
+      startMs: start !== null && start < endMs ? start : endMs,
       endMs,
       usd,
       kind: r.kind === 'commit' ? 'commit' : 'ship',
@@ -2033,19 +2046,23 @@ export function ledgerSpends(text: string): Spend[] {
 }
 
 /**
- * Each sitting's plan cost, by sitting: the commits with `phase: "plan"` that
- * carry that `sitting`. A plan ship carries no sitting of its own, and a
- * session is no commit, so neither counts.
+ * Adds `spends` to `into`, each sitting's plan cost by sitting, and returns
+ * it: the commits with `phase: "plan"` that carry that `sitting`, in order. A
+ * plan ship carries no sitting of its own, and a session is no commit, so
+ * neither counts. Adding a ledger chunk by chunk gives what one pass over the
+ * whole ledger gives.
  */
-export function planCosts(spends: readonly Spend[]): Record<string, number> {
-  const out: Record<string, number> = {}
+export function addPlanCosts(into: Record<string, number>, spends: readonly Spend[]): Record<string, number> {
   for (const s of spends) {
     if (s.kind !== 'commit' || s.phase !== 'plan' || s.sitting === null) continue
     const key = `S${s.sitting}`
-    out[key] = Math.round(((out[key] ?? 0) + s.usd) * 100) / 100
+    into[key] = Math.round(((into[key] ?? 0) + s.usd) * 100) / 100
   }
-  return out
+  return into
 }
+
+/** Each sitting's plan cost, by sitting, from `spends` alone. */
+export const planCosts = (spends: readonly Spend[]): Record<string, number> => addPlanCosts({}, spends)
 
 /**
  * Spends from one chunk of the ledger, read from where the last chunk
@@ -2082,12 +2099,11 @@ export function spendTotals(spends: readonly Spend[], now: number): SpendTotals 
  * offset. An offset that does not parse reads as UTC, and the clock says so.
  */
 export function localClock(ms: number, utcOffset: string): string {
-  const m = /^([+-])(\d{2})(\d{2})$/.exec(utcOffset.trim())
-  const shift = m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0
-  const d = new Date(ms + shift * 60000)
-  const h = d.getUTCHours()
-  const face = `${h % 12 === 0 ? 12 : h % 12}:${String(d.getUTCMinutes()).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`
-  return m ? face : `${face} UTC`
+  const shift = offsetMinutes(utcOffset)
+  const local = ms + (shift ?? 0) * MINUTE_MS
+  const { hour, isPm } = hour12(local)
+  const face = `${hour}:${String(new Date(local).getUTCMinutes()).padStart(2, '0')} ${isPm ? 'PM' : 'AM'}`
+  return shift === null ? `${face} UTC` : face
 }
 
 /** What the runs and the loop have spent so far. */
@@ -2128,7 +2144,7 @@ export type RecentTotals = {
  * count's is the mean of the two middle times, rounded. Null when no run has
  * minutes.
  */
-export function medianMinutes(recent: readonly Ended[]): number | null {
+function medianMinutes(recent: readonly Ended[]): number | null {
   const timed = recent.flatMap(d => (d.minutes === null ? [] : [d.minutes])).sort((a, b) => a - b)
   const mid = Math.floor(timed.length / 2)
   if (timed.length === 0) return null

@@ -163,8 +163,11 @@ export type Timeline = {
   hours: { ms: number; label: string }[]
   /** Slot 1 to the highest slot the board sees, at least one. */
   slots: { slot: number; bars: TimelineBar[] }[]
-  /** The oldest decision stop, from its finish to now, or null when none waits. */
-  you: { label: string; sinceMs: number } | null
+  /**
+   * The oldest decision stop as a `stopped` bar from its finish to now, its `sitting` the lane's label,
+   * `S684 ? 19m`; null when none waits.
+   */
+  you: TimelineBar | null
   /** The held work from now: `count` briefs, `ms` long at the median, or null without one. */
   held: { label: string; count: number; ms: number | null }
 }

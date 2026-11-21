@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Block, BlockKind, Board, Deck, DeckMode, Ended, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
+import type { BlockKind, Board, Deck, DeckMode, Ended, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
 import {
   FOLD_KEY,
   KIND_TAG,
@@ -28,16 +28,16 @@ import {
   elapsed,
   hoursMinutes,
   historyTag,
-  planCosts,
+  addPlanCosts,
+  launchCount,
   RECENT_SPLIT_CELLS,
+  sittingsBlob,
   splitCounts,
   finishedToast,
   isLoopLanding,
   lastToolOf,
   ledgerChunk,
   liveDepths,
-  livePhase,
-  miniBar,
   phaseGlyphs,
   phaseLine,
   phaseName,
@@ -143,7 +143,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-12' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-13' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -217,10 +217,13 @@ const LEDGER = '.claude/token-ledger.jsonl'
 // chunks.
 const LEDGER_CHUNK_BYTES = 3 * 1024 * 1024
 
-// The ledger as read so far. It only grows, by a line per /commit and /ship,
-// so each poll reads only the bytes past `offset`; a file shorter than
-// `offset` was replaced, and is read again from the start.
-let ledger: { offset: number; partial: string; spends: Spend[] } = { offset: 0, partial: '', spends: [] }
+// The ledger as read so far, and each sitting's plan cost over the spends
+// read. It only grows, by a line per /commit and /ship, so each poll reads
+// only the bytes past `offset`; a file shorter than `offset` was replaced,
+// and is read again from the start.
+type Ledger = { offset: number; partial: string; spends: Spend[]; plans: Record<string, number> }
+const emptyLedger = (): Ledger => ({ offset: 0, partial: '', spends: [], plans: {} })
+let ledger: Ledger = emptyLedger()
 
 // The ledger read in flight. A poll that starts while another reads awaits
 // that read, so two never advance `ledger` from the same offset.
@@ -231,7 +234,7 @@ async function readLedger($: EngineInterface, path: string): Promise<boolean> {
   const stat = await $.process.run(['stat', '-f', '%z', path], { timeoutMs: 5000 })
   const size = Number(stat.stdout.trim())
   if (stat.exitCode !== 0 || !Number.isFinite(size)) return false
-  if (size < ledger.offset) ledger = { offset: 0, partial: '', spends: [] }
+  if (size < ledger.offset) ledger = emptyLedger()
   while (ledger.offset < size) {
     const count = Math.min(LEDGER_CHUNK_BYTES, size - ledger.offset)
     const chunk = await $.process.run(
@@ -240,7 +243,12 @@ async function readLedger($: EngineInterface, path: string): Promise<boolean> {
     )
     if (chunk.exitCode !== 0) return false
     const read = ledgerChunk(ledger.partial, chunk.stdout)
-    ledger = { offset: ledger.offset + count, partial: read.partial, spends: [...ledger.spends, ...read.spends] }
+    ledger = {
+      offset: ledger.offset + count,
+      partial: read.partial,
+      spends: [...ledger.spends, ...read.spends],
+      plans: addPlanCosts({ ...ledger.plans }, read.spends),
+    }
   }
   return true
 }
@@ -257,21 +265,44 @@ async function readSpend(
 ): Promise<{ spend: NonNullable<Board['spend']>; plans: Record<string, number> } | null> {
   if (ledgerRead === null) ledgerRead = readLedger($, `${home}/${LEDGER}`).finally(() => (ledgerRead = null))
   if (!(await ledgerRead)) return null
-  return { spend: spendTotals(ledger.spends, now), plans: planCosts(ledger.spends) }
+  return { spend: spendTotals(ledger.spends, now), plans: { ...ledger.plans } }
 }
 
+// Launch counts read from `.launches` files, by name, kept while their mtime holds.
+const launchCache = new Map<string, { mtimeMs: number; count: number }>()
+
 /**
- * Each stopped run's `.launches` file, by run name, which S699's launcher
- * appends a line to at each launch and no launch empties. A run without one
- * is absent.
+ * Each stopped run's launch count, by run name, from its `.launches` file,
+ * which the launcher appends a line to at each launch and no launch empties.
+ * `mtimes` is the log directory's listing; a run whose file it lacks, or
+ * whose file cannot be read, is absent.
  */
-async function readLaunchLogs($: EngineInterface, dir: string, endings: readonly Ending[]): Promise<Record<string, string>> {
-  const out: Record<string, string> = {}
+async function readLaunchCounts(
+  $: EngineInterface,
+  dir: string,
+  endings: readonly Ending[],
+  mtimes: ReadonlyMap<string, number>,
+): Promise<Record<string, number>> {
+  const out: Record<string, number> = {}
+  const misses: { base: string; name: string; mtimeMs: number }[] = []
   for (const e of endings) {
     if (lastEnd(e.text)?.isLive !== false) continue
-    const text = await $.fs.read(`${dir}/${e.base}.launches`).catch(() => undefined)
-    if (text !== undefined) out[e.base] = text
+    const name = `${e.base}.launches`
+    const mtimeMs = mtimes.get(name)
+    if (mtimeMs === undefined) continue
+    const hit = launchCache.get(name)
+    if (hit !== undefined && hit.mtimeMs === mtimeMs) out[e.base] = hit.count
+    else misses.push({ base: e.base, name, mtimeMs })
   }
+  await Promise.all(
+    misses.map(async m => {
+      const text = await $.fs.read(`${dir}/${m.name}`).catch(() => undefined)
+      if (text === undefined) return
+      const count = launchCount(text)
+      launchCache.set(m.name, { mtimeMs: m.mtimeMs, count })
+      out[m.base] = count
+    }),
+  )
   return out
 }
 
@@ -283,7 +314,12 @@ const progressCache = new Map<string, { mtimeMs: number; text: string }>()
  * brief's on `origin/main`, since a stop that waits for a person can be older
  * than every recent run. None that runs: a run truncates its file at start.
  */
-async function readEndings($: EngineInterface, dir: string, raw: RawStatus, onMain: readonly string[]): Promise<{ recent: Ended[]; endings: Ending[] }> {
+async function readEndings(
+  $: EngineInterface,
+  dir: string,
+  raw: RawStatus,
+  onMain: readonly string[],
+): Promise<{ recent: Ended[]; endings: Ending[]; mtimes: Map<string, number> }> {
   const files = (await $.fs.list(dir).catch(() => []))
     .filter(e => e.kind === 'file')
     .map(e => ({ name: e.name, mtimeMs: e.mtimeMs }))
@@ -303,6 +339,7 @@ async function readEndings($: EngineInterface, dir: string, raw: RawStatus, onMa
   return {
     recent: recentOf(texts, raw.finished),
     endings: texts.map(t => ({ base: t.name.replace(/\.progress$/, ''), text: t.text, mtimeMs: t.mtimeMs })),
+    mtimes: new Map(files.map(f => [f.name, f.mtimeMs])),
   }
 }
 
@@ -379,9 +416,6 @@ async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<
   return text
 }
 
-// The claims registry's blob in the `ls-tree -r` listing: each archived claim's record holds its `split_from` list.
-const SITTINGS_JSON = /^\d+ blob ([0-9a-f]+)\tdocs\/briefs\/sittings\.json$/m
-
 // Each running brief's cycle count by its key, kept after the archive moves
 // the brief off docs/briefs/ so the bar keeps its length to the end.
 const cyclesCache = new Map<string, number>()
@@ -415,8 +449,8 @@ async function readBriefs(
     if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
   }
   for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
-  const registry = SITTINGS_JSON.exec(ls.stdout)?.[1]
-  const sittingsJson = registry === undefined ? '' : await blobText($, cwd, registry, next)
+  const registry = sittingsBlob(ls.stdout)
+  const sittingsJson = registry === null ? '' : await blobText($, cwd, registry, next)
   blobCache = next
   const afters = Object.fromEntries(briefs.map(f => [briefKey(f.path), afterSittings(briefHeader(f.text).after)]))
   return {
@@ -453,14 +487,20 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const { recent, endings } = await readEndings($, dir, raw, Object.keys(afters)).catch(() => ({ recent: [] as Ended[], endings: [] as Ending[] }))
-  const handoffs = await readHandoffs($, home, endings).catch(() => ({}))
-  const launchLogs = await readLaunchLogs($, dir, endings).catch(() => ({}))
+  const { recent, endings, mtimes } = await readEndings($, dir, raw, Object.keys(afters)).catch(() => ({
+    recent: [] as Ended[],
+    endings: [] as Ending[],
+    mtimes: new Map<string, number>(),
+  }))
   const now = await $.clock.now()
-  const deployStages = await readDeployStages($, home, endings, now).catch(() => ({}))
-  const offset = await $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' }))
+  const [handoffs, launches, deployStages, offset, read] = await Promise.all([
+    readHandoffs($, home, endings).catch(() => ({})),
+    readLaunchCounts($, dir, endings, mtimes).catch(() => ({})),
+    readDeployStages($, home, endings, now).catch(() => ({})),
+    $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' })),
+    readSpend($, home, now).catch(() => null),
+  ])
   const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
-  const read = await readSpend($, home, now).catch(() => null)
   const next = buildBoard(raw, progress, alive, now, {
     loop,
     recent,
@@ -474,7 +514,7 @@ async function poll($: EngineInterface): Promise<void> {
     endings,
     handoffs,
     deployStages,
-    launchLogs,
+    launches,
     splits,
   })
 
@@ -607,7 +647,6 @@ export const register: Register = on => {
     const planWidth = widest(b.recent.map(planText))
     const planCells = planWidth === 0 ? 0 : 1 + planWidth
     const planTotal = b.recent.reduce((n, d) => n + (typeof d.plan === 'number' ? d.plan : 0), 0)
-    const hasPlans = b.recent.some(d => d.plan !== 'unread')
     // The columns a recent row's figures take, and the room left for its slug
     // beside them, after the card's border and padding, the gap, `● `, the
     // sitting and its space.
@@ -618,15 +657,14 @@ export const register: Register = on => {
     // baseline when its progress file holds no times.
     const splitCells = (s: PhaseSplit | null) =>
       s === null ? (
-        <Text color={F.surface1}>{'⣀'.repeat(RECENT_SPLIT_CELLS)}</Text>
+        <Text color={F.surface1}>{phaseGlyphs('todo', RECENT_SPLIT_CELLS)}</Text>
       ) : (
         <Text>
-          {s.savor > 0 && <Text color={F.lavender}>{'⣿'.repeat(s.savor)}</Text>}
-          {s.cycles > 0 && <Text color={F.green}>{'⣿'.repeat(s.cycles)}</Text>}
-          {s.ship > 0 && <Text color={F.blue}>{'⣿'.repeat(s.ship)}</Text>}
+          {s.savor > 0 && <Text color={F.lavender}>{phaseGlyphs('done', s.savor)}</Text>}
+          {s.cycles > 0 && <Text color={F.green}>{phaseGlyphs('done', s.cycles)}</Text>}
+          {s.ship > 0 && <Text color={F.blue}>{phaseGlyphs('done', s.ship)}</Text>}
         </Text>
       )
-    const historyLine = (k: Block): string => (k.why === '' ? historyTag(k).trimStart() : historyTag(k))
     // A figure right-aligned in a column `width` cells wide: the pad, then the figure in its own span.
     const cell = (value: string, width: number, color: string, bold = false) => (
       <Text>
@@ -671,26 +709,21 @@ export const register: Register = on => {
       return (
         <Text wrap="truncate-end">
           <Text color={F.overlay2}>{name.padEnd(TIMELINE_LABEL_CELLS).slice(0, TIMELINE_LABEL_CELLS)}</Text>
-          {runs.map(r =>
-            r.isLabel ? (
-              <Text color={F.mantle} backgroundColor={TONE_COLOR[r.tone]}>
-                {r.text}
-              </Text>
-            ) : (
-              <Text color={TONE_COLOR[r.tone]}>{r.text}</Text>
-            ),
-          )}
+          {runs.map(r => (
+            <Text color={r.isLabel ? F.mantle : TONE_COLOR[r.tone]} backgroundColor={r.isLabel ? TONE_COLOR[r.tone] : undefined}>
+              {r.text}
+            </Text>
+          ))}
         </Text>
       )
     }
     const timelineRows = () => {
       const t = b.timeline
       const now = nowCell(t, track)
-      const you = t.you === null ? [] : [{ sitting: t.you.label, tone: 'stopped' as const, startMs: t.you.sinceMs, endMs: t.nowMs, liveEndMs: t.nowMs, isOverMedian: false }]
       return [
         <Text color={F.overlay0}>{`${' '.repeat(TIMELINE_LABEL_CELLS)}${axisCells(t, track)}`}</Text>,
         ...t.slots.map(l => laneRow(`slot ${l.slot}`, laneCells(t, l.bars, track, true))),
-        laneRow('you', laneCells(t, you, track, false)),
+        laneRow('you', laneCells(t, t.you === null ? [] : [t.you], track, false)),
         laneRow('held', heldCells(t, track)),
         <Text color={F.peach}>{`${' '.repeat(TIMELINE_LABEL_CELLS + Math.max(0, Math.min(now - 1, track - 3)))}now`}</Text>,
       ]
@@ -770,6 +803,7 @@ export const register: Register = on => {
             {!folded('blocked') &&
               b.blocked.map((k, i) => {
                 const chain = chainLine(k)
+                const history = historyTag(k)
                 return (
                 <Box flexDirection="column" marginTop={1}>
                   {i > 0 && rule(F.surface1)}
@@ -779,11 +813,11 @@ export const register: Register = on => {
                     </Text>
                     <Text bold color={F.text}>{`  ${k.headline}`}</Text>
                   </Text>
-                  {(k.why !== '' || historyLine(k) !== '') && (
-                    // The plan cost and the launch dim after the cost.
+                  {(k.why !== '' || history !== '') && (
+                    // The plan cost and the launch dim after the cost, a space between when both show.
                     <Text color={F.subtext0} wrap="wrap">
                       {k.why}
-                      <Text color={F.overlay0}>{historyLine(k)}</Text>
+                      <Text color={F.overlay0}>{k.why !== '' && history !== '' ? ` ${history}` : history}</Text>
                     </Text>
                   )}
                   {k.strip.length > 0 && (
@@ -1012,7 +1046,7 @@ export const register: Register = on => {
                       {cell(totals.minutes === null ? '' : hoursMinutes(totals.minutes), timeCells, F.overlay2)}
                       {' '.repeat(2 + RECENT_SPLIT_CELLS)}
                       {cell(totals.usd === null ? '' : dollars(totals.usd), costCells, F.text, true)}
-                      {hasPlans ? (
+                      {planCells > 0 ? (
                         <Text color={F.overlay1}>{` + ${dollars(planTotal)} plan`}</Text>
                       ) : (
                         ' '.repeat(planCells + RECENT_AGE_CELLS)

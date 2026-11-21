@@ -870,7 +870,7 @@ test('a handoff question reads both the bare and the addressed label', () => {
 })
 
 // The shape the pane's board atom is stored under; it moves with the Board type.
-const BOARD_SHAPE = 'board-12'
+const BOARD_SHAPE = 'board-13'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>
@@ -1324,14 +1324,14 @@ const S684_RUN = 'kickoff-sitting-s684-home-gallery-sections'
 
 test('the blocked why-line gives the plan cost and which launch stopped', async ($, on) => {
   const plans = planCosts(ledgerSpends(S684_PLAN_LEDGER))
-  const once = s684Board({ plans, launchLogs: { [S684_RUN]: 'launch: 1 fresh slot 1 at 2026-10-31T16:00:00Z\n' } })
-  expect(historyTag(once.blocked[0] ?? { plan: 'unread', launches: null })).toBe(' +$11.36 plan · 1st launch')
+  const once = s684Board({ plans, launches: { [S684_RUN]: launchCount('launch: 1 fresh slot 1 at 2026-10-31T16:00:00Z\n') } })
+  expect(historyTag(once.blocked[0] ?? { plan: 'unread', launches: null })).toBe('+$11.36 plan · 1st launch')
   const { ui } = await mountBoard($, on, once)
   expect(await has(ui, '$13.12 +$11.36 plan · 1st launch')).toBe(true)
   await ui.unmount()
   // The second launch emptied the progress file; the launch log keeps both.
-  const twice = s684Board({ plans, launchLogs: { [S684_RUN]: 'launch: 1 fresh slot 1 at 2026-10-31T12:00:00Z\nlaunch: 2 fresh slot 2 at 2026-10-31T16:00:00Z\n' } })
-  expect(historyTag(twice.blocked[0] ?? { plan: 'unread', launches: null })).toBe(' +$11.36 plan · 2nd launch')
+  const twice = s684Board({ plans, launches: { [S684_RUN]: launchCount('launch: 1 fresh slot 1 at 2026-10-31T12:00:00Z\nlaunch: 2 fresh slot 2 at 2026-10-31T16:00:00Z\n') } })
+  expect(historyTag(twice.blocked[0] ?? { plan: 'unread', launches: null })).toBe('+$11.36 plan · 2nd launch')
   // No launch log gives no launch tag; no plan commit gives no plan tag.
   expect(historyTag(s684Board({ plans: {} }).blocked[0] ?? { plan: 'unread', launches: null })).toBe('')
   expect(launchCount('launch: 1 fresh slot 1 at x\nlaunch: 2 relaunch slot 1 at y\nlaunch: 3 relaunch slot 2 at z\n')).toBe(3)
@@ -1419,7 +1419,7 @@ test('the timeline spans each slot from 8h back to 6h ahead: past runs, the run 
   expect(barsOf(b, 1)).toEqual(['S677 live -540..-420', 'S692 running -30..34 live to 0', 'S693 queued 34..98'])
   // S695 waits on nothing, so it takes the slot free at now.
   expect(barsOf(b, 2)).toEqual(['S683 live -300..-180', 'S684 stopped -40..-19', 'S695 queued 0..64'])
-  expect(b.timeline.you).toEqual({ label: 'S684 ? 19m', sinceMs: NOW - 19 * MIN })
+  expect(b.timeline.you).toEqual({ sitting: 'S684 ? 19m', tone: 'stopped', startMs: NOW - 19 * MIN, endMs: NOW, liveEndMs: NOW, isOverMedian: false })
   // S685 and S686 under BLOCKED, and S700 held by its cause, at the 1h04m median.
   expect(b.timeline.held).toEqual({ label: '3 held · ~3h12m', count: 3, ms: 192 * MIN })
   expect(b.timeline.hours.map(h => h.label)).toEqual(['4a', '6a', '8a', '10a', '12p', '2p', '4p'])
