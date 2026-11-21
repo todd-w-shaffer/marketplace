@@ -1464,6 +1464,22 @@ test('a run reads its slot from its record, else its stamped slot line, else the
   expect(barsOf(b, 2)).toEqual(['S679 live -470..-430', 'S681 live -360..-300'])
 })
 
+test('a slot past the most a dispatcher runs reads as no slot, on a record and on a stamped line', () => {
+  const raw = parseStatus(
+    JSON.stringify({
+      dispatcher: null,
+      running: [],
+      queued: [],
+      finished: [{ entry: 1, brief: `${BRIEFS}s677-drafts.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 1e21, slot_taken: iso(NOW - 2 * HOUR), slot_released: iso(NOW - HOUR) }],
+    }),
+  )
+  if (raw === null) throw new Error('status did not parse')
+  const done = 'finished: shipped; production is live (run 1). ($9.00, 40 min)'
+  const endings = [{ base: 'kickoff-sitting-s681-dropped', text: stampedAt([[NOW - 6 * HOUR, 'slot: 99999999'], [NOW - 5 * HOUR, done]]), mtimeMs: NOW - 5 * HOUR }]
+  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: {} })
+  expect(b.timeline.slots.map(l => l.slot)).toEqual([1])
+})
+
 const MANTLE = '#1e2030'
 const GREEN = '#a6da95'
 const IDLE = '#494d64'

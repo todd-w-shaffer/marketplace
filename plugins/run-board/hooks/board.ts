@@ -16,15 +16,23 @@ export type RawStatus = {
  */
 export type SlotFields = { slot?: number | null; slotTakenMs?: number | null; slotReleasedMs?: number | null }
 
-/** A record's slot fields, each checked: a slot is a whole number from 1, a time parses. */
+// The highest slot the board draws a lane for. The dispatcher runs a handful
+// of slots, so a number past this one is a corrupt line, and the timeline
+// builds one lane per slot up to the highest it sees.
+const MAX_SLOT = 16
+
+/** A slot number: a whole number from 1 to MAX_SLOT, else null. */
+const slotNumber = (v: number | null): number | null =>
+  v !== null && Number.isInteger(v) && v >= 1 && v <= MAX_SLOT ? v : null
+
+/** A record's slot fields, each checked: a slot is a slot number, a time parses. */
 function parseSlot(r: Record<string, unknown>): SlotFields {
   const at = (v: unknown): number | null => {
     const ms = typeof v === 'string' ? Date.parse(v) : NaN
     return Number.isFinite(ms) ? ms : null
   }
-  const slot = num(r.slot)
   return {
-    slot: slot !== null && Number.isInteger(slot) && slot >= 1 ? slot : null,
+    slot: slotNumber(num(r.slot)),
     slotTakenMs: at(r.slot_taken),
     slotReleasedMs: at(r.slot_released),
   }
@@ -681,8 +689,7 @@ export function slotSpans(progress: string): SlotSpan[] {
     const slot = /^slot: (\S+)/.exec(line)
     if (slot) {
       if (open !== null) out.push(open)
-      const k = Number(slot[1])
-      open = at === null ? null : { slot: Number.isInteger(k) && k >= 1 ? k : null, startMs: at, endMs: null, isLive: true }
+      open = at === null ? null : { slot: slotNumber(Number(slot[1])), startMs: at, endMs: null, isLive: true }
       return
     }
     if (open === null) return
