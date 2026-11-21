@@ -1,0 +1,141 @@
+#!/usr/bin/env node
+'use strict';
+
+// /commit's mechanical half in one Bash call: build, stage, commit, confirm,
+// tally. The model writes the message and picks the paths; this does the rest,
+// so a commit costs one tool call instead of four or five.
+//
+//   commit-run [--no-build | --build '<cmd>'] <path>... <<'EOF'
+//   <message>
+//   EOF
+//
+// 1. Build, from the repository root. The command is `--build`'s, else
+//    `npm run build` when package.json has a build script, else `sh build.sh`,
+//    else `make` for a Makefile. `--no-build` skips it. A failed build stops
+//    the run before anything is staged.
+// 2. `git add -- <path>...`, then `git commit -F -` with the message on stdin.
+//    The commit-msg hook (the commit gate) runs as it would for a hand commit.
+// 3. Prints the commit, the files it holds, what is left in the tree, any
+//    build warnings, and `token-ledger commit`'s Cost line. A missing or failed
+//    ledger drops the Cost line and nothing else.
+//
+// Exits 0 when the commit landed, 1 when the build, the stage or the commit
+// failed, 2 on bad usage.
+
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const TAIL = 20;
+const MAX_WARNINGS = 20;
+
+function usage(why) {
+  process.stderr.write(`commit-run: ${why}\n`
+    + "usage: commit-run [--no-build | --build '<cmd>'] <path>... <<'EOF'\n<message>\nEOF\n");
+  return 2;
+}
+
+function sh(cmd, args, opts = {}) {
+  return spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...opts });
+}
+
+function git(args, opts) {
+  return sh('git', ['-c', 'color.ui=never', ...args], opts);
+}
+
+function tail(text, n = TAIL) {
+  return text.trimEnd().split('\n').slice(-n).join('\n');
+}
+
+/** The build command for the repository at `root`, or null when it has none. */
+function detectBuild(root) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    if (pkg && pkg.scripts && pkg.scripts.build) return 'npm run build';
+  } catch { /* no package.json, or not JSON: try the next */ }
+  if (fs.existsSync(path.join(root, 'build.sh'))) return 'sh build.sh';
+  if (fs.existsSync(path.join(root, 'Makefile'))) return 'make';
+  return null;
+}
+
+function parseArgs(argv) {
+  const out = { build: undefined, paths: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--') { out.paths.push(...argv.slice(i + 1)); break; }
+    if (a === '--no-build') out.build = null;
+    else if (a === '--build') {
+      if (!argv[i + 1]) return { error: '--build needs a command' };
+      out.build = argv[++i];
+    } else if (a.startsWith('--build=')) out.build = a.slice(8);
+    else if (a.startsWith('--')) return { error: `unknown flag ${a}` };
+    else out.paths.push(a);
+  }
+  return out;
+}
+
+function ledgerLine() {
+  // token-ledger sits beside this script; PATH is the fallback.
+  const local = path.join(__dirname, 'token-ledger');
+  const r = fs.existsSync(local) ? sh(process.execPath, [local, 'commit']) : sh('token-ledger', ['commit']);
+  if (r.error || r.status !== 0) return null;
+  return r.stdout.trim() || null;
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.error) return usage(args.error);
+  if (!args.paths.length) return usage('name the paths to commit');
+
+  let message = '';
+  try { message = fs.readFileSync(0, 'utf8'); } catch { /* no stdin */ }
+  if (!message.trim()) return usage('the commit message goes on stdin');
+
+  const top = git(['rev-parse', '--show-toplevel']);
+  if (top.status !== 0) return usage('not in a git repository');
+  const root = top.stdout.trim();
+
+  // 1. Build
+  const build = args.build === undefined ? detectBuild(root) : args.build;
+  let warnings = [];
+  if (build) {
+    const r = sh('/bin/sh', ['-c', build], { cwd: root });
+    const output = `${r.stdout || ''}${r.stderr || ''}`;
+    if (r.status !== 0) {
+      process.stdout.write(`build failed: ${build} (exit ${r.status ?? r.signal})\n${tail(output)}\n`
+        + 'Nothing was staged or committed.\n');
+      return 1;
+    }
+    warnings = output.split('\n').filter((l) => /\bwarn(ing)?\b/i.test(l)).map((l) => l.trim()).slice(0, MAX_WARNINGS);
+  }
+
+  // 2. Stage and commit
+  const add = git(['add', '--', ...args.paths]);
+  if (add.status !== 0) {
+    process.stdout.write(`git add failed; nothing was committed.\n${tail(add.stderr)}\n`);
+    return 1;
+  }
+  const commit = git(['commit', '-q', '-F', '-'], { input: message });
+  if (commit.status !== 0) {
+    process.stdout.write(`git commit failed; the paths are still staged.\n${tail(`${commit.stdout}${commit.stderr}`)}\n`);
+    return 1;
+  }
+
+  // 3. Report
+  const head = git(['log', '-1', '--format=%h %s']).stdout.trim();
+  const files = git(['show', '--name-status', '--format=', 'HEAD']).stdout.trim();
+  const left = git(['status', '--short']).stdout.trimEnd();
+  const lines = [
+    `build: ${build ? `${build}, passed` : 'none'}`,
+    `committed: ${head}`,
+    files.split('\n').map((l) => `  ${l}`).join('\n'),
+    left ? `left in the tree:\n${left.split('\n').map((l) => `  ${l}`).join('\n')}` : 'tree: clean',
+  ];
+  if (warnings.length) lines.push(`warnings:\n${warnings.map((w) => `  ${w}`).join('\n')}`);
+  const cost = ledgerLine();
+  if (cost) lines.push(cost);
+  process.stdout.write(lines.join('\n') + '\n');
+  return 0;
+}
+
+process.exitCode = main();

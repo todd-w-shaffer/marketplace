@@ -30,8 +30,10 @@ for (const file of skillFiles) {
   });
 }
 
-test('the commit skill says to stage and commit in separate calls', () => {
+test('the commit skill commits through commit-run, with separate calls as the fallback', () => {
   const text = fs.readFileSync(path.join(SKILLS, 'commit', 'SKILL.md'), 'utf8');
+  assert.match(text, /one Bash call to `commit-run`/);
+  assert.match(text, /^commit-run \[--no-build \| --build '<cmd>'\] <path>\.\.\. <<'EOF'$/m);
   assert.match(text, /`git add[^`]*` as its own Bash call/);
-  assert.match(text, /Run `token-ledger commit`\./);
+  assert.match(text, /then `token-ledger commit`/);
 });

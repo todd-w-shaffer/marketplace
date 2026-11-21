@@ -26,21 +26,23 @@ The real stops are not checkpoints: a failed build blocks the commit and ends th
 
 ## Workflow
 
-### 1. Build (if applicable)
+### 1. Build
 
-Check whether the project has a build step by looking for common indicators in order of precedence:
+`commit-run` (step 5) runs the build itself, before it stages anything: a `build` script in `package.json`, else `build.sh`, else a `Makefile`. Decide only its flag:
 
-1. A `build` script in `package.json`
-2. A `build.sh` or `Makefile` in the project root
-3. A build command documented in the project's `CLAUDE.md`
-
-If a build step exists and any source files are dirty (modified or untracked), run it. If the build fails, STOP — do not commit. If no build step is found, or no source files are dirty, skip this step.
+- The project's `CLAUDE.md` documents a different build command: pass `--build '<cmd>'`.
+- The commit touches no source files (docs, notes, config the build does not read): pass `--no-build`.
+- Otherwise pass neither.
 
 ### 2. Analyze and chunk changes
 
-Run `git status` and `git diff` (both staged and unstaged) to understand what changed. Identify:
+Know what changed before writing the message:
 - Which files were modified
 - The nature of each change (new feature, bug fix, content update, refactor, etc.)
+
+If every change in the tree was made or reported in this conversation (your own edits, and the files a subagent said it changed), you already know this: skip the look and go on. Otherwise run `git status` and `git diff` (both staged and unstaged) first. Look when in doubt: when a subagent's report did not list its files, when the person may have edited files themselves, or when the session was summarized since the edits.
+
+`commit-run` lists what it left in the tree (step 5), which is the check on skipping. A file there that belonged in this commit was a missed path: name it under **Remaining** in the summary (step 6), so it gets its own commit.
 
 Then check: do all changes belong to one logical unit, or are there independent threads? Group by shared intent — files modified for the same reason travel together. Signals of independent threads:
 - Files with no import/dependency relationship to each other
@@ -114,15 +116,25 @@ Rules:
 - Never include `Co-Authored-By` lines
 - The Recipe is a synthesized artifact — it should read like something the user could paste into a new conversation and get 90% of the way to the same result
 - The Changes section is narrative — explain *what* and *why*, not line counts
-- Use a HEREDOC to pass the commit message to `git commit -m`
+- Pass the message on stdin through a quoted HEREDOC (step 5)
 
 ### 5. Stage and commit
 
-- Stage only the files that are part of the current work. Never stage `.env`, credentials, or unrelated files.
-- If a build step produced output artifacts that are tracked by git, include them.
-- Create the commit. Run `git status` after to confirm success.
-- Run each git command as its own Bash call: `git add <paths>` as its own Bash call, then `git commit`, then `git status`. A session in a worktree runs under an isolation guard that refuses a line joining git to another step, and refuses git inside `$(…)`.
-- Run `token-ledger commit`. It reads the commit from `HEAD`, so it takes no sha. Its single line of output is the `**Cost:**` line in step 6 — paste it verbatim, and never compute, estimate, or adjust the numbers yourself. With a split diff, each chunk is its own call and tallies itself after its own commit, so each chunk's summary carries its own Cost line. If the script is missing or fails, omit the Cost line and carry on: the tally never blocks a commit.
+Make the commit with one Bash call to `commit-run`, naming the paths to commit and passing the message on stdin:
+
+```
+commit-run [--no-build | --build '<cmd>'] <path>... <<'EOF'
+<the commit message>
+EOF
+```
+
+It builds, runs `git add -- <paths>`, commits, then prints the commit, its files, what is left in the tree, any build warnings, and the `token-ledger commit` line. Do not run `git add`, `git commit`, `git status` or `token-ledger commit` yourself around it.
+
+- Name only the files that are part of the current work, deletions included. Never name `.env`, credentials, or unrelated files. If the build produces tracked output files, name them too.
+- A failed build stops `commit-run` before it stages anything: the commit is blocked (see "After the commit"). A refused `git commit` leaves the paths staged; fix the cause and run `commit-run` again with the same paths.
+- Check its `left in the tree` list against your plan. A file you meant to commit that is still listed means a wrong path.
+- Its last line, when it starts `**Cost:**`, is the Cost line in step 6: paste it verbatim, and never compute, estimate, or adjust the numbers yourself. With a split diff, each chunk is its own call and its own Cost line. No Cost line means the tally failed; omit it and carry on, since the tally never blocks a commit.
+- If `commit-run` is not on PATH, fall back to separate Bash calls: `git add <paths>` as its own Bash call, then `git commit`, then `git status`, then `token-ledger commit`. A session in a worktree runs under an isolation guard that refuses a line joining git to another step, and refuses git inside `$(…)`.
 
 ### 6. Print summary
 
@@ -137,10 +149,10 @@ After a successful commit, print ONLY the following (and nothing else before it)
   <file> — <narrative>
   <file> — <narrative>
 
-**Cost:** <the `token-ledger commit` line, verbatim>
+**Cost:** <the Cost line from `commit-run`, verbatim>
 ```
 
-If the build produced any warnings, append them:
+If `commit-run` listed build warnings, append them:
 
 ```
 **Warnings:**
@@ -150,7 +162,7 @@ If the build produced any warnings, append them:
 
 Omit the Warnings section entirely if there were none.
 
-If a larger task called this skill and step 2 found more than one thread, append the threads still to commit, so the caller can call this skill for each:
+If a larger task called this skill and step 2 found more than one thread, or `commit-run` left a file in the tree that belonged in this commit, append what is still to commit, so the caller can call this skill for each:
 
 ```
 **Remaining:** N threads, one call each
