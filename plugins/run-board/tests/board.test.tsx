@@ -101,7 +101,6 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
     'S300:pushing:true',
   ])
   expect(b.running[1]?.cost).toBe(10.07)
-  expect(b.running[1]?.note).toBe('The archive commit is pushing.')
   // An entry the dispatcher wrote without a lane carries no tag.
   expect(b.finished.map(d => `${d.entry}:${laneTag(d)}`)).toEqual(['4: (fix)', '2:'])
   const first = b.finished[0]
@@ -212,7 +211,7 @@ test('a run with step 0 opens on a savor phase that its own commit closes', asyn
     'savor:done c1:done c2:done simpl:done xhigh:live ship:todo arch:todo',
   )
   expect(phaseLine({ phases: phasesOf(savoring, 2), stage: 'savor', tool: 'Agent: systems' } as Run)).toBe(
-    'savor · Agent: systems',
+    'session 0 · Agent: systems',
   )
 })
 
@@ -300,10 +299,12 @@ test('a running card and the hint line show the phase, the stage and the newest 
   )
   const [epic, fix] = b.running
   if (epic === undefined || fix === undefined) throw new Error('runs missing')
-  expect(phaseLine(epic)).toBe('cycle 2 of 2 · Bash: Run the focused check')
-  expect(phaseLine(fix)).toBe('review xhigh')
-  expect(phaseLine({ ...epic, stage: 'committing', tool: '' })).toBe('cycle 2 of 2 · committing')
-  expect(phaseLine({ ...epic, stage: 'review low', tool: '' })).toBe('cycle 2 of 2')
+  // The bar's lit label names the cycle, so the phase line names only the session.
+  expect(phaseLine(epic)).toBe('session 1 · Bash: Run the focused check')
+  expect(phaseLine(fix)).toBe('session 2')
+  expect(phaseLine({ ...epic, stage: 'committing', tool: '' })).toBe('session 1 · committing')
+  expect(phaseLine({ ...epic, stage: 'review low', tool: '' })).toBe('session 1')
+  expect(phaseLine({ ...epic, phases: epic.phases.map(p => ({ ...p, state: 'done' as const })), tool: '' })).toBe('finishing')
   expect(statusLine(b)).toBe('● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h06m │ ● S395 ⣿⣿⣿⣿⣤⣀⣀⡇ xhigh 1h37m │ $16.68')
 })
 
@@ -1040,5 +1041,27 @@ test('a red deploy that holds nothing draws no queue root and no chain line', as
   const { ui } = await mountBoard($, on, b)
   expect(await has(ui, 'blocked ↑')).toBe(false)
   expect(await has(ui, 'drawn in the queue')).toBe(false)
+  await ui.unmount()
+})
+
+test('the header draws three figures and one spend line, and a running card has no grey last sentence', async ($, on) => {
+  const raw = parseStatus(STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  const spend = { day: 608.2, week: 4629, month: 11964, all: 15742 }
+  const b = buildBoard(raw, { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 }, new Set([5147, 21491]), NOW, { spend })
+  const { ui } = await mountBoard($, on, b)
+  expect(await has(ui, 'spend $608 24h · $4,629 7d · $11,964 30d · $15,742 all')).toBe(true)
+  for (const label of ['running', 'queued', 'on deck']) expect(await has(ui, label)).toBe(true)
+  expect(await has(ui, '$ in flight')).toBe(false)
+  expect(await has(ui, 'The archive commit is pushing.')).toBe(false)
+  await ui.unmount()
+})
+
+test('spend that could not be read draws no spend line', async ($, on) => {
+  const raw = parseStatus(STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([5147]), NOW, { spend: null }))
+  expect(await has(ui, 'spend ')).toBe(false)
+  expect(await has(ui, 'queued')).toBe(true)
   await ui.unmount()
 })

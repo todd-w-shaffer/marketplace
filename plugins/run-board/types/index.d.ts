@@ -10,7 +10,6 @@ export type Run = {
   tool: string
   /** The chain's phases in order, each done, in flight or still to come. */
   phases: Phase[]
-  note: string
   isAlive: boolean
 }
 

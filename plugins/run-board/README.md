@@ -13,23 +13,26 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   pill on the raised surface, in the lane's colour (pink epic, teal fix). The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
   on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
   `code-review low` line; the ship starts at `/ship` or a push, and the archive at the first `/commit` after
-  the ship's push. Under the bar, the phase line reads `cycle 2 of 2 · Bash: Run the focused check`: the
-  phase, the stage when it adds to it, and the newest tool call, read from the last 256 KiB of the run's
+  the ship's push. Under the bar, the phase line reads `session 1 · Bash: Run the focused check`: the
+  session in flight (the savor is session 0, a cycle session 1, simplify through the archive session 2; the
+  bar's lit label names the phase), the stage when it adds to it, and the newest tool call, read from the last 256 KiB of the run's
   stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
 - **The architecture loop.** While `scripts/archloop.sh` holds its lock, a card and the hint line show the loop's stage,
   `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
   `(loop)`. The loop's spend counts toward the cost in flight.
 - **Header.** The pane opens on a card in the design language of coolant's thermo dashboard: `autopilot`,
   the dispatcher's state and the local time (`date +%z` gives the offset, since the engine gives a mod no
-  time zone), then four figures drawn as 3-by-7 dot numerals in braille, running, queued, on deck and `$ in
-  flight`, each in its section's colour and grey at zero. Each figure sits right-aligned over a thin dim rule as wide
+  time zone), then three figures drawn as 3-by-7 dot numerals in braille, running, queued and on deck,
+  each in its section's colour and grey at zero. Each figure sits right-aligned over a thin dim rule as wide
   as the tile, with its label under the rule in plain lowercase grey (other surfaces than the terminal draw the label at
-  caption size). A second row of tiles shows spend in whole dollars over the last 24 hours, 7 days and 30 days,
-  and in all, from `~/.claude/token-ledger.jsonl` (each commit's `cost.usd` and each ship's `overhead.usd`,
+  caption size). The cost in flight stays on the hint line. One line under the figures shows spend in whole dollars with
+  thousands separators over the last 24 hours, 7 days and 30 days, and in all, `spend $608 24h · $4,629 7d ·
+  $11,964 30d · $15,742 all`, and is absent when the ledger cannot be read. It reads
+  from `~/.claude/token-ledger.jsonl` (each commit's `cost.usd` and each ship's `overhead.usd`,
   across every project). The ledger outgrows one 4 MiB read, so the board reads it once in 3 MiB chunks,
   then only the bytes past where it stopped; a file that shrank is read again from the start.
 - **`/board`** opens a pane with a rounded card per slot that holds a run: its progress bar, phase line,
-  time, cost and last sentence. A free slot has no card. Below them comes the queue as a tree of who waits on whom: each
+  time and cost. A free slot has no card. Below them comes the queue as a tree of who waits on whom: each
   running run that something waits on is a root, and each entry hangs under the running or queued sitting
   on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`). Its note names only
   the waits the tree does not draw: each running, queued or held sitting on its `After:` line other than its

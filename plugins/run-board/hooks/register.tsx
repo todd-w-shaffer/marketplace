@@ -39,7 +39,7 @@ import {
   phaseName,
   segmentWidth,
   spendTotals,
-  inFlight,
+  dollars,
   money,
   newestRunDir,
   onDeckOf,
@@ -58,8 +58,10 @@ import type { Ending, LoopFile, RawStatus, Spend } from './board'
 // the same whatever the terminal theme.
 const F = {
   text: '#cad3f5',
+  subtext1: '#b8c0e0',
   subtext0: '#a5adcb',
   overlay2: '#939ab7',
+  overlay1: '#8087a2',
   overlay0: '#6e738d',
   surface2: '#5b6078',
   surface1: '#494d64',
@@ -509,15 +511,12 @@ export const register: Register = on => {
       )
     }
 
-    // The header's four figures as dot numerals, each in the colour its
+    // The header's three figures as dot numerals, each in the colour its
     // section uses below; a zero fades to the to-come grey.
-    const cost = inFlight(b)
     const tiles: { value: string; label: string; color: string; isZero: boolean }[] = [
       { value: String(b.running.length), label: 'running', color: F.peach, isZero: b.running.length === 0 },
       { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
-      { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
-      { value: cost.toFixed(2), label: '$ in flight', color: F.text, isZero: cost === 0 },
-    ]
+      { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },    ]
     const recentMax = Math.max(0, ...b.recent.map(d => d.usd ?? 0))
 
     // A foldable card's header: a Button on the card's hotkey that flips its
@@ -553,17 +552,17 @@ export const register: Register = on => {
       </Text>
     )
 
-    // The second row: spend in whole dollars over the last 24 hours, 7 days
-    // and 30 days, and in all, from token-ledger. The windows roll, so the
-    // labels name the span, not a calendar day, week or month.
-    const spendTiles: typeof tiles =
+    // Spend over the last 24 hours, 7 days and 30 days, and in all, from
+    // token-ledger. The windows roll, so the words name the span, not a
+    // calendar day, week or month.
+    const spendWindows: [number, string][] =
       b.spend === null
         ? []
         : [
-            { value: String(Math.round(b.spend.day)), label: '$ 24h', color: F.teal, isZero: b.spend.day === 0 },
-            { value: String(Math.round(b.spend.week)), label: '$ 7 days', color: F.sapphire, isZero: b.spend.week === 0 },
-            { value: String(Math.round(b.spend.month)), label: '$ 30 days', color: F.lavender, isZero: b.spend.month === 0 },
-            { value: String(Math.round(b.spend.all)), label: '$ all time', color: F.text, isZero: b.spend.all === 0 },
+            [b.spend.day, '24h'],
+            [b.spend.week, '7d'],
+            [b.spend.month, '30d'],
+            [b.spend.all, 'all'],
           ]
     const tileRow = (row: typeof tiles) => (
       <Box marginTop={1} justifyContent="space-between" columnGap={2}>
@@ -596,7 +595,18 @@ export const register: Register = on => {
             </Text>
           </Box>
           {tileRow(tiles)}
-          {spendTiles.length > 0 && tileRow(spendTiles)}
+          {spendWindows.length > 0 && (
+            <Box marginTop={1}>
+              <Text wrap="truncate-end" color={F.overlay1}>
+                spend
+                {spendWindows.map(([usd, span], i) => (
+                  <Text>
+                    {i > 0 ? ' ·' : ''} <Text color={F.subtext1}>{dollars(usd)}</Text> {span}
+                  </Text>
+                ))}
+              </Text>
+            </Box>
+          )}
         </Box>
 
         {hasBlocked && (
@@ -704,7 +714,6 @@ export const register: Register = on => {
                 ) : (
                   <Text color={F.red}>launcher gone, no finished line</Text>
                 )}
-                {r.note !== '' && <Text color={F.overlay0}>{r.note}</Text>}
               </Box>
             ))}
           </Box>

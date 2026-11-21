@@ -278,14 +278,21 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
 const QUIET_STAGES = new Set(['savor', 'starting', 'working', 'review low', 'simplify', 'review xhigh', 'shipping'])
 
 /**
- * A running card's phase line: the phase in flight, `cycle 2 of 2` for a
- * cycle, then the stage when it adds to the phase, then the newest tool call.
+ * The session that runs a phase: the savor is session 0, a cycle session 1,
+ * and simplify through the archive session 2 (docs/briefs/rules/autopilot.md,
+ * "A run is three sessions").
+ */
+const sessionOf = (label: string): number => (label === 'savor' ? 0 : label.startsWith('cycle ') ? 1 : 2)
+
+/**
+ * A running card's phase line: the session in flight, then the stage when it
+ * adds to the phase, then the newest tool call. The bar's lit label names
+ * the phase, so the line does not. A run with no phase in flight reads
+ * `finishing`.
  */
 export function phaseLine(r: Run): string {
-  const cycles = r.phases.filter(p => p.label.startsWith('cycle ')).length
   const live = r.phases.find(p => p.state === 'live')
-  const phase = live === undefined ? 'finishing' : live.label.startsWith('cycle ') ? `${live.label} of ${cycles}` : live.label
-  const parts = [phase]
+  const parts = [live === undefined ? 'finishing' : `session ${sessionOf(live.label)}`]
   if (!QUIET_STAGES.has(r.stage)) parts.push(r.stage)
   if (r.tool !== '') parts.push(r.tool)
   return parts.join(' · ')
@@ -341,6 +348,9 @@ export function phaseName(p: Phase, room: number): string {
   const names = k ? [p.label, `c${k[1] ?? ''}`] : (PHASE_NAMES[p.label] ?? [p.short])
   return names.find(n => n.length <= room) ?? (names[names.length - 1] ?? '').slice(0, room)
 }
+
+/** `n` dollars in whole dollars with thousands separators: `$4,629`. */
+export const dollars = (n: number): string => `$${Math.round(n).toLocaleString('en-US')}`
 
 /** The phase in flight's short name, or `done` once every phase is. */
 export const livePhase = (phases: readonly Phase[]): string => phases.find(p => p.state === 'live')?.short ?? 'done'
@@ -467,7 +477,7 @@ export function buildBoard(
   const onDeck = (extra.onDeck ?? []).filter(d => !drawn.has(d.sitting))
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
-    const { note, cost } = noteOf(text)
+    const { cost } = noteOf(text)
     const started = Date.parse(r.started)
     const stage = stageOf(text)
     return {
@@ -479,7 +489,6 @@ export function buildBoard(
       stage,
       tool: tools[r.brief] ?? '',
       phases: phasesOf(text, cycles[briefKey(r.brief)]),
-      note,
       isAlive: r.pid !== null && alive.has(r.pid),
     }
   })
