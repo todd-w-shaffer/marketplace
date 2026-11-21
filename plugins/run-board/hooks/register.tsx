@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BlockKind, Board, Deck, DeckMode, Ended, FoldCard, Folds, Loop, Phase, Run, StripCell } from '../types'
+import type { Block, BlockKind, Board, Deck, DeckMode, Ended, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
 import {
   FOLD_KEY,
   KIND_TAG,
@@ -14,7 +14,6 @@ import {
   LOG_TAIL_BYTES,
   LOOP_LANE,
   agoShort,
-  costMeter,
   baseName,
   buildBoard,
   chainLine,
@@ -28,6 +27,10 @@ import {
   deckTree,
   elapsed,
   hoursMinutes,
+  historyTag,
+  planCosts,
+  RECENT_SPLIT_CELLS,
+  splitCounts,
   finishedToast,
   isLoopLanding,
   lastToolOf,
@@ -62,6 +65,7 @@ const F = {
   text: '#cad3f5',
   subtext0: '#a5adcb',
   overlay2: '#939ab7',
+  overlay1: '#8087a2',
   overlay0: '#6e738d',
   surface2: '#5b6078',
   surface1: '#494d64',
@@ -95,8 +99,6 @@ const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 // Each on-deck group's colour: green can queue now, yellow needs a pass to
 // reach autopilot, red needs a person in the session.
 const DECK_COLOR: Record<DeckMode, string> = { ready: F.green, enrich: F.yellow, interactive: F.red }
-// How many braille cells a recent row's cost meter takes.
-const RECENT_METER_CELLS = 6
 // The least widths of a recent row's time, cost and age columns, the cost and
 // age with a leading gap: `14h52m`, ` $1,238`, ` 12h`. A wider figure widens its column.
 const RECENT_TIME_CELLS = 6
@@ -119,7 +121,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-11' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-12' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -198,12 +200,15 @@ const LEDGER_CHUNK_BYTES = 3 * 1024 * 1024
 // `offset` was replaced, and is read again from the start.
 let ledger: { offset: number; partial: string; spends: Spend[] } = { offset: 0, partial: '', spends: [] }
 
-/** Spend over the last 24 hours, 7 days and 30 days, and in all, from token-ledger. */
-async function readSpend($: EngineInterface, home: string, now: number): Promise<Board['spend']> {
-  const path = `${home}/${LEDGER}`
+// The ledger read in flight. A poll that starts while another reads awaits
+// that read, so two never advance `ledger` from the same offset.
+let ledgerRead: Promise<boolean> | null = null
+
+/** Reads the ledger past `ledger.offset`; false when it could not be read. */
+async function readLedger($: EngineInterface, path: string): Promise<boolean> {
   const stat = await $.process.run(['stat', '-f', '%z', path], { timeoutMs: 5000 })
   const size = Number(stat.stdout.trim())
-  if (stat.exitCode !== 0 || !Number.isFinite(size)) return null
+  if (stat.exitCode !== 0 || !Number.isFinite(size)) return false
   if (size < ledger.offset) ledger = { offset: 0, partial: '', spends: [] }
   while (ledger.offset < size) {
     const count = Math.min(LEDGER_CHUNK_BYTES, size - ledger.offset)
@@ -211,11 +216,41 @@ async function readSpend($: EngineInterface, home: string, now: number): Promise
       ['sh', '-c', 'tail -c +"$1" "$2" | head -c "$3"', 'sh', String(ledger.offset + 1), path, String(count)],
       { timeoutMs: 5000 },
     )
-    if (chunk.exitCode !== 0) return null
+    if (chunk.exitCode !== 0) return false
     const read = ledgerChunk(ledger.partial, chunk.stdout)
     ledger = { offset: ledger.offset + count, partial: read.partial, spends: [...ledger.spends, ...read.spends] }
   }
-  return spendTotals(ledger.spends, now)
+  return true
+}
+
+/**
+ * Spend over the last 24 hours, 7 days and 30 days, and in all, and each
+ * sitting's plan cost, from one read of token-ledger; null when it could not
+ * be read.
+ */
+async function readSpend(
+  $: EngineInterface,
+  home: string,
+  now: number,
+): Promise<{ spend: NonNullable<Board['spend']>; plans: Record<string, number> } | null> {
+  if (ledgerRead === null) ledgerRead = readLedger($, `${home}/${LEDGER}`).finally(() => (ledgerRead = null))
+  if (!(await ledgerRead)) return null
+  return { spend: spendTotals(ledger.spends, now), plans: planCosts(ledger.spends) }
+}
+
+/**
+ * Each stopped run's `.launches` file, by run name, which S699's launcher
+ * appends a line to at each launch and no launch empties. A run without one
+ * is absent.
+ */
+async function readLaunchLogs($: EngineInterface, dir: string, endings: readonly Ending[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  for (const e of endings) {
+    if (lastEnd(e.text)?.isLive !== false) continue
+    const text = await $.fs.read(`${dir}/${e.base}.launches`).catch(() => undefined)
+    if (text !== undefined) out[e.base] = text
+  }
+  return out
 }
 
 // Progress files read for RECENT and BLOCKED, by name, kept while their mtime holds.
@@ -322,6 +357,9 @@ async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<
   return text
 }
 
+// The claims registry's blob in the `ls-tree -r` listing: each archived claim's record holds its `split_from` list.
+const SITTINGS_JSON = /^\d+ blob ([0-9a-f]+)\tdocs\/briefs\/sittings\.json$/m
+
 // Each running brief's cycle count by its key, kept after the archive moves
 // the brief off docs/briefs/ so the bar keeps its length to the end.
 const cyclesCache = new Map<string, number>()
@@ -334,14 +372,14 @@ async function readBriefs(
   $: EngineInterface,
   home: string,
   raw: RawStatus,
-): Promise<{ onDeck: Deck[]; cycles: Record<string, number>; afters: Record<string, string[]> }> {
+): Promise<{ onDeck: Deck[]; cycles: Record<string, number>; afters: Record<string, string[]>; splits: Record<string, number> }> {
   const cwd = `${home}/${REPO}`
   const cycles: Record<string, number> = {}
   const keys = raw.running.map(r => briefKey(r.brief))
   const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/'], { cwd, timeoutMs: 5000 })
   if (ls.exitCode !== 0) {
     for (const k of keys) if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
-    return { onDeck: [], cycles, afters: {} }
+    return { onDeck: [], cycles, afters: {}, splits: {} }
   }
   const next = new Map<string, string>()
   const briefs: { path: string; sha: string; text: string }[] = []
@@ -355,9 +393,16 @@ async function readBriefs(
     if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
   }
   for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
+  const registry = SITTINGS_JSON.exec(ls.stdout)?.[1]
+  const sittingsJson = registry === undefined ? '' : await blobText($, cwd, registry, next)
   blobCache = next
   const afters = Object.fromEntries(briefs.map(f => [briefKey(f.path), afterSittings(briefHeader(f.text).after)]))
-  return { onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)), cycles, afters }
+  return {
+    onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)),
+    cycles,
+    afters,
+    splits: splitCounts(briefs, sittingsJson),
+  }
 }
 
 // Finished entries already seen; null until the first read, which only
@@ -372,7 +417,7 @@ async function poll($: EngineInterface): Promise<void> {
   const status = text === undefined ? null : parseStatus(text)
   const loop = await readLoop($, home).catch(() => null)
   const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
-  const { onDeck, cycles, afters } = await readBriefs($, home, raw).catch(() => ({ onDeck: [] as Deck[], cycles: {}, afters: {} }))
+  const { onDeck, cycles, afters, splits } = await readBriefs($, home, raw).catch(() => ({ onDeck: [] as Deck[], cycles: {}, afters: {}, splits: {} }))
   if (status === null && loop === null && onDeck.length === 0) {
     await update($, board, () => null)
     return
@@ -388,11 +433,12 @@ async function poll($: EngineInterface): Promise<void> {
   const alive = await alivePids($, pids).catch(() => new Set<number>())
   const { recent, endings } = await readEndings($, dir, raw, Object.keys(afters)).catch(() => ({ recent: [] as Ended[], endings: [] as Ending[] }))
   const handoffs = await readHandoffs($, home, endings).catch(() => ({}))
+  const launchLogs = await readLaunchLogs($, dir, endings).catch(() => ({}))
   const now = await $.clock.now()
   const deployStages = await readDeployStages($, home, endings, now).catch(() => ({}))
   const offset = await $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' }))
   const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
-  const spend = await readSpend($, home, now).catch(() => null)
+  const read = await readSpend($, home, now).catch(() => null)
   const next = buildBoard(raw, progress, alive, now, {
     loop,
     recent,
@@ -400,11 +446,14 @@ async function poll($: EngineInterface): Promise<void> {
     tools,
     cycles,
     utcOffset,
-    spend,
+    spend: read?.spend ?? null,
+    plans: read?.plans ?? null,
     afters,
     endings,
     handoffs,
     deployStages,
+    launchLogs,
+    splits,
   })
 
   await update($, board, () => next)
@@ -523,7 +572,6 @@ export const register: Register = on => {
       { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
       { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
     ]
-    const recentMax = Math.max(0, ...b.recent.map(d => d.usd ?? 0))
     const queueRows = queueTree(b.running, b.queued, b.blocked)
     // A rule across the card, inside its border and padding.
     const rule = (color: string) => <Text color={color}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>
@@ -531,6 +579,32 @@ export const register: Register = on => {
     const widest = (xs: (string | null)[]): number => Math.max(0, ...xs.map(x => x?.length ?? 0))
     const timeCells = Math.max(RECENT_TIME_CELLS, widest([...b.recent.map(d => (d.minutes === null ? null : hoursMinutes(d.minutes))), totals.minutes === null ? null : hoursMinutes(totals.minutes)]))
     const costCells = Math.max(RECENT_COST_CELLS, 1 + widest([...b.recent.map(d => (d.usd === null ? null : dollars(d.usd))), totals.usd === null ? null : dollars(totals.usd)]))
+    // A recent row's plan cost after its cost, `+$6`, or `+—` when the ledger
+    // holds none; no cell while the ledger could not be read.
+    const planText = (d: Ended): string | null => (d.plan === 'unread' ? null : d.plan === 'none' ? '+—' : `+${dollars(d.plan)}`)
+    const planWidth = widest(b.recent.map(planText))
+    const planCells = planWidth === 0 ? 0 : 1 + planWidth
+    const planTotal = b.recent.reduce((n, d) => n + (typeof d.plan === 'number' ? d.plan : 0), 0)
+    const hasPlans = b.recent.some(d => d.plan !== 'unread')
+    // The columns a recent row's figures take, and the room left for its slug
+    // beside them, after the card's border and padding, the gap, `● `, the
+    // sitting and its space.
+    const figureCells = timeCells + 2 + RECENT_SPLIT_CELLS + costCells + planCells + RECENT_AGE_CELLS
+    const slugRoom = (d: Ended): number => e.props.bodyColumns - 4 - 2 - figureCells - 2 - d.sitting.length - 1
+    const fit = (text: string, room: number): string => (text.length <= room ? text : room <= 1 ? '' : `${text.slice(0, room - 1)}…`)
+    // A run's time as savor lavender, cycles green and ship blue, or the grey
+    // baseline when its progress file holds no times.
+    const splitCells = (s: PhaseSplit | null) =>
+      s === null ? (
+        <Text color={F.surface1}>{'⣀'.repeat(RECENT_SPLIT_CELLS)}</Text>
+      ) : (
+        <Text>
+          {s.savor > 0 && <Text color={F.lavender}>{'⣿'.repeat(s.savor)}</Text>}
+          {s.cycles > 0 && <Text color={F.green}>{'⣿'.repeat(s.cycles)}</Text>}
+          {s.ship > 0 && <Text color={F.blue}>{'⣿'.repeat(s.ship)}</Text>}
+        </Text>
+      )
+    const historyLine = (k: Block): string => (k.why === '' ? historyTag(k).trimStart() : historyTag(k))
     // A figure right-aligned in a column `width` cells wide: the pad, then the figure in its own span.
     const cell = (value: string, width: number, color: string, bold = false) => (
       <Text>
@@ -644,9 +718,11 @@ export const register: Register = on => {
                     </Text>
                     <Text bold color={F.text}>{`  ${k.headline}`}</Text>
                   </Text>
-                  {k.why !== '' && (
+                  {(k.why !== '' || historyLine(k) !== '') && (
+                    // The plan cost and the launch dim after the cost.
                     <Text color={F.subtext0} wrap="wrap">
                       {k.why}
+                      <Text color={F.overlay0}>{historyLine(k)}</Text>
                     </Text>
                   )}
                   {k.strip.length > 0 && (
@@ -753,6 +829,7 @@ export const register: Register = on => {
                   </Text>
                   <Text bold color={r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
                   {r.slug !== '' && <Text color={r.kind === 'block' ? F.yellow : F.subtext0}> {r.slug}</Text>}
+                  {(b.splits[r.sitting] ?? 0) > 0 && <Text color={F.overlay0}>{` split ×${b.splits[r.sitting] ?? 0}`}</Text>}
                 </Text>
                 {r.kind === 'run' ? (
                   <Text>
@@ -806,30 +883,46 @@ export const register: Register = on => {
 
         {b.recent.length > 0 && (
           <Box {...CARD}>
-            {cardHead('recent', 'recent', F.lavender)}
+            <Box justifyContent="space-between" columnGap={2}>
+              {cardHead('recent', 'recent', F.lavender)}
+              {!folded('recent') && (
+                // The phase split's legend.
+                <Text color={F.overlay1}>
+                  <Text color={F.lavender}>▪</Text> savor <Text color={F.green}>▪</Text> cycles <Text color={F.blue}>▪</Text> ship
+                </Text>
+              )}
+            </Box>
             {!folded('recent') && b.recent.map(d => {
-              // One row per run: outcome, sitting, then time, a cost meter
-              // scaled to the costliest run listed, the cost and the age. A
-              // run over twice the median draws its time in peach.
-              const meter = costMeter(d.usd ?? 0, recentMax, RECENT_METER_CELLS)
+              // One row per run: outcome, sitting, then time, the phase split,
+              // the cost, the plan cost and the age. A run over twice the
+              // median draws its time in peach, and a plan cost past the
+              // build's draws bright.
               const isSlow = d.minutes !== null && totals.slowOver !== null && d.minutes > totals.slowOver
+              const plan = planText(d)
+              const planColor = d.plan === 'none' ? F.surface2 : typeof d.plan === 'number' && d.usd !== null && d.plan > d.usd ? F.text : F.overlay1
               return (
                 <Box columnGap={2}>
-                  {/* The slug gives way first, so the figures keep one line and one column. */}
+                  {/* The slug fits the room the figures leave, so the figures keep one line and one column. */}
                   <Box flexGrow={1} flexShrink={1} minWidth={0}>
                     <Text wrap="truncate-end">
                       <Text color={F.green}>● </Text>
                       <Text bold color={F.text}>{d.sitting}</Text>
-                      <Text color={F.subtext0}> {d.slug}</Text>
+                      <Text color={F.subtext0}> {fit(d.slug, slugRoom(d))}</Text>
                     </Text>
                   </Box>
                   <Box flexShrink={0}>
                     <Text wrap="truncate-end">
                       {cell(d.minutes === null ? '—' : hoursMinutes(d.minutes), timeCells, isSlow ? F.peach : F.overlay2)}
                       {'  '}
-                      <Text color={F.peach}>{meter.fill}</Text>
-                      <Text color={F.surface1}>{meter.rest}</Text>
+                      {splitCells(d.split)}
                       {cell(d.usd === null ? '—' : dollars(d.usd), costCells, F.text)}
+                      {planCells > 0 && (
+                        <Text>
+                          {' '}
+                          <Text color={planColor}>{plan ?? ''}</Text>
+                          {' '.repeat(Math.max(0, planCells - 1 - (plan ?? '').length))}
+                        </Text>
+                      )}
                       {cell(agoShort(d.endedMs, b.checkedAt), RECENT_AGE_CELLS, F.overlay0)}
                     </Text>
                   </Box>
@@ -838,7 +931,8 @@ export const register: Register = on => {
             })}
             {!folded('recent') && (
               // The totals under a rule, each figure under its column; the
-              // meter and age cells stay blank so the figures line up.
+              // split cells stay blank so the figures line up, and the plan
+              // total follows the cost.
               <Box flexDirection="column">
                 {rule(F.surface0)}
                 <Box columnGap={2}>
@@ -850,9 +944,13 @@ export const register: Register = on => {
                   <Box flexShrink={0}>
                     <Text wrap="truncate-end">
                       {cell(totals.minutes === null ? '' : hoursMinutes(totals.minutes), timeCells, F.overlay2)}
-                      {' '.repeat(2 + RECENT_METER_CELLS)}
+                      {' '.repeat(2 + RECENT_SPLIT_CELLS)}
                       {cell(totals.usd === null ? '' : dollars(totals.usd), costCells, F.text, true)}
-                      {' '.repeat(RECENT_AGE_CELLS)}
+                      {hasPlans ? (
+                        <Text color={F.overlay1}>{` + ${dollars(planTotal)} plan`}</Text>
+                      ) : (
+                        ' '.repeat(planCells + RECENT_AGE_CELLS)
+                      )}
                     </Text>
                   </Box>
                 </Box>

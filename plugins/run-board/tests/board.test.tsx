@@ -4,7 +4,6 @@ import {
   afterSittings,
   ago,
   agoShort,
-  costMeter,
   briefFiles,
   briefHeader,
   briefKey,
@@ -51,6 +50,12 @@ import {
   isFolded,
   lastEnd,
   liveDepths,
+  historyTag,
+  launchCount,
+  lineTimes,
+  phaseSplit,
+  planCosts,
+  splitCounts,
 } from '../hooks/board'
 import type { Deck, Ended, Run } from '../types'
 
@@ -357,23 +362,25 @@ const LEDGER = [
   JSON.stringify({ kind: 'ship', ts: '2026-11-06T12:30:00Z', window: { start: '2026-11-06T12:20:00Z' }, overhead: { usd: 1.5 } }),
   JSON.stringify({ kind: 'commit', ts: '2026-11-06T12:40:00Z', cost: { usd: null } }),
   JSON.stringify({ kind: 'commit', ts: '2026-10-20T12:00:00Z', window: { start: '2026-10-20T11:00:00Z' }, cost: { usd: 9 } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-11-06T12:50:00Z', phase: 'plan', sitting: 682, cost: { usd: 2 } }),
   '{"kind":"commit","ts":"2026-11-06T13:0',
 ].join('\n')
 
 test('the ledger reads as spends, and totals by day, week, month and all time', async () => {
   const spends = ledgerSpends(LEDGER)
-  expect(spends.length).toBe(3)
-  expect(spends[0]).toEqual({ startMs: Date.parse('2026-11-06T11:00:00Z'), endMs: Date.parse('2026-11-06T12:00:00Z'), usd: 6 })
+  expect(spends.length).toBe(4)
+  expect(spends[0]).toEqual({ startMs: Date.parse('2026-11-06T11:00:00Z'), endMs: Date.parse('2026-11-06T12:00:00Z'), usd: 6, kind: 'commit', phase: null, sitting: null })
+  expect(spends[3]).toEqual({ startMs: Date.parse('2026-11-06T12:50:00Z'), endMs: Date.parse('2026-11-06T12:50:00Z'), usd: 2, kind: 'commit', phase: 'plan', sitting: 682 })
   const now = Date.parse('2026-11-06T13:00:00Z')
   // The October commit is outside the week and inside the month.
-  expect(spendTotals(spends, now)).toEqual({ day: 7.5, week: 7.5, month: 16.5, all: 16.5 })
-  expect(spendTotals(spends, Date.parse('2026-12-30T00:00:00Z'))).toEqual({ day: 0, week: 0, month: 0, all: 16.5 })
+  expect(spendTotals(spends, now)).toEqual({ day: 9.5, week: 9.5, month: 18.5, all: 18.5 })
+  expect(spendTotals(spends, Date.parse('2026-12-30T00:00:00Z'))).toEqual({ day: 0, week: 0, month: 0, all: 18.5 })
 })
 
 test('the ledger reads in chunks that cut lines anywhere', async () => {
-  const text = `${LEDGER.split('\n').slice(0, 4).join('\n')}\n`
-  // Every cut point gives the same spends as one read, and leaves nothing behind.
-  for (const cut of [1, 37, 120, text.length - 1]) {
+  const text = `${LEDGER.split('\n').slice(0, 5).join('\n')}\n`
+  // Every cut point gives the same spends as one read, and leaves nothing behind; one cuts inside `"sitting"`.
+  for (const cut of [1, 37, 120, text.indexOf('"sitting"') + 4, text.length - 1]) {
     const first = ledgerChunk('', text.slice(0, cut))
     const second = ledgerChunk(first.partial, text.slice(cut))
     expect([...first.spends, ...second.spends]).toEqual(ledgerSpends(text))
@@ -496,16 +503,6 @@ test('recent reads the last finished line of each sitting, newest first, and ski
   expect(recent.map(d => [d.minutes, d.usd])).toEqual([[108, 32.71]])
 })
 
-test('a cost meter fills braille cells to scale, then the baseline', async () => {
-  expect(costMeter(32, 32, 6)).toEqual({ fill: '⣿⣿⣿⣿⣿⣿', rest: '' })
-  expect(costMeter(16, 32, 6)).toEqual({ fill: '⣿⣿⣿', rest: '⣀⣀⣀' })
-  // A part cell between full ones steps up through partial fills.
-  expect(costMeter(18, 32, 6)).toEqual({ fill: '⣿⣿⣿⣄', rest: '⣀⣀' })
-  expect(costMeter(0.5, 32, 6)).toEqual({ fill: '⡀', rest: '⣀⣀⣀⣀⣀' })
-  expect(costMeter(0, 32, 6)).toEqual({ fill: '', rest: '⣀⣀⣀⣀⣀⣀' })
-  expect(costMeter(5, 0, 4)).toEqual({ fill: '', rest: '⣀⣀⣀⣀' })
-})
-
 test('a short age reads in minutes, then hours, then days', async () => {
   const at = Date.parse('2026-11-06T12:00:00Z')
   expect(agoShort(at - 14 * 60000, at)).toBe('14m')
@@ -563,13 +560,13 @@ test('a brief key is the queue path, and a directory brief is its directory', as
 })
 
 test('the header stops at the first heading', async () => {
-  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', mode: 'ready', why: '' })
-  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', mode: 'enrich', why: '' })
+  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', mode: 'ready', why: '', splitFrom: [] })
+  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', mode: 'enrich', why: '', splitFrom: [] })
 })
 
 test('an interactive brief says why it needs a person', async () => {
   const text = '# x\n\n**Mode: interactive.** Removes a wrangler.toml line.\n\n## y\n**Mode: autopilot.**'
-  expect(briefHeader(text)).toEqual({ epic: '', after: '', mode: 'interactive', why: 'Removes a wrangler.toml line.' })
+  expect(briefHeader(text)).toEqual({ epic: '', after: '', mode: 'interactive', why: 'Removes a wrangler.toml line.', splitFrom: [] })
 })
 
 test('an After line names its sittings', async () => {
@@ -871,15 +868,15 @@ test('a handoff question reads both the bare and the addressed label', () => {
 })
 
 // The shape the pane's board atom is stored under; it moves with the Board type.
-const BOARD_SHAPE = 'board-11'
+const BOARD_SHAPE = 'board-12'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>
   findAll: (q: { type: string }) => Promise<{ text?: string; props?: { color?: string } }[]>
 }
 
-/** Mounts the pane over `b`, with `folds` as the folds set by hand, and records each write. */
-async function mountBoard($: any, on: any, b: unknown, folds: Record<string, boolean> = {}) {
+/** Mounts the pane over `b`, `bodyColumns` wide, with `folds` as the folds set by hand, and records each write. */
+async function mountBoard($: any, on: any, b: unknown, folds: Record<string, boolean> = {}, bodyColumns = 100) {
   const sets: unknown[] = []
   on('state.get', (_: unknown, e: { key: string }) => ({
     value: { value: e.key === 'board' ? { shape: BOARD_SHAPE, value: b } : { shape: 'folds-1', value: folds }, version: 1 },
@@ -897,7 +894,7 @@ async function mountBoard($: any, on: any, b: unknown, folds: Record<string, boo
     component: 'Pane',
     requestId: 'run-board',
     surface: 'terminal',
-    props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    props: { title: 'Autopilot runs', isFocused: true, bodyColumns, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
   })
   // A shape the pane declines draws the empty state, and every other assertion would read nothing.
   expect(await has(ui, 'no autopilot status yet')).toBe(false)
@@ -1149,8 +1146,11 @@ const endedOf = (rows: [string, number | null, number | null][]): Ended[] =>
     minutes,
     usd,
     endedMs: NOW - ((i + 1) * 12 * HOUR) / rows.length,
+    split: null,
+    plan: 'unread',
   }))
-const recentBoard = (recent: Ended[]) => buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { recent })
+const recentBoard = (recent: Ended[], extra: Parameters<typeof buildBoard>[4] = {}) =>
+  buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { recent, ...extra })
 
 test('recent ends in a totals row: count, span, median, total time and the unrounded spend', async ($, on) => {
   const { ui } = await mountBoard($, on, recentBoard(endedOf(PROPOSED_RECENT)))
@@ -1186,3 +1186,169 @@ test('a run with no totals counts, and moves no median or sum', async ($, on) =>
   await ui.unmount()
 })
 
+
+// A progress file as S699's launcher writes it: an `at:` line above each write.
+const T0 = Date.parse('2026-10-31T10:00:00Z')
+const stamped = (rows: readonly [number, string][]): string =>
+  rows.flatMap(([minute, line]) => [`at: ${new Date(T0 + minute * 60000).toISOString().replace(/\.000Z$/, 'Z')}`, line]).join('\n')
+
+// 10m of savor over six lines, 40m of cycles over three, simplify and the
+// xhigh review among them, and 10m of ship over two: the lines alone would
+// split the cells 3-2-1.
+const PHASED: [number, string][] = [
+  [0, 'slot: 1'],
+  [0, 'skill: sittings:savor launch /w/docs/briefs/kickoff-sitting-s682-dom-wait-quiet.md'],
+  [2, 'turn ended: success, 9 turns, $1.00 so far: Reviewers are running.'],
+  [4, 'woke for a background task: success, 1 turns, $1.00 so far: One reviewer is done.'],
+  [6, 'woke for a background task: success, 1 turns, $1.00 so far: Two reviewers are done.'],
+  [8, 'woke for a background task: success, 1 turns, $1.00 so far: Step 0 is done.'],
+  [10, 'savored: session 0 handed over in /x.savored; session 1 starts at cycle 1 in /w'],
+  [30, 'skill: simplify Changed paths over a..HEAD'],
+  [45, 'skill: code-review xhigh git diff a b'],
+  [50, 'skill: commit-skill:ship'],
+  [55, 'bash: npm run push:checked -- origin HEAD:main 2>&1 | tail'],
+  [60, 'finished: shipped; production is live (run 1). ($22.40, 60 min)'],
+]
+
+test('each line takes the time of the nearest at line above it', () => {
+  const text = `commit: before any stamp\n${stamped([[0, 'slot: 1'], [5, 'skill: simplify x']])}\nbash: under the last stamp`
+  expect(lineTimes(text)).toEqual([null, T0, T0, T0 + 300000, T0 + 300000, T0 + 300000])
+})
+
+test("a run's time splits into savor, cycles and ship cells by the at lines, not by the line count", () => {
+  expect(phaseSplit(stamped(PHASED))).toEqual({ savor: 1, cycles: 4, ship: 1 })
+  // Cells round by largest remainder: 7m, 46m and 7m give 0.7, 4.6 and 0.7 cells.
+  const odd: [number, string][] = [
+    [0, 'skill: sittings:savor launch /w/b.md'],
+    [7, 'savored: session 0 handed over'],
+    [53, 'skill: commit-skill:ship'],
+    [60, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
+  ]
+  expect(phaseSplit(stamped(odd))).toEqual({ savor: 1, cycles: 4, ship: 1 })
+  // A relaunch's wait between the stop and the next slot line counts in no phase.
+  const relaunched: [number, string][] = [
+    [0, 'slot: 1'],
+    [0, 'skill: sittings:savor launch /w/b.md'],
+    [10, 'savored: session 0 handed over'],
+    [30, 'kind: decision'],
+    [30, 'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($5.00, 30 min)'],
+    [150, 'slot: 1'],
+    [150, 'turn ended: success, 9 turns, $1.00 so far: Cycle 2 is building.'],
+    [170, 'skill: commit-skill:ship'],
+    [180, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
+  ]
+  expect(phaseSplit(stamped(relaunched))).toEqual({ savor: 1, cycles: 4, ship: 1 })
+  // A file with no at lines has no times.
+  expect(phaseSplit(PHASED.map(([, line]) => line).join('\n'))).toBe(null)
+})
+
+test('recent draws each run as a phase split, and a file with no times as the grey baseline', async ($, on) => {
+  const files = [
+    { name: 'kickoff-sitting-s682-dom-wait-quiet.progress', mtimeMs: NOW - 2 * HOUR, text: stamped(PHASED) },
+    { name: 'kickoff-sitting-s683-doc-tests-read-map.progress', mtimeMs: NOW - 3 * HOUR, text: PHASED.map(([, line]) => line).join('\n') },
+  ]
+  const recent = recentOf(files, [])
+  expect(recent.map(d => d.split)).toEqual([{ savor: 1, cycles: 4, ship: 1 }, null])
+  const { ui } = await mountBoard($, on, recentBoard(recent))
+  // Savor lavender, cycles green, ship blue; the legend in the card head names them.
+  expect(await coloursOf(ui, '⣿')).toEqual(['#b7bdf8', '#8aadf4'])
+  expect(await coloursOf(ui, '⣿⣿⣿⣿')).toEqual(['#a6da95'])
+  expect(await coloursOf(ui, '⣀⣀⣀⣀⣀⣀')).toEqual(['#494d64'])
+  expect(await has(ui, '▪ savor ▪ cycles ▪ ship')).toBe(true)
+  await ui.unmount()
+})
+
+// Plan commits for S682 at $4 and $2, and records that are not plan cost: a
+// plan session and a plan ship that name S682, a build commit, and a sitting
+// written as a string.
+const PLAN_LEDGER = [
+  JSON.stringify({ kind: 'commit', ts: '2026-10-31T08:00:00Z', phase: 'plan', sitting: 682, cost: { usd: 4 } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-10-31T08:10:00Z', phase: 'plan', sitting: 682, cost: { usd: 2 } }),
+  JSON.stringify({ kind: 'session', ts: '2026-10-31T08:20:00Z', phase: 'plan', sitting: 682, cost: { usd: 1 } }),
+  JSON.stringify({ kind: 'ship', ts: '2026-10-31T08:30:00Z', phase: 'plan', sitting: 682, overhead: { usd: 3 } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-10-31T09:00:00Z', sitting: 682, cost: { usd: 9 } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-10-31T09:10:00Z', phase: 'plan', sitting: '682', cost: { usd: 5 } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-10-31T09:20:00Z', phase: 'plan', sitting: 683, cost: { usd: 40 } }),
+].join('\n')
+
+test('plan cost is the plan commits that carry the sitting, and nothing else', () => {
+  expect(planCosts(ledgerSpends(PLAN_LEDGER))).toEqual({ S682: 6, S683: 40 })
+})
+
+test('recent draws each run its plan cost, dim, bright past the build cost, and +— with none', async ($, on) => {
+  const recent = endedOf(PROPOSED_RECENT.slice(0, 3))
+  const { ui } = await mountBoard($, on, recentBoard(recent, { plans: planCosts(ledgerSpends(PLAN_LEDGER)) }))
+  expect(await coloursOf(ui, '+$6')).toEqual(['#8087a2'])
+  // S683's plan cost passes its $34 build.
+  expect(await coloursOf(ui, '+$40')).toEqual(['#cad3f5'])
+  expect(await coloursOf(ui, '+—')).toEqual(['#5b6078'])
+  expect(await has(ui, '+ $46 plan')).toBe(true)
+  await ui.unmount()
+})
+
+test('a ledger that could not be read draws no plan cell and no plan total', async ($, on) => {
+  const { ui } = await mountBoard($, on, recentBoard(endedOf(PROPOSED_RECENT.slice(0, 3)), { plans: null }))
+  expect(await has(ui, '+$')).toBe(false)
+  expect(await has(ui, '+—')).toBe(false)
+  expect(await has(ui, 'plan')).toBe(false)
+  await ui.unmount()
+})
+
+const LONG_SLUG = 'a-slug-much-longer-than-the-old-cut-point-for-names'
+const longSlugBoard = () => recentBoard(endedOf([['S682', 73, 22.4]]).map(d => ({ ...d, slug: LONG_SLUG })))
+
+test('a recent slug draws whole where the pane is wide', async ($, on) => {
+  const { ui } = await mountBoard($, on, longSlugBoard(), {}, 100)
+  expect(await has(ui, `S682 ${LONG_SLUG}`)).toBe(true)
+  await ui.unmount()
+})
+
+test('a recent slug is cut where the pane is narrow', async ($, on) => {
+  const { ui } = await mountBoard($, on, longSlugBoard(), {}, 50)
+  expect(await has(ui, LONG_SLUG)).toBe(false)
+  expect(await has(ui, 'S682 a-slug')).toBe(true)
+  expect(await has(ui, '…')).toBe(true)
+  await ui.unmount()
+})
+
+// S684's plan commits, $11.36, and a plan ship and a plan session that name it.
+const S684_PLAN_LEDGER = [
+  JSON.stringify({ kind: 'commit', ts: '2026-10-30T08:00:00Z', phase: 'plan', sitting: 684, cost: { usd: 10 } }),
+  JSON.stringify({ kind: 'commit', ts: '2026-10-30T08:10:00Z', phase: 'plan', sitting: 684, cost: { usd: 1.36 } }),
+  JSON.stringify({ kind: 'ship', ts: '2026-10-30T08:20:00Z', phase: 'plan', sitting: 684, overhead: { usd: 3 } }),
+  JSON.stringify({ kind: 'session', ts: '2026-10-30T08:30:00Z', phase: 'plan', sitting: 684, cost: { usd: 2 } }),
+].join('\n')
+const S684_RUN = 'kickoff-sitting-s684-home-gallery-sections'
+
+test('the blocked why-line gives the plan cost and which launch stopped', async ($, on) => {
+  const plans = planCosts(ledgerSpends(S684_PLAN_LEDGER))
+  const once = s684Board({ plans, launchLogs: { [S684_RUN]: 'launch: 1 fresh slot 1 at 2026-10-31T16:00:00Z\n' } })
+  expect(historyTag(once.blocked[0] ?? { plan: 'unread', launches: null })).toBe(' +$11.36 plan · 1st launch')
+  const { ui } = await mountBoard($, on, once)
+  expect(await has(ui, '$13.12 +$11.36 plan · 1st launch')).toBe(true)
+  await ui.unmount()
+  // The second launch emptied the progress file; the launch log keeps both.
+  const twice = s684Board({ plans, launchLogs: { [S684_RUN]: 'launch: 1 fresh slot 1 at 2026-10-31T12:00:00Z\nlaunch: 2 fresh slot 2 at 2026-10-31T16:00:00Z\n' } })
+  expect(historyTag(twice.blocked[0] ?? { plan: 'unread', launches: null })).toBe(' +$11.36 plan · 2nd launch')
+  // No launch log gives no launch tag; no plan commit gives no plan tag.
+  expect(historyTag(s684Board({ plans: {} }).blocked[0] ?? { plan: 'unread', launches: null })).toBe('')
+  expect(launchCount('launch: 1 fresh slot 1 at x\nlaunch: 2 relaunch slot 1 at y\nlaunch: 3 relaunch slot 2 at z\n')).toBe(3)
+})
+
+const SPLIT_BRIEFS = [
+  { path: `${BRIEFS}s686-dashboard-rail.md`, text: '# S686\n\nAfter: S685\n\n## a' },
+  { path: `${BRIEFS}s690-nav-overlays.md`, text: '# S690\n\nSplit from: S686\nAfter: S698\n\n## a\nSplit from: S1' },
+]
+const SITTINGS_JSON = JSON.stringify({ floor: 60, claims: { s700: { slug: 'x', record: { split_from: ['s686', 's690'] } }, s650: { slug: 'y', record: { cards: [] } } } })
+
+test("a split parent's queue row reads how many briefs were split from it", async ($, on) => {
+  expect(briefHeader(SPLIT_BRIEFS[1]?.text ?? '').splitFrom).toEqual(['S686'])
+  const splits = splitCounts(SPLIT_BRIEFS, SITTINGS_JSON)
+  expect(splits).toEqual({ S686: 2, S690: 1 })
+  // A sittings.json that does not parse counts only the live briefs.
+  expect(splitCounts(SPLIT_BRIEFS, '{"claims": ')).toEqual({ S686: 1 })
+  const raw = { dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] }
+  const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([1]), NOW, { splits }))
+  expect(await has(ui, 'S686 dashboard-rail split ×2')).toBe(true)
+  await ui.unmount()
+})

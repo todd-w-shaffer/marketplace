@@ -57,7 +57,19 @@ export type Ended = {
   usd: number | null
   /** When the progress file was last written. */
   endedMs: number
+  /** The run's time as savor, cycles and ship cells, or null when its progress file holds no times. */
+  split: PhaseSplit | null
+  plan: PlanCost
 }
+
+/** A run's time in RECENT_SPLIT_CELLS cells: savor, then the cycles with simplify and the xhigh review, then the ship. */
+export type PhaseSplit = { savor: number; cycles: number; ship: number }
+
+/**
+ * What a sitting's planning commits cost in dollars: `none` when the ledger holds none for it, `unread` when
+ * the ledger could not be read.
+ */
+export type PlanCost = number | 'none' | 'unread'
 
 /** Who acts on a stuck run: `decision` you, `split` the plan, `deploy-red` the code, `run-broke` the run. */
 export type BlockKind = 'decision' | 'split' | 'deploy-red' | 'run-broke'
@@ -87,6 +99,9 @@ export type Block = {
   holds: Held[]
   next: string
   endedMs: number
+  plan: PlanCost
+  /** How many times the sitting launched, from its `.launches` file, or null without one. */
+  launches: number | null
 }
 
 /** Each foldable card, by the hotkey its header answers. */
@@ -136,6 +151,8 @@ export type Board = {
   onDeck: Deck[]
   /** Root causes of stuck runs, most held first; empty when nothing is stuck. */
   blocked: Block[]
+  /** How many briefs were split from each sitting, by sitting; a sitting split from none is absent. */
+  splits: Record<string, number>
 }
 
 declare module 'claude-code' {

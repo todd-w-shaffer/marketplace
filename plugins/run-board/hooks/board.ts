@@ -1,4 +1,4 @@
-import type { Block, BlockKind, Board, Deck, DeckMode, Done, Ended, FoldCard, Folds, Held, Loop, Phase, PhaseState, Run, Stage, StripCell, Waiting } from '../types'
+import type { Block, BlockKind, Board, Deck, DeckMode, Done, Ended, FoldCard, Folds, Held, Loop, Phase, PhaseSplit, PhaseState, PlanCost, Run, Stage, StripCell, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
@@ -272,6 +272,85 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
   return [{ label: 'savor', short: 'savor', state: savor }, ...phases]
 }
 
+// The stamp the launcher writes above each progress write: `at: 2026-11-21T09:39:39Z`.
+const STAMP = /^at: (.*)$/
+
+/**
+ * Each line's time: the time on the nearest `at:` line above it, an `at:`
+ * line's own for itself. An `at:` line whose time does not parse, an empty
+ * one included, is no stamp, so the lines under it have no time.
+ */
+export function lineTimes(progress: string): (number | null)[] {
+  let at: number | null = null
+  return progress.split('\n').map(line => {
+    const m = STAMP.exec(line)
+    if (m) {
+      const ms = Date.parse((m[1] ?? '').trim())
+      at = Number.isFinite(ms) ? ms : null
+    }
+    return at
+  })
+}
+
+// How many cells RECENT's phase split takes.
+export const RECENT_SPLIT_CELLS = 6
+
+type SplitPhase = keyof PhaseSplit | 'none'
+
+/**
+ * The phase a run is in after `line`, by the lines `phasesOf` reads. A `slot:`
+ * line starts a launch and a `finished:` line ends one, and between them and
+ * the launch's first step the run is in no phase. The savor runs from its
+ * `sittings:savor launch` line to its own `/commit` or the `savored:` line.
+ * The ship starts at `/ship` or a push. Every other step, simplify and the
+ * xhigh review included, is the cycles.
+ */
+function nextSplitPhase(phase: SplitPhase, line: string): SplitPhase {
+  if (line.startsWith('slot: ') || line.startsWith('finished: ')) return 'none'
+  if (line === '' || line.startsWith('kind: ')) return phase
+  if (/^skill: sittings:savor launch\b/.test(line)) return phase === 'none' ? 'savor' : phase
+  if (phase === 'savor') return line.startsWith('savored: ') || /^skill: commit-skill:commit\b/.test(line) ? 'cycles' : 'savor'
+  if (/^skill: commit-skill:ship\b/.test(line) || (line.startsWith('bash: ') && line.includes('push:checked'))) return 'ship'
+  return phase === 'none' ? 'cycles' : phase
+}
+
+/**
+ * A run's time as RECENT_SPLIT_CELLS cells of savor, cycles and ship. The
+ * time from one stamp to the next belongs to the phase the lines under the
+ * first one leave the run in, so time in no phase, such as a relaunch's wait,
+ * counts nowhere. Cells round by largest remainder, ties to the earlier phase.
+ * Null when the file holds no time in any phase, as a file with no `at:`
+ * lines does.
+ */
+export function phaseSplit(progress: string): PhaseSplit | null {
+  const lines = progress.split('\n')
+  const times = lineTimes(progress)
+  const ms: PhaseSplit = { savor: 0, cycles: 0, ship: 0 }
+  let phase: SplitPhase = 'none'
+  let from: number | null = null
+  lines.forEach((line, i) => {
+    if (!STAMP.test(line)) {
+      phase = nextSplitPhase(phase, line)
+      return
+    }
+    const at = times[i] ?? null
+    if (from !== null && at !== null && phase !== 'none') ms[phase] += Math.max(0, at - from)
+    from = at
+  })
+  const keys = ['savor', 'cycles', 'ship'] as const
+  const total = ms.savor + ms.cycles + ms.ship
+  if (total <= 0) return null
+  const quota = keys.map(k => (ms[k] / total) * RECENT_SPLIT_CELLS)
+  const cells = quota.map(Math.floor)
+  let left = RECENT_SPLIT_CELLS - cells.reduce((a, b) => a + b, 0)
+  for (const i of [0, 1, 2].sort((a, b) => (quota[b] ?? 0) - (cells[b] ?? 0) - ((quota[a] ?? 0) - (cells[a] ?? 0)) || a - b)) {
+    if (left <= 0) break
+    cells[i] = (cells[i] ?? 0) + 1
+    left--
+  }
+  return { savor: cells[0] ?? 0, cycles: cells[1] ?? 0, ship: cells[2] ?? 0 }
+}
+
 // Stages the phase line leaves out: those that say no more than the phase,
 // and `review low`, which stays the last step line through the next
 // cycle's build, so it reads as the cycle before the one in flight.
@@ -469,10 +548,25 @@ export function buildBoard(
     handoffs?: Readonly<Record<string, string>>
     /** Each red deploy's failed strip stage, by run. */
     deployStages?: Readonly<Record<string, string>>
+    /** Each sitting's plan cost by sitting, from token-ledger, or null when it could not be read. */
+    plans?: Readonly<Record<string, number>> | null
+    /** Each run's `.launches` file, by run name. */
+    launchLogs?: Readonly<Record<string, string>>
+    /** How many briefs were split from each sitting, by sitting. */
+    splits?: Readonly<Record<string, number>>
   } = {},
 ): Board {
-  const { loop = null, recent = [], tools = {}, cycles = {}, utcOffset = '', spend = null, afters = {} } = extra
-  const { blocks, drawn } = blockedOf({ raw, endings: extra.endings ?? [], afters, handoffs: extra.handoffs, deployStages: extra.deployStages })
+  const { loop = null, tools = {}, cycles = {}, utcOffset = '', spend = null, afters = {}, plans = null } = extra
+  const { blocks, drawn } = blockedOf({
+    raw,
+    endings: extra.endings ?? [],
+    afters,
+    handoffs: extra.handoffs,
+    deployStages: extra.deployStages,
+    plans,
+    launchLogs: extra.launchLogs,
+  })
+  const recent = (extra.recent ?? []).map(d => ({ ...d, plan: planOf(plans, d.sitting) }))
   // A held brief, and a stopped one, sits under BLOCKED and never on deck.
   const onDeck = (extra.onDeck ?? []).filter(d => !drawn.has(d.sitting))
   const running: Run[] = raw.running.map(r => {
@@ -518,8 +612,13 @@ export function buildBoard(
     recent,
     onDeck,
     blocked: blocks,
+    splits: { ...extra.splits },
   }
 }
+
+/** A sitting's plan cost from `plans`: `unread` when the ledger could not be read, `none` when it holds none. */
+const planOf = (plans: Readonly<Record<string, number>> | null, sitting: string): PlanCost =>
+  plans === null ? 'unread' : (plans[sitting] ?? 'none')
 
 /** A brief file in `git ls-tree -r origin/main docs/briefs/`: its path and blob. */
 export type BriefFile = { path: string; sha: string }
@@ -556,19 +655,23 @@ export function briefKey(path: string): string {
  * The header lines above a brief's first `## ` heading that the board reads.
  * The mode is `ready` for a brief marked `**Mode: autopilot.**`, `interactive`
  * for one marked `**Mode: interactive.**`, whose `why` is the text after the
- * marker, and `enrich` for a brief that carries neither yet.
+ * marker, and `enrich` for a brief that carries neither yet. `splitFrom` is
+ * the sittings its `Split from:` line names.
  */
-export function briefHeader(text: string): { epic: string; after: string; mode: DeckMode; why: string } {
+export function briefHeader(text: string): { epic: string; after: string; mode: DeckMode; why: string; splitFrom: string[] } {
   let epic = ''
   let after = ''
   let mode: DeckMode = 'enrich'
   let why = ''
+  let splitFrom: string[] = []
   for (const line of text.split('\n')) {
     if (line.startsWith('## ')) break
     const e = /^Epic: (.+)$/.exec(line)
     if (e) epic = (e[1] ?? '').trim()
     const a = /^After: (.+)$/.exec(line)
     if (a) after = (a[1] ?? '').trim()
+    const s = /^Split from: (.+)$/.exec(line)
+    if (s) splitFrom = afterSittings(s[1] ?? '')
     if (line.includes('**Mode: autopilot.**')) mode = 'ready'
     const i = line.indexOf(INTERACTIVE)
     if (i !== -1) {
@@ -576,10 +679,39 @@ export function briefHeader(text: string): { epic: string; after: string; mode: 
       why = line.slice(i + INTERACTIVE.length).trim()
     }
   }
-  return { epic, after, mode, why }
+  return { epic, after, mode, why, splitFrom }
 }
 
 const INTERACTIVE = '**Mode: interactive.**'
+
+/**
+ * How many briefs were split from each sitting, by sitting: each brief on
+ * `origin/main` whose `Split from:` line names it, and each claim in
+ * `sittings.json` whose record's `split_from` list does. A child counts once
+ * however many places name it. A `sittings.json` that does not parse adds no
+ * claim.
+ */
+export function splitCounts(briefs: readonly { path: string; text: string }[], sittingsJson: string): Record<string, number> {
+  const children = new Map<string, Set<string>>()
+  const add = (parent: string, child: string) => children.set(parent, (children.get(parent) ?? new Set()).add(child))
+  for (const b of briefs) for (const p of briefHeader(b.text).splitFrom) add(p, sittingOf(briefKey(b.path)).sitting)
+  let data: unknown = null
+  try {
+    data = JSON.parse(sittingsJson)
+  } catch {
+    data = null
+  }
+  const claims = typeof data === 'object' && data !== null ? (data as Record<string, unknown>).claims : undefined
+  if (typeof claims === 'object' && claims !== null) {
+    for (const [id, claim] of Object.entries(claims as Record<string, unknown>)) {
+      const record = typeof claim === 'object' && claim !== null ? (claim as Record<string, unknown>).record : undefined
+      const from = typeof record === 'object' && record !== null ? (record as Record<string, unknown>).split_from : undefined
+      if (!Array.isArray(from)) continue
+      for (const p of from) if (typeof p === 'string') for (const parent of afterSittings(p)) add(parent, afterSittings(id)[0] ?? id)
+    }
+  }
+  return Object.fromEntries([...children].map(([parent, kids]) => [parent, kids.size]))
+}
 
 /** A sitting's number for ordering, or none for an issue brief. */
 const sittingNumber = (sitting: string): number => {
@@ -951,6 +1083,8 @@ export function recentOf(
       minutes: totals === null ? null : Number(totals[2]),
       usd: totals === null ? null : Number(totals[1]),
       endedMs: f.mtimeMs,
+      split: phaseSplit(f.text),
+      plan: 'unread',
     })
     if (out.length === RECENT_LIMIT) break
   }
@@ -1087,8 +1221,12 @@ export function blockedOf(input: {
   handoffs?: Readonly<Record<string, string>>
   /** Each red deploy's failed strip stage, by run. */
   deployStages?: Readonly<Record<string, string>>
+  /** Each sitting's plan cost, or null when the ledger could not be read. */
+  plans?: Readonly<Record<string, number>> | null
+  /** Each run's `.launches` file, by run name. */
+  launchLogs?: Readonly<Record<string, string>>
 }): { blocks: Block[]; drawn: Set<string> } {
-  const { raw, endings, afters, handoffs = {}, deployStages = {} } = input
+  const { raw, endings, afters, handoffs = {}, deployStages = {}, plans = null, launchLogs = {} } = input
   const running = new Set(raw.running.map(r => sittingOf(r.brief).sitting))
   const queued = new Map(raw.queued.map(q => [sittingOf(q.brief).sitting, q]))
   const onMain = new Map(Object.keys(afters).map(k => [sittingOf(k).sitting, k]))
@@ -1169,7 +1307,9 @@ export function blockedOf(input: {
       slug: slugOf.get(h.sitting) ?? stuck.get(h.sitting)?.slug ?? '',
       after: afterOf(h.sitting),
     }))
-    blocks.push(blockFace(root, info, kind, holds, handoffs, deployStages))
+    const log = info === undefined ? undefined : launchLogs[info.base]
+    const history = { plan: planOf(plans, root), launches: log === undefined ? null : launchCount(log) }
+    blocks.push({ ...blockFace(root, info, kind, holds, handoffs, deployStages), ...history })
   }
   blocks.sort((a, b) => b.holds.length - a.holds.length || b.endedMs - a.endedMs)
   const drawn = new Set<string>()
@@ -1259,7 +1399,7 @@ function blockFace(
   holds: Held[],
   handoffs: Readonly<Record<string, string>>,
   deployStages: Readonly<Record<string, string>>,
-): Block {
+): Omit<Block, 'plan' | 'launches'> {
   const outcome = info?.end.outcome ?? ''
   const totals = TOTALS.exec(outcome)
   const sentence = totals === null ? outcome : outcome.slice(0, totals.index)
@@ -1294,6 +1434,25 @@ function blockFace(
   if (kind === 'split') return { ...base, headline: `${root} is over its size ceiling`, why, next: `split the brief, then relaunch ${root}` }
   // A broken run with no stop line reads the launcher's outcome sentence.
   return { ...base, headline: `${root}: the run broke`, why: stops.length > 0 ? why : sentence, next: `read the log, then relaunch ${root}` }
+}
+
+/** How many launches a `.launches` file records: one `launch: <n> <fresh|relaunch> slot <k> at <UTC time>` line each. */
+export const launchCount = (text: string): number => text.split('\n').filter(l => /^launch: \d+ /.test(l)).length
+
+const ORDINAL_SUFFIX: Record<number, string> = { 1: 'st', 2: 'nd', 3: 'rd' }
+
+/** `1st`, `2nd`, `3rd`, `4th`, and `11th` to `13th`. */
+const ordinal = (n: number): string => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : (ORDINAL_SUFFIX[n % 10] ?? 'th')}`
+
+/**
+ * What a block's why-line adds after its cost: the plan cost and which launch
+ * stopped, ` +$11.36 plan · 1st launch`, each only where its data exists.
+ * Empty when neither does.
+ */
+export function historyTag(k: Pick<Block, 'plan' | 'launches'>): string {
+  const parts = [typeof k.plan === 'number' ? `+${money(k.plan)} plan` : '', k.launches !== null && k.launches > 0 ? `${ordinal(k.launches)} launch` : '']
+  const said = parts.filter(p => p !== '')
+  return said.length === 0 ? '' : ` ${said.join(' · ')}`
 }
 
 /** How long ago an instant was: `24m ago`, `5h12m ago`, `3d ago` past two days. */
@@ -1398,8 +1557,11 @@ export function tileFace(value: string, label: string): TileFace {
   return { top: top.padStart(width), bottom: bottom.padStart(width), rule: '─'.repeat(width), label: label.padEnd(width) }
 }
 
-/** Spend over a span: a commit's cost over its window, or a ship's overhead over its own. */
-export type Spend = { startMs: number; endMs: number; usd: number }
+/**
+ * Spend over a span: a commit's cost over its window, or a ship's overhead over its own. `phase` and
+ * `sitting` are the record's, or null when it has none or `sitting` is not a whole number.
+ */
+export type Spend = { startMs: number; endMs: number; usd: number; kind: 'commit' | 'ship'; phase: string | null; sitting: number | null }
 
 /**
  * The spends in token-ledger's JSON lines: each commit's `cost.usd` and each
@@ -1417,12 +1579,42 @@ export function ledgerSpends(text: string): Spend[] {
       continue
     }
     if (typeof rec !== 'object' || rec === null) continue
-    const r = rec as { kind?: unknown; ts?: unknown; window?: { start?: unknown }; cost?: { usd?: unknown }; overhead?: { usd?: unknown } }
+    const r = rec as {
+      kind?: unknown
+      ts?: unknown
+      phase?: unknown
+      sitting?: unknown
+      window?: { start?: unknown }
+      cost?: { usd?: unknown }
+      overhead?: { usd?: unknown }
+    }
     const usd = r.kind === 'commit' ? r.cost?.usd : r.kind === 'ship' ? r.overhead?.usd : undefined
     const endMs = typeof r.ts === 'string' ? Date.parse(r.ts) : NaN
     if (typeof usd !== 'number' || !Number.isFinite(usd) || !Number.isFinite(endMs)) continue
     const start = typeof r.window?.start === 'string' ? Date.parse(r.window.start) : NaN
-    out.push({ startMs: Number.isFinite(start) && start < endMs ? start : endMs, endMs, usd })
+    out.push({
+      startMs: Number.isFinite(start) && start < endMs ? start : endMs,
+      endMs,
+      usd,
+      kind: r.kind === 'commit' ? 'commit' : 'ship',
+      phase: typeof r.phase === 'string' ? r.phase : null,
+      sitting: typeof r.sitting === 'number' && Number.isInteger(r.sitting) ? r.sitting : null,
+    })
+  }
+  return out
+}
+
+/**
+ * Each sitting's plan cost, by sitting: the commits with `phase: "plan"` that
+ * carry that `sitting`. A plan ship carries no sitting of its own, and a
+ * session is no commit, so neither counts.
+ */
+export function planCosts(spends: readonly Spend[]): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const s of spends) {
+    if (s.kind !== 'commit' || s.phase !== 'plan' || s.sitting === null) continue
+    const key = `S${s.sitting}`
+    out[key] = Math.round(((out[key] ?? 0) + s.usd) * 100) / 100
   }
   return out
 }
@@ -1480,24 +1672,6 @@ export function agoShort(fromMs: number, toMs: number): string {
   if (minutes < 60) return `${minutes}m`
   if (minutes < 48 * 60) return `${Math.floor(minutes / 60)}h`
   return `${Math.floor(minutes / (24 * 60))}d`
-}
-
-// The part cells a cost meter steps through between full ones, emptiest first.
-const METER_PARTS = '⡀⣀⣄⣤⣦⣶⣷'
-
-/**
- * A cost as a braille meter `width` cells wide, scaled to `max`: full `⣿`
- * cells, one part cell for the remainder, then the `⣀` baseline. Any cost
- * above zero shows at least the emptiest part cell.
- */
-export function costMeter(usd: number, max: number, width: number): { fill: string; rest: string } {
-  if (max <= 0 || usd <= 0) return { fill: '', rest: '⣀'.repeat(width) }
-  const cells = Math.min(width, (usd / max) * width)
-  const full = Math.floor(cells + 1e-9)
-  const rem = cells - full
-  const part = full < width && rem > 1e-9 ? (METER_PARTS[Math.floor(rem * METER_PARTS.length)] ?? '') : ''
-  const fill = '⣿'.repeat(full) + part
-  return { fill, rest: '⣀'.repeat(width - fill.length) }
 }
 
 /** The time between two instants: `2h38m`, or `24m` under an hour. */
