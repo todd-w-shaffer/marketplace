@@ -967,8 +967,16 @@ export const DEPLOY_LIVE = 'live'
 export const deployStateOf = (conclusion: string, failedJobs: readonly string[]): string =>
   conclusion === 'success' ? DEPLOY_LIVE : deployStageOf(failedJobs)
 
-/** The question a stop handoff asks on its `**Question: …**` line, or empty. */
-export const handoffQuestion = (handoff: string): string => /\*\*Question: (.+?)\*\*/.exec(handoff)?.[1]?.trim() ?? ''
+/**
+ * The question a stop handoff asks, or empty. The label is bold and may name who answers:
+ * `**Question: …**` holds the question inside the bold, `**Question for Todd:** …` after it, to the line's end.
+ */
+export const handoffQuestion = (handoff: string): string => {
+  const m = /\*\*Question(?: [^:*\n]+)?:(\*\*)?[ \t]*(.+)$/m.exec(handoff)
+  if (m === null) return ''
+  const text = m[1] === undefined ? (m[2] ?? '').replace(/\*\*\s*$/, '') : (m[2] ?? '')
+  return text.trim()
+}
 
 /** The stop a handoff names on its last `**Stop:**` line, or empty. */
 export const handoffStop = (handoff: string): string => [...handoff.matchAll(/\*\*Stop:\*\* (\d+)/g)].pop()?.[1] ?? ''

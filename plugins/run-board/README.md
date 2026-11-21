@@ -52,7 +52,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or
   queues it, and its brief is still on `origin/main`, or it is a red deploy (`shipped; deploy failed`) with no live
   run after it, whose run's latest attempt did not pass. Each block shows a kind tag by who acts (`? you` a decision, `÷ plan` a split, `✗ code` a red
-  deploy, `! run` anything else), a headline (a decision quotes the handoff's `**Question:**` line, read from
+  deploy, `! run` anything else), a headline (a decision quotes the handoff's `**Question:**` or `**Question for Todd:**` line, read from
   `handoff/<name>.md` in the run's worktree), one line of why, a pipeline strip (savor, cycles, push, staging,
   prod) marking where it broke, the chain it holds in order with why each waits, and one `next` line. The kind is
   status.json's `finished[].kind`, else the `kind:` line above the progress file's last `finished:` line. A queued

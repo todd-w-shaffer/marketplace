@@ -11,6 +11,7 @@ import {
   cycleBlobs,
   cycleCount,
   dotDigits,
+  handoffQuestion,
   buildBoard,
   buildLoop,
   deckDetail,
@@ -872,4 +873,12 @@ test("the pane draws S625's block above a folded recent, and a header press keep
   await ui.press({ key: 'fold-recent' })
   expect(sets).toEqual([{ recent: false }, { recent: false }])
   await ui.unmount()
+})
+
+test('a handoff question reads both the bare and the addressed label', () => {
+  expect(handoffQuestion('**Question: how long does an empty panel last?**')).toBe('how long does an empty panel last?')
+  expect(
+    handoffQuestion("**Question for Todd:** How should the home page's viewer behave when more than one gallery shows all photos?\n\nRule on it."),
+  ).toBe("How should the home page's viewer behave when more than one gallery shows all photos?")
+  expect(handoffQuestion('**Stop:** 6. No question here.')).toBe('')
 })
