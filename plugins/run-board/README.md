@@ -25,14 +25,28 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   time zone), then three figures drawn as 3-by-7 dot numerals in braille, running, queued and on deck,
   each in its section's colour and grey at zero. Each figure sits right-aligned over a thin dim rule as wide
   as the tile, with its label under the rule in plain lowercase grey (other surfaces than the terminal draw the label at
-  caption size). The cost in flight stays on the hint line. One line under the figures shows spend in whole dollars with
-  thousands separators over the last 24 hours, 7 days and 30 days, and in all, `spend $608 24h · $4,629 7d ·
-  $11,964 30d · $15,742 all`, and is absent when the ledger cannot be read. It reads
+  caption size). The cost in flight stays on the hint line. One line under the figures is a spend sparkline: a bar
+  per local day for the last 14 days, `▁` to `█`, today's peach, a day with spend grey and an empty day faint, then
+  `$568 today · $7.1k 14d`, today's spend and the 14 days', a figure of $1,000 or more after rounding to a tenth of
+  a thousand reading `$N.Nk`. Each spend falls in the local day of its time, in the `date +%z` offset (UTC when it
+  does not parse), and a spend after now in none. The bars scale to the second-highest day, the 90th percentile by
+  nearest rank, so one runaway day tops out and the rest keep their shape; with under two days of spend they scale
+  to the highest. The figures keep their width and the bars give way first. The line is absent when the ledger
+  cannot be read. It reads
   from `~/.claude/token-ledger.jsonl` (each commit's `cost.usd` and each ship's `overhead.usd`,
   across every project). The ledger outgrows one 4 MiB read, so the board reads it once in 3 MiB chunks,
   then only the bytes past where it stopped; a file that shrank is read again from the start.
 - **`/board`** opens a pane with a rounded card per slot that holds a run: its progress bar, phase line,
-  time and cost. A free slot has no card. Below them comes the queue as a tree of who waits on whom: each
+  time and cost. A free slot has no card. Then EPICS, drawn when a live brief has an `Epic:` line: one row per
+  epic, `design system  ■■□□□□  1/6  ● S693 running`. The label is the plan epic's title, from the `### E2: design
+  system` heading of `docs/plans/<plan>.md` on `origin/main`, the plan being the part of `dashboard/E2` before the
+  last `/` and the heading's id the part after it, matched exactly; a plan file or heading that is missing leaves
+  the raw `Epic:` value. Each sitting is a cell: a green `■` shipped (each claim in `docs/briefs/sittings.json`
+  whose record's `epic` names the epic), a peach `■` running and a faint `□` to come (each brief on `origin/main`
+  whose `Epic:` line names it, a running one kept after its archive), a sitting in both counting once, as shipped.
+  Labels pad to the widest label and cells to the widest epic, ending in `…` past the room. Then `shipped/total`,
+  and where the next sitting stands: `● S693 running` in peach, `blocked at S684` in red, `‖ held` in yellow,
+  `queued` or `on deck`. Epics go by their lowest sitting still to come. Below them comes the queue as a tree of who waits on whom: each
   running run that something waits on is a root, and each entry hangs under the running or queued sitting
   on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`). Its note names only
   the waits the tree does not draw: each running, queued or held sitting on its `After:` line other than its
@@ -45,6 +59,14 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   card draws when something is queued or a block holds something. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
   A queue row whose brief was split reads `split ×2`: the briefs on `origin/main` whose `Split from:` line names it,
   and the archived claims in `docs/briefs/sittings.json` whose `split_from` list does, each child once.
+  Each queue and on-deck row ends in a box pinned to its right edge: a square per cycle the brief plans, or a dim
+  `·` with no cycle headings, in a slot as wide as the most cycles, then the projected build cost, `~$23`,
+  right-aligned. The squares are blue queued, yellow held, peach for a running brief's cycles done or under way and
+  grey for the rest, and an on-deck brief's take its group's colour. The cost is the median cost per cycle of
+  RECENT's runs times the brief's cycles: each run's cost over the highest `cycle k` its `/commit` lines name, among
+  runs with both. It reads `~$?` when the cycles or the median are unknown, and dim yellow on a held row. The box is
+  one width across the queue and on deck, so the costs end in one column; the row's note sits between the name
+  and the box and gives way first.
   Then the TIMELINE: a lane per dispatcher slot (`slot 1` to the highest slot the board sees), then `you` and
   `held`, over a window from 8h before now to 6h after, under even-hour labels (`2p`, `12a`) and with a peach
   now-line. It draws in braille, 2 dots a cell. A bar is `⣿` cells in its colour with its last dot column blank:
@@ -103,11 +125,12 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never
   appears on deck. A red deploy's strip reads its latest attempt with `gh run view`: once for a run older than the
   newest live run, and again each minute for one that still blocks, so a re-run that passes clears its block.
-- **Folding.** The headers of blocked, queued, on deck, timeline and recent are Buttons on `b`, `q`, `d`, `t` and `r`
-  (with the pane focused). The timeline starts open and never folds itself. A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
+- **Folding.** The headers of blocked, epics, queued, on deck, timeline and recent are Buttons on `b`, `e`, `q`, `d`, `t`
+  and `r` (with the pane focused). The epics and the timeline start open and never fold themselves; folded, epics
+  keeps `design system 1/3 · nav 0/7`. A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
   otherwise recent and on deck fold themselves while BLOCKED shows.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
-  on base, each section in a card on mantle (the lanes, the queue, on deck, the timeline, recent), green done, peach in flight, surface grey to come, lavender headings,
+  on base, each section in a card on mantle (the lanes, the epics, the queue, on deck, the timeline, recent), green done, peach in flight, surface grey to come, lavender headings,
   blue queued (an on-deck wait that is queued included), mauve on deck, yellow for a block's chain in the queue, on deck's groups in green, yellow and red, and peach
   for a recent run over twice the median. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint
@@ -119,8 +142,9 @@ Every 5 seconds it reads `~/Library/Logs/shootsfilm-autopilot/status.json` (writ
 to check that the dispatcher and each run are alive. A run whose process is gone without a finished
 line shows as `launcher gone`.
 
-For ON DECK it runs `git ls-tree -r origin/main docs/briefs/` in `~/Desktop/apps/shootsfilm` and reads each
-brief's header with `git cat-file`, once per blob. It never fetches: a push from any worktree of the checkout
+For ON DECK, the cycle squares and EPICS it runs `git ls-tree -r origin/main docs/briefs/ docs/plans/` in
+`~/Desktop/apps/shootsfilm` and reads each brief, `sittings.json` and each plan with `git cat-file`, once per blob.
+A blob that fails to read gives no count and no title, and is read again on the next poll. It never fetches: a push from any worktree of the checkout
 moves `origin/main`, and a brief pushed from another machine shows after the next fetch.
 
 For the loop it reads `~/Library/Logs/shootsfilm-archloop/.lock/pid`, and lists the newest run directory

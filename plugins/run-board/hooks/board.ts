@@ -1,4 +1,4 @@
-import type { BarTone, Block, BlockKind, Board, Deck, DeckMode, Done, Ended, FoldCard, Folds, Held, Loop, Phase, PhaseSplit, PhaseState, PlanCost, Run, Stage, StripCell, Timeline, TimelineBar, Waiting } from '../types'
+import type { BarTone, Block, BlockKind, Board, BriefCost, Deck, DeckMode, Done, Ended, EpicCell, EpicRow, EpicState, FoldCard, Folds, Held, Loop, Phase, PhaseSplit, PhaseState, PlanCost, Run, Stage, StripCell, Timeline, TimelineBar, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
@@ -310,6 +310,21 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
   return [{ label: 'savor', short: 'savor', state: savor }, ...phases]
 }
 
+/**
+ * The highest `cycle k` that a `/commit` line in a progress file names, or 0
+ * when none names one. A `/commit` that names no cycle adds nothing, so this
+ * is not `phasesOf`'s count.
+ */
+export function namedCycles(progress: string): number {
+  let most = 0
+  for (const line of progress.split('\n')) {
+    const commit = /^skill: commit-skill:commit\b(.*)$/.exec(line)
+    const k = commit === null ? null : /\bcycle (\d+)/i.exec(commit[1] ?? '')
+    if (k) most = Math.max(most, Number(k[1]))
+  }
+  return most
+}
+
 // The stamp the launcher writes above each progress write: `at: 2026-11-21T09:39:39Z`.
 const STAMP = /^at: (.*)$/
 
@@ -467,6 +482,15 @@ export function phaseName(p: Phase, room: number): string {
 /** `n` dollars in whole dollars with thousands separators: `$4,629`. */
 export const dollars = (n: number): string => `$${Math.round(n).toLocaleString('en-US')}`
 
+/**
+ * `n` dollars as `dollars` gives them, or as `$N.Nk` when they come to $1,000
+ * or more after rounding to a tenth of a thousand: 999.6 gives `$1.0k`.
+ */
+export function shortDollars(n: number): string {
+  const k = Math.round(n / 100) / 10
+  return k >= 1 ? `$${k.toFixed(1)}k` : dollars(n)
+}
+
 /** The phase in flight's short name, or `done` once every phase is. */
 export const livePhase = (phases: readonly Phase[]): string => phases.find(p => p.state === 'live')?.short ?? 'done'
 
@@ -569,7 +593,7 @@ export function buildBoard(
     onDeck?: Deck[]
     /** Each running brief's newest tool call, read from its log. */
     tools?: Readonly<Record<string, string>>
-    /** Each brief's cycle count, read from `origin/main`. */
+    /** Each brief's cycle count by its key, read from `origin/main`; a brief whose blobs could not be read is absent. */
     cycles?: Readonly<Record<string, number>>
     /** The machine's UTC offset as `date +%z` prints it, `-0500`. */
     utcOffset?: string
@@ -589,6 +613,12 @@ export function buildBoard(
     launches?: Readonly<Record<string, number>>
     /** How many briefs were split from each sitting, by sitting. */
     splits?: Readonly<Record<string, number>>
+    /** Each brief's `Epic:` value by its key: every brief on `origin/main`, and each running one after its archive. */
+    epics?: Readonly<Record<string, string>>
+    /** The epic each archived claim in `sittings.json` shipped on, by sitting. */
+    recordedEpics?: Readonly<Record<string, string>>
+    /** Each plan's epic titles by id, by plan: `dashboard` gives `{ E2: 'design system' }`. */
+    planTitles?: Readonly<Record<string, Readonly<Record<string, string>>>>
   } = {},
 ): Board {
   const { loop = null, tools = {}, cycles = {}, utcOffset = '', spend = null, afters = {}, plans = null } = extra
@@ -627,6 +657,26 @@ export function buildBoard(
     reason: q.reason,
     after: afters[briefKey(q.brief)] ?? [],
   }))
+  // Each brief's cycles and cost: a brief on main, and each running or queued one.
+  const perCycle = costPerCycle(recent)
+  const costs: Record<string, BriefCost> = {}
+  const costOf = (key: string): BriefCost => {
+    const n = cycles[key] ?? null
+    return { cycles: n, usd: n !== null && n > 0 && perCycle !== null ? perCycle * n : null }
+  }
+  for (const k of Object.keys(afters)) costs[briefName(k).sitting] = costOf(k)
+  for (const r of [...raw.running, ...raw.queued]) costs[sittingOf(r.brief).sitting] = costOf(briefKey(r.brief))
+  // Each live sitting's state for the epics card; a later line outranks an earlier one.
+  const states = new Map<string, EpicState['kind']>()
+  for (const d of onDeck) states.set(d.sitting, 'deck')
+  for (const q of raw.queued) states.set(sittingOf(q.brief).sitting, 'queued')
+  for (const k of blocks) for (const h of k.holds) states.set(h.sitting, 'held')
+  for (const k of blocks) states.set(k.sitting, 'blocked')
+  for (const r of raw.running) states.set(sittingOf(r.brief).sitting, 'running')
+  const live = Object.entries(extra.epics ?? {}).map(([key, epic]) => {
+    const { sitting } = briefName(key)
+    return { sitting, epic, state: states.get(sitting) ?? 'deck' }
+  })
   const finished: Done[] = [...raw.finished]
     .sort((a, b) => b.entry - a.entry)
     .map(f => ({ entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped: f.status === 0, detail: outcomeDetail(outcomeOf(f)) }))
@@ -643,6 +693,8 @@ export function buildBoard(
     onDeck,
     blocked: blocks,
     splits: { ...extra.splits },
+    epics: epicRows(live, extra.recordedEpics ?? {}, extra.planTitles ?? {}),
+    costs,
     timeline: timelineOf({
       raw,
       running,
@@ -1234,12 +1286,102 @@ export function onDeckOf(briefs: readonly (BriefFile & { text: string })[], held
     .filter(b => !taken.has(briefKey(b.path)))
     .map(b => {
       const { epic, after, mode, why } = briefHeader(b.text)
-      const key = briefKey(b.path)
-      const issue = /^kickoff-(\d+)-(.+)$/.exec(baseName(key))
-      const name = issue ? { sitting: `#${issue[1] ?? ''}`, slug: issue[2] ?? '' } : sittingOf(key)
-      return { ...name, lane: epic === '' ? 'fix' : 'epic', epic, after, mode, why }
+      return { ...briefName(briefKey(b.path)), lane: epic === '' ? 'fix' : 'epic', epic, after, mode, why }
     })
     .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
+}
+
+/** A brief's sitting and slug as on deck names them: `S342`, or `#527` for an issue brief. */
+function briefName(key: string): { sitting: string; slug: string } {
+  const issue = /^kickoff-(\d+)-(.+)$/.exec(baseName(key))
+  return issue ? { sitting: `#${issue[1] ?? ''}`, slug: issue[2] ?? '' } : sittingOf(key)
+}
+
+/**
+ * The epic each archived claim in `sittings.json` shipped on, by sitting: its
+ * record's `epic`, trimmed. A claim with no record or no epic is absent, and a
+ * `sittings.json` that does not parse gives none.
+ */
+export function recordedEpics(sittingsJson: string): Record<string, string> {
+  let data: unknown = null
+  try {
+    data = JSON.parse(sittingsJson)
+  } catch {
+    data = null
+  }
+  const out: Record<string, string> = {}
+  for (const [id, claim] of Object.entries(obj(obj(data)?.claims) ?? {})) {
+    const epic = obj(obj(claim)?.record)?.epic
+    if (typeof epic === 'string' && epic.trim() !== '') out[afterSittings(id)[0] ?? id] = epic.trim()
+  }
+  return out
+}
+
+/** The plan files in an `ls-tree -r` listing: `docs/plans/dashboard.md` is the plan `dashboard`. */
+export function planBlobs(lsTree: string): { plan: string; sha: string }[] {
+  const out: { plan: string; sha: string }[] = []
+  for (const line of lsTree.split('\n')) {
+    const m = /^\d+ blob ([0-9a-f]+)\tdocs\/plans\/(.+)\.md$/.exec(line)
+    if (m) out.push({ plan: m[2] ?? '', sha: m[1] ?? '' })
+  }
+  return out
+}
+
+/** Each epic's title in a plan, by its id, from its `### E2: design system` heading; the first heading of an id wins. */
+export function planHeadings(text: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const m of text.matchAll(/^### (E\d+[a-z]?): (.+)$/gm)) {
+    const id = m[1] ?? ''
+    if (!Object.hasOwn(out, id)) out[id] = (m[2] ?? '').trim()
+  }
+  return out
+}
+
+/**
+ * An epic's label: its plan epic's title, read from the plan named by the
+ * part before the last `/` and the heading whose id is the part after it.
+ * A value with no `/`, a plan the board has no headings for, and an id the
+ * plan has no heading for each give the value itself.
+ */
+export function epicLabel(epic: string, planTitles: Readonly<Record<string, Readonly<Record<string, string>>>>): string {
+  const cut = epic.lastIndexOf('/')
+  if (cut === -1) return epic
+  const titles = planTitles[epic.slice(0, cut)]
+  const id = epic.slice(cut + 1)
+  return titles !== undefined && Object.hasOwn(titles, id) ? (titles[id] ?? epic) : epic
+}
+
+/**
+ * The epics card's rows: one per epic that a live sitting names, the one
+ * whose lowest sitting still to come is lowest first. An epic's shipped
+ * sittings come from `recorded`; its live ones from `live`, each running,
+ * queued, on deck, blocked or held, and a sitting in both counts once, as
+ * shipped. The next sitting is the lowest running one, else the lowest still
+ * to come, and none once every sitting has shipped.
+ */
+export function epicRows(
+  live: readonly { sitting: string; epic: string; state: EpicState['kind'] }[],
+  recorded: Readonly<Record<string, string>>,
+  planTitles: Readonly<Record<string, Readonly<Record<string, string>>>>,
+): EpicRow[] {
+  const bySitting = (a: string, b: string): number => sittingNumber(a) - sittingNumber(b) || a.localeCompare(b)
+  const epics = [...new Set(live.filter(l => l.epic !== '').map(l => l.epic))]
+  const rows = epics.map(epic => {
+    const shipped = Object.keys(recorded).filter(s => recorded[s] === epic).sort(bySitting)
+    const rest = live.filter(l => l.epic === epic && !Object.hasOwn(recorded, l.sitting)).sort((a, b) => bySitting(a.sitting, b.sitting))
+    const running = rest.filter(l => l.state === 'running')
+    const next = running[0] ?? rest[0]
+    const cells: EpicCell[] = [...shipped.map((): EpicCell => 'shipped'), ...running.map((): EpicCell => 'running'), ...rest.filter(l => l.state !== 'running').map((): EpicCell => 'todo')]
+    return {
+      epic,
+      label: epicLabel(epic, planTitles),
+      cells,
+      shipped: shipped.length,
+      next: next === undefined ? null : { kind: next.state, sitting: next.sitting },
+      lowest: rest[0]?.sitting ?? '',
+    }
+  })
+  return rows.sort((a, b) => bySitting(a.lowest, b.lowest) || a.label.localeCompare(b.label)).map(({ lowest: _, ...row }) => row)
 }
 
 /** The sittings an `After:` line names, such as `S390, S393`, in capitals. */
@@ -1566,7 +1708,8 @@ export function recentCandidates(files: readonly ProgressFile[], running: readon
  * files' last `finished:` line. A stop and a red deploy are left out: they
  * belong to BLOCKED. These files outlive the dispatcher, whose finished list
  * starts empty each time one starts. The lane comes from that list while it
- * still holds the run.
+ * still holds the run, and the cycle count from `namedCycles`: an archived
+ * brief has left docs/briefs/, so no brief is read.
  */
 export function recentOf(
   files: readonly (ProgressFile & { text: string })[],
@@ -1589,6 +1732,7 @@ export function recentOf(
       endedMs: f.mtimeMs,
       split: phaseSplit(f.text),
       plan: 'unread',
+      cycles: namedCycles(f.text),
     })
     if (out.length === RECENT_LIMIT) break
   }
@@ -2149,6 +2293,54 @@ export function spendTotals(spends: readonly Spend[], now: number): SpendTotals 
   }
 }
 
+// How many local days the header's sparkline sums.
+export const SPARK_DAYS = 14
+
+/**
+ * What the spends came to on each of the last SPARK_DAYS local days, oldest
+ * first and today last. A spend falls in the local day of its `endMs`, in the
+ * offset `date +%z` prints; an offset that does not parse sums by UTC day.
+ * One offset serves every day, so a DST change moves one day's edge by an
+ * hour. A spend after `now` falls in no day.
+ */
+export function daySums(spends: readonly Spend[], now: number, utcOffset: string): number[] {
+  const shift = (offsetMinutes(utcOffset) ?? 0) * MINUTE_MS
+  const dayOf = (ms: number): number => Math.floor((ms + shift) / DAY_MS)
+  const today = dayOf(now)
+  const sums = new Array<number>(SPARK_DAYS).fill(0)
+  for (const s of spends) {
+    const back = today - dayOf(s.endMs)
+    if (s.endMs > now || back < 0 || back >= SPARK_DAYS) continue
+    const at = SPARK_DAYS - 1 - back
+    sums[at] = (sums[at] ?? 0) + s.usd
+  }
+  return sums
+}
+
+// The sparkline's bars, lowest first.
+const SPARK_BARS = '▁▂▃▄▅▆▇█'
+
+/**
+ * A bar per day sum, scaled to the 90th-percentile day: by nearest rank over
+ * 14 days, the 13th of the sums in ascending order, zeros included, so one
+ * runaway day tops out and the rest keep their shape. With under two days of
+ * spend, the cap is the highest day. A
+ * bar is `ceil(r × 8) − 1` of `▁`–`█`, clamped to 0..7, where `r` is the day's
+ * sum over the cap, capped at 1. A day with no spend, and every day while the
+ * cap is 0, draws `▁`.
+ */
+export function sparkGlyphs(days: readonly number[]): string {
+  const sorted = [...days].sort((a, b) => a - b)
+  const spent = days.filter(d => d > 0).length
+  const cap = sorted[sorted.length - (spent < 2 ? 1 : 2)] ?? 0
+  return days
+    .map(d => {
+      const r = cap > 0 ? Math.min(1, d / cap) : 0
+      return SPARK_BARS[Math.min(7, Math.max(0, Math.ceil(r * 8) - 1))] ?? '▁'
+    })
+    .join('')
+}
+
 /**
  * An instant as a 12-hour clock in the offset `date +%z` prints: `7:41 PM`
  * at `-0500`. The engine gives a mod no time zone, so the poll reads the
@@ -2205,6 +2397,18 @@ function medianMinutes(recent: readonly Ended[]): number | null {
   const mid = Math.floor(timed.length / 2)
   if (timed.length === 0) return null
   return timed.length % 2 === 1 ? (timed[mid] ?? 0) : Math.round(((timed[mid - 1] ?? 0) + (timed[mid] ?? 0)) / 2)
+}
+
+/**
+ * The median build cost per cycle over RECENT: each run's cost over its cycle
+ * count, among runs with a cost and a count above 0. An even count's median is
+ * the unrounded mean of the two middle values. Null when no run has both.
+ */
+function costPerCycle(recent: readonly Ended[]): number | null {
+  const per = recent.flatMap(d => (d.usd === null || d.cycles <= 0 ? [] : [d.usd / d.cycles])).sort((a, b) => a - b)
+  const mid = Math.floor(per.length / 2)
+  if (per.length === 0) return null
+  return per.length % 2 === 1 ? (per[mid] ?? 0) : ((per[mid - 1] ?? 0) + (per[mid] ?? 0)) / 2
 }
 
 /**
@@ -2271,7 +2475,7 @@ export function statusLine(b: Board): string | undefined {
 }
 
 /** Each foldable card's header hotkey. */
-export const FOLD_KEY: Record<FoldCard, string> = { recent: 'r', deck: 'd', queued: 'q', blocked: 'b', timeline: 't' }
+export const FOLD_KEY: Record<FoldCard, string> = { recent: 'r', deck: 'd', queued: 'q', blocked: 'b', timeline: 't', epics: 'e' }
 
 /**
  * Whether a card is folded: as set by hand, else folded for recent and on
@@ -2305,6 +2509,7 @@ export function foldSummary(card: FoldCard, b: Board): string {
       .filter(p => p !== '')
       .join(' · ')
   }
+  if (card === 'epics') return b.epics.map(e => `${e.label} ${e.shipped}/${e.cells.length}`).join(' · ')
   if (card === 'deck')
     return DECK_GROUPS.map(g => [g.label, b.onDeck.filter(d => d.mode === g.mode).length] as const)
       .filter(([, n]) => n > 0)
@@ -2321,3 +2526,4 @@ export const laneTag = (d: Done | Ended): string => (d.lane === '' ? '' : ` (${d
 export function finishedToast(d: Done): string {
   return `${d.isShipped ? '✓' : '✗'} ${d.sitting} ${d.slug}${laneTag(d)} · ${d.detail}`
 }
+

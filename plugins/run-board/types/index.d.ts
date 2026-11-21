@@ -60,6 +60,8 @@ export type Ended = {
   /** The run's time as savor, cycles and ship cells, or null when its progress file holds no times. */
   split: PhaseSplit | null
   plan: PlanCost
+  /** The highest `cycle k` a `/commit` line in its progress file names, or 0 when none names one. */
+  cycles: number
 }
 
 /** A run's time in RECENT_SPLIT_CELLS cells: savor, then the cycles with simplify and the xhigh review, then the ship. */
@@ -105,7 +107,7 @@ export type Block = {
 }
 
 /** Each foldable card, by the hotkey its header answers. */
-export type FoldCard = 'recent' | 'deck' | 'queued' | 'blocked' | 'timeline'
+export type FoldCard = 'recent' | 'deck' | 'queued' | 'blocked' | 'timeline' | 'epics'
 
 /** The folds set by hand: true folded, false unfolded. A card absent follows its default. */
 export type Folds = Partial<Record<FoldCard, boolean>>
@@ -172,12 +174,40 @@ export type Timeline = {
   held: { label: string; count: number; ms: number | null }
 }
 
+/** A sitting's cell on an epic's row: shipped, running, or still to come. */
+export type EpicCell = 'shipped' | 'running' | 'todo'
+
+/** Where an epic's next sitting stands: running, the root of a block, held by one, queued, or on deck. */
+export type EpicState = { kind: 'running' | 'blocked' | 'held' | 'queued' | 'deck'; sitting: string }
+
+/** One row of the epics card: an epic that a live brief's `Epic:` line names. */
+export type EpicRow = {
+  /** The `Epic:` value, such as `dashboard/E2`. */
+  epic: string
+  /** The plan epic's title, such as `design system`, or the `Epic:` value when the plan names none. */
+  label: string
+  /** A cell per sitting: the shipped ones, then the running ones, then the rest, each by sitting. */
+  cells: EpicCell[]
+  shipped: number
+  /** The epic's next sitting: a running one, else the lowest sitting still to come; null once every one has shipped. */
+  next: EpicState | null
+}
+
+/**
+ * A brief's planned cycles and projected build cost. `cycles` is null when its brief could not be read;
+ * `usd` is null when the cycles are 0 or unknown, or RECENT gives no cost per cycle.
+ */
+export type BriefCost = { cycles: number | null; usd: number | null }
+
 export type Board = {
   checkedAt: number
   /** `checkedAt` on a 12-hour clock in the machine's offset, `7:41 PM`. */
   clock: string
-  /** Spend over the last day, week and month, and in all, from token-ledger; null when it could not be read. */
-  spend: { day: number; week: number; month: number; all: number } | null
+  /**
+   * Spend over the last day, week and month, and in all, and `days`, the sums of the last 14 local days, oldest
+   * first, today last, from token-ledger; null when it could not be read.
+   */
+  spend: { day: number; week: number; month: number; all: number; days: number[] } | null
   isDispatcherLive: boolean
   loop: Loop | null
   running: Run[]
@@ -190,6 +220,10 @@ export type Board = {
   /** How many briefs were split from each sitting, by sitting; a sitting split from none is absent. */
   splits: Record<string, number>
   timeline: Timeline
+  /** One row per epic a live brief names, lowest sitting still to come first. */
+  epics: EpicRow[]
+  /** Each brief's cycles and projected cost, by sitting: every running, queued and on-main brief. */
+  costs: Record<string, BriefCost>
 }
 
 declare module 'claude-code' {

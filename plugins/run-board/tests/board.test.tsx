@@ -58,6 +58,14 @@ import {
   splitCounts,
   TIMELINE_AHEAD_MS,
   TIMELINE_BACK_MS,
+  daySums,
+  namedCycles,
+  planBlobs,
+  planHeadings,
+  recordedEpics,
+  shortDollars,
+  sittingsBlob,
+  sparkGlyphs,
 } from '../hooks/board'
 import type { Deck, Ended, Run } from '../types'
 
@@ -870,7 +878,7 @@ test('a handoff question reads both the bare and the addressed label', () => {
 })
 
 // The shape the pane's board atom is stored under; it moves with the Board type.
-const BOARD_SHAPE = 'board-13'
+const BOARD_SHAPE = 'board-14'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>
@@ -1082,10 +1090,14 @@ test('a red deploy that holds nothing draws no queue root and no chain line', as
 test('the header draws three figures and one spend line, and a running card has no grey last sentence', async ($, on) => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
-  const spend = { day: 608.2, week: 4629, month: 11964, all: 15742 }
+  // The October commit is 11 days back and the only day of spend; the November ones are after now.
+  const spends = ledgerSpends(LEDGER)
+  const spend = { ...spendTotals(spends, NOW), days: daySums(spends, NOW, '') }
   const b = buildBoard(raw, { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 }, new Set([5147, 21491]), NOW, { spend })
   const { ui } = await mountBoard($, on, b)
-  expect(await has(ui, 'spend $608 24h · $4,629 7d · $11,964 30d · $15,742 all')).toBe(true)
+  expect(await has(ui, `spend ▁▁█${'▁'.repeat(11)}`)).toBe(true)
+  expect(await has(ui, '$0 today · $9 14d')).toBe(true)
+  expect(await has(ui, '24h')).toBe(false)
   for (const label of ['running', 'queued', 'on deck']) expect(await has(ui, label)).toBe(true)
   expect(await has(ui, '$ in flight')).toBe(false)
   expect(await has(ui, 'The archive commit is pushing.')).toBe(false)
@@ -1097,6 +1109,8 @@ test('spend that could not be read draws no spend line', async ($, on) => {
   if (raw === null) throw new Error('status did not parse')
   const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([5147]), NOW, { spend: null }))
   expect(await has(ui, 'spend ')).toBe(false)
+  expect(await has(ui, '14d')).toBe(false)
+  expect((await ui.findAll({ type: 'Text' })).some((t: { text?: string }) => /[▁-█]/.test(t.text ?? ''))).toBe(false)
   expect(await has(ui, 'queued')).toBe(true)
   await ui.unmount()
 })
@@ -1150,6 +1164,7 @@ const endedOf = (rows: [string, number | null, number | null][]): Ended[] =>
     endedMs: NOW - ((i + 1) * 12 * HOUR) / rows.length,
     split: null,
     plan: 'unread',
+    cycles: 0,
   }))
 const recentBoard = (recent: Ended[], extra: Parameters<typeof buildBoard>[4] = {}) =>
   buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { recent, ...extra })
@@ -1772,5 +1787,350 @@ test('a brief blob that fails to read is asked for again on the next poll', asyn
   await clock.advance(5000)
   const second = await mount()
   expect(await has(second, 'split ×2')).toBe(true)
+  await second.unmount()
+})
+
+// A brief's header and its cycle headings, as the planner writes them.
+const briefText = (sitting: string, epic: string, after: string, cycles: number): string =>
+  [
+    `# ${sitting}`,
+    '',
+    '**Mode: autopilot.**',
+    '',
+    ...(epic === '' ? [] : [`Epic: ${epic}`]),
+    ...(after === '' ? [] : [`After: ${after}`]),
+    '',
+    '## The cycles',
+    ...Array.from({ length: cycles }, (_, i) => `### Cycle ${i + 1}: c${i + 1}`),
+  ].join('\n')
+
+// The epics as the artboard draws them: S692 shipped on dashboard/E2 with its
+// brief still listed, S693 running and S694 queued under it, S684 stopped and
+// holding S685 on multi-gallery/E4, S686 queued on dashboard/E1, S650 queued
+// with no cycle headings, and S699 on deck on dashboard/E3, which the plan
+// gives no heading. Each is its blob, its brief, its epic, its After line and its cycles.
+const EPIC_BRIEFS: [string, string, string, string, number][] = [
+  ['e692', 's692-design-tokens', 'dashboard/E2', '', 3],
+  ['e693', 's693-token-export', 'dashboard/E2', 'S692', 2],
+  ['e694', 's694-system-catalogue', 'dashboard/E2', 'S693', 3],
+  ['e684', 's684-home-gallery-sections', 'multi-gallery/E4', '', 2],
+  ['e685', 's685-layout-gallery-rows', 'multi-gallery/E4', 'S684', 3],
+  ['e686', 's686-dashboard-rail', 'dashboard/E1', '', 1],
+  ['e650', 's650-stray-check', '', '', 0],
+  ['e699', 's699-later-arc', 'dashboard/E3', '', 2],
+]
+// `### E10:` sits above `### E1:`, and `### E4:` names an epic of another plan.
+const DASHBOARD_PLAN = ['# Dashboard', '', '### E10: later', '', '### E1: nav', '', '### E2: design system', '', '### E4: x'].join('\n')
+const EPIC_SITTINGS = JSON.stringify({ floor: 60, claims: { s692: { slug: 'design-tokens', record: { epic: ' dashboard/E2 ' } }, s650: { slug: 'stray-check' } } })
+const EPIC_LS = [
+  ...EPIC_BRIEFS.map(([sha, file]) => `100644 blob ${sha}\t${BRIEFS}${file}.md`),
+  '100644 blob e515\tdocs/briefs/sittings.json',
+  '100644 blob e901\tdocs/plans/dashboard.md',
+].join('\n')
+const EPIC_BLOBS: Record<string, string> = {
+  ...Object.fromEntries(EPIC_BRIEFS.map(([sha, file, epic, after, cycles]) => [sha, briefText(`S${file.slice(1, 4)}`, epic, after, cycles)])),
+  e515: EPIC_SITTINGS,
+  e901: DASHBOARD_PLAN,
+}
+
+/** What the poll reads from an `ls-tree` and its blobs, for `buildBoard`. */
+const fromTree = (ls: string, blobs: Readonly<Record<string, string>>, raw: Parameters<typeof buildBoard>[0]) => {
+  const briefs = briefFiles(ls).map(f => ({ ...f, text: blobs[f.sha] ?? '' }))
+  const keyed = briefs.map(f => [briefKey(f.path), f.text] as const)
+  return {
+    onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)),
+    afters: Object.fromEntries(keyed.map(([k, text]) => [k, afterSittings(briefHeader(text).after)])),
+    cycles: Object.fromEntries(keyed.map(([k]) => [k, cycleCount(cycleBlobs(ls, k).map(sha => blobs[sha] ?? '').join('\n'))])),
+    epics: Object.fromEntries(keyed.map(([k, text]) => [k, briefHeader(text).epic])),
+    recordedEpics: recordedEpics(blobs[sittingsBlob(ls) ?? ''] ?? ''),
+    planTitles: Object.fromEntries(planBlobs(ls).map(p => [p.plan, planHeadings(blobs[p.sha] ?? '')])),
+  }
+}
+
+// Four live runs: $7.70 over 1 cycle, $30 over 2, $10 over 2, and $1 whose commits name no cycle.
+const COST_FILES = [
+  ['s601-one', 'skill: commit-skill:commit S601 cycle 1: a\nskill: code-review low a b', '$7.70'],
+  ['s602-two', 'skill: commit-skill:commit S602 cycle 1: a\nskill: code-review low a b\nskill: commit-skill:commit S602 cycle 2: b', '$30.00'],
+  ['s603-two', 'skill: commit-skill:commit S603 cycle 2: b\nskill: commit-skill:commit S603 cycle 1 review fixes', '$10.00'],
+  ['s604-fix', 'skill: commit-skill:commit the one fix\nskill: code-review low a b', '$1.00'],
+].map(([name, text, usd], i) => ({
+  name: `kickoff-sitting-${name}.progress`,
+  mtimeMs: NOW - (i + 1) * HOUR,
+  text: `${text}\nfinished: shipped; production is live (run 1). (${usd ?? ''}, 30 min)`,
+}))
+
+const EPIC_STATUS = {
+  dispatcher: 1,
+  running: [{ entry: 10, brief: `${BRIEFS}s693-token-export.md`, lane: '1', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 2 }],
+  queued: [
+    { entry: 11, brief: `${BRIEFS}s694-system-catalogue.md`, lane: '', reason: 'S693', cause: null },
+    { entry: 12, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null },
+    { entry: 13, brief: `${BRIEFS}s650-stray-check.md`, lane: '', reason: 'a free slot', cause: null },
+  ],
+  finished: [],
+}
+
+const epicBoard = (opts: { sittings?: string; recent?: Ended[]; drop?: string } = {}) => {
+  const raw = statusOf(EPIC_STATUS)
+  const tree = fromTree(EPIC_LS, { ...EPIC_BLOBS, e515: opts.sittings ?? EPIC_SITTINGS }, raw)
+  const cycles = Object.fromEntries(Object.entries(tree.cycles).filter(([k]) => k !== opts.drop))
+  return buildBoard(raw, {}, new Set([1, 11]), NOW, {
+    ...tree,
+    cycles,
+    endings: [{ base: S684_RUN, text: S684_PROGRESS, mtimeMs: NOW - 19 * MIN }],
+    recent: opts.recent ?? recentOf(COST_FILES, []),
+  })
+}
+
+type Drawn = { text?: string; props?: { color?: string; dimColor?: boolean; hotkey?: string; plain?: boolean } }
+
+/** Each cell run on the epics row whose Text starts with `label`, as its glyphs and colour. */
+const epicCells = async (ui: Ui, label: string): Promise<string[]> => {
+  const all: Drawn[] = await ui.findAll({ type: 'Text' })
+  const at = all.findIndex(t => (t.text ?? '').startsWith(label))
+  const out: string[] = []
+  for (const t of at < 0 ? [] : all.slice(at + 1)) {
+    if (/^\s*\d+\/\d+\s*$/.test(t.text ?? '')) break
+    if (/^[■□]+$/.test(t.text ?? '')) out.push(`${t.text} ${t.props?.color ?? ''}`)
+  }
+  return out
+}
+
+/** The squares-and-cost Text of the row whose Text holds `name`, and its square runs with their colours. */
+const costBox = async (ui: Ui, name: string): Promise<{ text: string; squares: string[] }> => {
+  const all: Drawn[] = await ui.findAll({ type: 'Text' })
+  const at = all.findIndex(t => (t.text ?? '').includes(name))
+  const box = at < 0 ? -1 : all.findIndex((t, i) => i > at && (t.text ?? '').includes('~$'))
+  const squares: string[] = []
+  for (const t of box < 0 ? [] : all.slice(box + 1)) {
+    if ((t.text ?? '').includes('~$')) break
+    if (/^[■·]+$/.test(t.text ?? '')) squares.push(`${t.text} ${t.props?.color ?? ''}`)
+  }
+  return { text: box < 0 ? '' : (all[box]?.text ?? ''), squares }
+}
+
+const BLUE = '#8aadf4'
+const PEACH = '#f5a97f'
+const YELLOW = '#eed49f'
+const SURFACE2 = '#5b6078'
+const OVERLAY1 = '#8087a2'
+
+test('namedCycles is the highest cycle a /commit line names, and recent writes it on each run', () => {
+  expect(namedCycles('skill: commit-skill:commit S1 cycle 2: b\nskill: commit-skill:commit S1 cycle 1 review fixes')).toBe(2)
+  expect(namedCycles('skill: commit-skill:commit the fix\nskill: code-review low a b')).toBe(0)
+  expect(namedCycles('turn ended: success, 3 turns, $1.00 so far: cycle 4 is next')).toBe(0)
+  expect(recentOf(COST_FILES, []).map(d => [d.sitting, d.cycles])).toEqual([['S601', 1], ['S602', 2], ['S603', 2], ['S604', 0]])
+})
+
+test('the epics card names each epic by its plan title, a cell per sitting, shipped over total, and the next state', async ($, on) => {
+  const b = epicBoard()
+  expect(b.epics.map(e => `${e.label} ${e.cells.join(',')} ${e.shipped}/${e.cells.length} ${e.next?.kind} ${e.next?.sitting}`)).toEqual([
+    'multi-gallery/E4 todo,todo 0/2 blocked S684',
+    'nav todo 0/1 queued S686',
+    'design system shipped,running,todo 1/3 running S693',
+    'dashboard/E3 todo 0/1 deck S699',
+  ])
+  const { ui } = await mountBoard($, on, b)
+  expect(await epicCells(ui, 'design system')).toEqual([`■ ${GREEN}`, `■ ${PEACH}`, `□ ${SURFACE2}`])
+  expect(await has(ui, '1/3')).toBe(true)
+  expect(await has(ui, '● S693 running')).toBe(true)
+  expect(await has(ui, 'blocked at S684')).toBe(true)
+  expect(await has(ui, '‖ held')).toBe(false)
+  expect(await has(ui, 'queued')).toBe(true)
+  // A plan with no `### E3` heading, and a plan file the listing lacks, give the raw value.
+  expect(await epicCells(ui, 'dashboard/E3')).toEqual([`□ ${SURFACE2}`])
+  expect(await epicCells(ui, 'multi-gallery/E4')).toEqual([`□□ ${SURFACE2}`])
+  expect(await has(ui, 'later')).toBe(false)
+  // The card sits between the running cards and the queue.
+  const head = await firstAt(ui, '▾ epics')
+  expect(head > (await firstAt(ui, 'S693 token-export')) && head < (await firstAt(ui, '▾ queued'))).toBe(true)
+  await ui.unmount()
+})
+
+test('a sittings.json that does not parse draws the same epics with no shipped cell', async ($, on) => {
+  const b = epicBoard({ sittings: '{"claims": ' })
+  expect(b.epics.map(e => e.label)).toEqual(['multi-gallery/E4', 'nav', 'design system', 'dashboard/E3'])
+  const { ui } = await mountBoard($, on, b)
+  expect(await epicCells(ui, 'design system')).toEqual([`■ ${PEACH}`, `□□ ${SURFACE2}`])
+  expect(await has(ui, '0/3')).toBe(true)
+  await ui.unmount()
+})
+
+test('a heading matches its epic id exactly, and a plan path is the part before the last slash', () => {
+  expect(planHeadings(DASHBOARD_PLAN)).toEqual({ E10: 'later', E1: 'nav', E2: 'design system', E4: 'x' })
+  expect(planBlobs(EPIC_LS)).toEqual([{ plan: 'dashboard', sha: 'e901' }])
+  expect(recordedEpics(EPIC_SITTINGS)).toEqual({ S692: 'dashboard/E2' })
+  expect(recordedEpics('not json')).toEqual({})
+})
+
+test('the epics card starts open while BLOCKED shows, and e folds it to its one line', async ($, on) => {
+  const b = epicBoard()
+  expect(isFolded('epics', {}, true)).toBe(false)
+  expect(foldSummary('epics', b)).toBe('multi-gallery/E4 0/2 · nav 0/1 · design system 1/3 · dashboard/E3 0/1')
+  const { ui, sets } = await mountBoard($, on, b)
+  const buttons: Drawn[] = await ui.findAll({ type: 'Button' })
+  expect(buttons.filter(x => x.text === '▾ epics').map(x => [x.props?.hotkey, x.props?.plain])).toEqual([['e', true]])
+  await ui.press({ key: 'fold-epics' })
+  expect(sets[0]).toEqual({ epics: true })
+  await ui.unmount()
+})
+
+test('a folded epics card keeps one line: each epic, shipped over total', async ($, on) => {
+  const { ui } = await mountBoard($, on, epicBoard(), { epics: true })
+  expect(await has(ui, '▸ epics')).toBe(true)
+  expect(await has(ui, 'multi-gallery/E4 0/2 · nav 0/1 · design system 1/3 · dashboard/E3 0/1')).toBe(true)
+  expect(await has(ui, 'blocked at S684')).toBe(false)
+  await ui.unmount()
+})
+
+test('queue and deck rows draw a square per cycle and the projected cost from the median cost per cycle', async ($, on) => {
+  const b = epicBoard()
+  // $7.70, $15 and $5 a cycle: the median is $7.70, so 3 cycles cost $23.10. The $1 run names no cycle.
+  expect(Math.abs((b.costs.S694?.usd ?? 0) - 23.1) < 1e-9).toBe(true)
+  expect(b.costs.S650).toEqual({ cycles: 0, usd: null })
+  const { ui } = await mountBoard($, on, b, { deck: false })
+  const s694 = await costBox(ui, 'S694 system-catalogue')
+  expect(s694.squares).toEqual([`■■■ ${BLUE}`])
+  expect(s694.text.endsWith('~$23')).toBe(true)
+  // A running row lights the cycle under way in peach.
+  expect((await costBox(ui, 'S693 token-export')).squares).toEqual([`■ ${PEACH}`, `■ ${SURFACE2}`])
+  const s650 = await costBox(ui, 'S650 stray-check')
+  expect(s650.squares).toEqual([`· ${SURFACE2}`])
+  expect(s650.text.endsWith('~$?')).toBe(true)
+  expect((await costBox(ui, 'S685 layout-gallery-rows')).squares).toEqual([`■■■ ${YELLOW}`])
+  // An on-deck brief takes its group's colour.
+  expect((await costBox(ui, 'S699 later-arc')).squares).toEqual([`■■ ${GREEN}`])
+  // Every box is one width across the queue and deck cards, a tree child's included, so each cost ends in one column.
+  const boxes = await Promise.all(['S693 token-export', 'S694 system-catalogue', 'S686 dashboard-rail', 'S650 stray-check', 'S685 layout-gallery-rows', 'S699 later-arc'].map(n => costBox(ui, n)))
+  expect(new Set(boxes.map(x => x.text.length)).size).toBe(1)
+  expect(boxes.every(x => /~\$(\d+|\?)$/.test(x.text))).toBe(true)
+  // A held row's cost is yellow and dim.
+  const held: Drawn[] = (await ui.findAll({ type: 'Text' })).filter((t: Drawn) => t.text === '~$23' && t.props?.color === YELLOW)
+  expect(held.length > 0 && held.every(t => t.props?.dimColor === true)).toBe(true)
+  expect(await coloursOf(ui, '~$23')).toContain(PEACH)
+  await ui.unmount()
+})
+
+test('a RECENT with no usable row, and a brief whose blob was not read, project ~$?', async ($, on) => {
+  const nulls = endedOf([['S601', 30, null], ['S602', 30, null]]).map(d => ({ ...d, cycles: 2 }))
+  const b = epicBoard({ recent: nulls, drop: `${BRIEFS}s686-dashboard-rail.md` })
+  expect(b.costs.S694).toEqual({ cycles: 3, usd: null })
+  expect(b.costs.S686).toEqual({ cycles: null, usd: null })
+  const { ui } = await mountBoard($, on, b)
+  expect((await costBox(ui, 'S694 system-catalogue')).text.endsWith('~$?')).toBe(true)
+  const s686 = await costBox(ui, 'S686 dashboard-rail')
+  expect(s686.squares).toEqual([])
+  expect(s686.text.endsWith('~$?')).toBe(true)
+  await ui.unmount()
+})
+
+test('a figure at or over $1,000 after rounding to a tenth of a thousand reads $N.Nk', () => {
+  expect(shortDollars(999.6)).toBe('$1.0k')
+  expect(shortDollars(7000)).toBe('$7.0k')
+  expect(shortDollars(7132)).toBe('$7.1k')
+  expect(shortDollars(568)).toBe('$568')
+})
+
+// The sparkline's ledger at -1000, now 12:00 local on Nov 20: today $568, $5,680 at 23:30 local the day before,
+// then $284, $250, $200 and $150; $1,000 at 18:00 local 14 days before, and $999 an hour after now.
+const SPARK_NOW = Date.parse('2026-11-20T22:00:00Z')
+const LOCAL_MIDNIGHT = Date.parse('2026-11-20T10:00:00Z')
+const DAY = 24 * HOUR
+const SPARK_SPENDS = ledgerSpends(
+  [
+    [LOCAL_MIDNIGHT + 8 * HOUR, 568],
+    [LOCAL_MIDNIGHT - DAY + 23.5 * HOUR, 5680],
+    [LOCAL_MIDNIGHT - 2 * DAY + 9 * HOUR, 284],
+    [LOCAL_MIDNIGHT - 3 * DAY + 9 * HOUR, 250],
+    [LOCAL_MIDNIGHT - 4 * DAY + 9 * HOUR, 200],
+    [LOCAL_MIDNIGHT - 5 * DAY + 9 * HOUR, 150],
+    [LOCAL_MIDNIGHT - 14 * DAY + 18 * HOUR, 1000],
+    [SPARK_NOW + HOUR, 999],
+  ]
+    .map(([ms, usd]) => JSON.stringify({ kind: 'commit', ts: iso(ms ?? 0), cost: { usd } }))
+    .join('\n'),
+)
+
+test('spend sums by local day over 14 days, today last, and scales its bars to the second-highest day', () => {
+  // The 23:30 spend falls the day before, and the spend 14 days back and the one after now in no day.
+  expect(daySums(SPARK_SPENDS, SPARK_NOW, '-1000')).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 150, 200, 250, 284, 5680, 568])
+  // An offset that does not parse sums by UTC day.
+  expect(daySums(SPARK_SPENDS, SPARK_NOW, 'garbage')).toEqual(daySums(SPARK_SPENDS, SPARK_NOW, '+0000'))
+  // The highest day is ten times the cap, and tops out; a day at half the cap is exactly ▄.
+  expect(sparkGlyphs(daySums(SPARK_SPENDS, SPARK_NOW, '-1000'))).toBe('▁▁▁▁▁▁▁▁▃▃▄▄██')
+  // One day of spend is the cap, and fourteen empty days divide by nothing.
+  expect(sparkGlyphs([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0])).toBe('▁▁▁▁▁▁▁▁▁▁▁▁█▁')
+  expect(daySums([], SPARK_NOW, '-1000')).toEqual(new Array<number>(14).fill(0))
+  expect(sparkGlyphs(new Array<number>(14).fill(0))).toBe('▁'.repeat(14))
+})
+
+test('the header draws the 14-day sparkline, today peach, then today and 14d', async ($, on) => {
+  const spend = { ...spendTotals(SPARK_SPENDS, SPARK_NOW), days: daySums(SPARK_SPENDS, SPARK_NOW, '-1000') }
+  const b = buildBoard(statusOf({ dispatcher: 1 }), {}, new Set([1]), SPARK_NOW, { spend, utcOffset: '-1000' })
+  const { ui } = await mountBoard($, on, b)
+  expect(await has(ui, 'spend ▁▁▁▁▁▁▁▁▃▃▄▄██')).toBe(true)
+  expect(await has(ui, '$568 today · $7.1k 14d')).toBe(true)
+  expect(await coloursOf(ui, '$568')).toEqual([PEACH])
+  expect(await coloursOf(ui, '█')).toEqual([OVERLAY1, PEACH])
+  expect(new Set(await coloursOf(ui, '▁'))).toEqual(new Set([SURFACE2]))
+  await ui.unmount()
+})
+
+test('one poll counts every brief, reads epics from sittings.json and the plan, and sums the ledger by local day', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { HOME })
+  mock.store(on, { folds: {} })
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'board' } }))
+  on('ui.status', () => ({ value: undefined }))
+  const status = JSON.stringify({ dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s694-system-catalogue.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
+  on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: status } : { deny: 'no such file' }))
+  on('fs.list', (_: unknown, e: { path: string }) =>
+    e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
+  )
+  const blobs: Record<string, string> = { c7694: briefText('S694', 'dashboard/E2', '', 3), c7515: EPIC_SITTINGS, c7901: DASHBOARD_PLAN }
+  // Shorter than PLAN_LEDGER, which an earlier poll read, so this poll reads the ledger again from its start.
+  // At -0500 its one commit falls at 22:00 the day before.
+  const ledger = `${JSON.stringify({ kind: 'commit', ts: '2026-10-31T03:00:00Z', cost: { usd: 5 } })}\n`
+  let planReads = 0
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+    const [cmd = '', ...args] = e.argv
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (cmd === 'git' && args[0] === 'ls-tree') {
+      const plans = args.includes('docs/plans/') ? '100644 blob c7901\tdocs/plans/dashboard.md\n' : ''
+      return out(`100644 blob c7694\t${BRIEFS}s694-system-catalogue.md\n100644 blob c7515\tdocs/briefs/sittings.json\n${plans}`)
+    }
+    if (cmd === 'git' && args[0] === 'cat-file') {
+      const sha = args[2] ?? ''
+      // The plan's first read fails.
+      if (sha === 'c7901' && planReads++ === 0) return out('', 128)
+      return sha in blobs ? out(blobs[sha] ?? '') : out('', 128)
+    }
+    if (cmd === 'stat') return out(String(ledger.length))
+    if (cmd === 'sh') return out(ledger.slice(Number(args[3]) - 1, Number(args[3]) - 1 + Number(args[5])))
+    if (cmd === 'date') return out('-0500')
+    if (cmd === 'ps') return out('1\n')
+    return out('', 1)
+  })
+  const mount = () =>
+    $.ui.mount({
+      plugin: 'run-board',
+      component: 'Pane',
+      requestId: 'run-board',
+      surface: 'terminal',
+      props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(0)
+  const first = await mount()
+  expect((await costBox(first, 'S694 system-catalogue')).squares).toEqual([`■■■ ${BLUE}`])
+  // The plan blob failed, so the epic reads its raw value; sittings.json gives its shipped cell.
+  expect(await epicCells(first, 'dashboard/E2')).toEqual([`■ ${GREEN}`, `□ ${SURFACE2}`])
+  expect(await has(first, 'design system')).toBe(false)
+  expect(await has(first, `spend ${'▁'.repeat(12)}█▁`)).toBe(true)
+  await first.unmount()
+  await clock.advance(5000)
+  const second = await mount()
+  expect(await epicCells(second, 'design system')).toEqual([`■ ${GREEN}`, `□ ${SURFACE2}`])
   await second.unmount()
 })

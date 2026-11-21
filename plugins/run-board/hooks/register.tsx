@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BlockKind, Board, Deck, DeckMode, Ended, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
+import type { BlockKind, Board, BriefCost, Deck, DeckMode, Ended, EpicCell, EpicRow, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
 import {
   FOLD_KEY,
   KIND_TAG,
@@ -24,6 +24,7 @@ import {
   briefKey,
   cycleBlobs,
   cycleCount,
+  daySums,
   deckTree,
   elapsed,
   hoursMinutes,
@@ -41,7 +42,12 @@ import {
   phaseGlyphs,
   phaseLine,
   phaseName,
+  planBlobs,
+  planHeadings,
+  recordedEpics,
   segmentWidth,
+  shortDollars,
+  sparkGlyphs,
   spendTotals,
   dollars,
   money,
@@ -60,7 +66,7 @@ import {
   laneCells,
   nowCell,
 } from './board'
-import type { CellTone, Ending, LoopFile, RawStatus, Spend, TimelineCell } from './board'
+import type { CellTone, Ending, LoopFile, RawStatus, Spend, SpendTotals, TimelineCell } from './board'
 
 // Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
 // paints comes from here, the pane's own ground included, so the pane reads
@@ -127,6 +133,16 @@ const labelCells = (slots: readonly { slot: number }[]): number =>
 const RECENT_TIME_CELLS = 6
 const RECENT_COST_CELLS = 7
 const RECENT_AGE_CELLS = 4
+// How much faster a queue or deck row's note shrinks than its name, so the
+// note gives way first on a narrow pane.
+const NOTE_SHRINK = 1000
+// Each epic cell's glyph and colour: green shipped, peach running, a faint
+// hollow square to come.
+const EPIC_CELL: Record<EpicCell, { glyph: string; color: string }> = {
+  shipped: { glyph: '■', color: F.green },
+  running: { glyph: '■', color: F.peach },
+  todo: { glyph: '□', color: F.surface2 },
+}
 
 const PANE = 'run-board'
 // A name Claude Code does not reserve: `claude plugin validate` warns on one it does.
@@ -144,7 +160,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-13' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-14' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -255,18 +271,18 @@ async function readLedger($: EngineInterface, path: string): Promise<boolean> {
 }
 
 /**
- * Spend over the last 24 hours, 7 days and 30 days, and in all, and each
- * sitting's plan cost, from one read of token-ledger; null when it could not
- * be read.
+ * Spend over the last 24 hours, 7 days and 30 days, and in all, every spend
+ * read, and each sitting's plan cost, from one read of token-ledger; null when
+ * it could not be read.
  */
 async function readSpend(
   $: EngineInterface,
   home: string,
   now: number,
-): Promise<{ spend: NonNullable<Board['spend']>; plans: Record<string, number> } | null> {
+): Promise<{ spend: SpendTotals; spends: readonly Spend[]; plans: Record<string, number> } | null> {
   if (ledgerRead === null) ledgerRead = readLedger($, `${home}/${LEDGER}`).finally(() => (ledgerRead = null))
   if (!(await ledgerRead)) return null
-  return { spend: spendTotals(ledger.spends, now), plans: { ...ledger.plans } }
+  return { spend: spendTotals(ledger.spends, now), spends: ledger.spends, plans: { ...ledger.plans } }
 }
 
 // Launch counts read from `.launches` files, by name, kept while their mtime holds.
@@ -406,8 +422,8 @@ async function readDeployStages($: EngineInterface, home: string, endings: reado
 // the blobs the listing still names.
 let blobCache = new Map<string, string>()
 
-/** The text of `sha` in the checkout at `cwd`, read once per blob. */
-async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<string, string>): Promise<string> {
+/** The text of `sha` in the checkout at `cwd`, read once per blob; null when it could not be read. */
+async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<string, string>): Promise<string | null> {
   const known = blobCache.get(sha) ?? next.get(sha)
   if (known !== undefined) {
     next.set(sha, known)
@@ -415,53 +431,103 @@ async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<
   }
   // A failed read is not kept, so the next poll asks for the blob again.
   const blob = await $.process.run(['git', 'cat-file', 'blob', sha], { cwd, timeoutMs: 5000 })
-  if (blob.exitCode !== 0) return ''
+  if (blob.exitCode !== 0) return null
   next.set(sha, blob.stdout)
   return blob.stdout
 }
 
-// Each running brief's cycle count by its key, kept after the archive moves
-// the brief off docs/briefs/ so the bar keeps its length to the end.
+// Each running brief's cycle count and `Epic:` value by its key, kept after
+// the archive moves the brief off docs/briefs/, so the bar keeps its length
+// and the epics card its sitting to the end.
 const cyclesCache = new Map<string, number>()
+const epicCache = new Map<string, string>()
+
+// Each plan's epic titles by its blob id; a blob's text never changes. Pruned
+// each poll to the plan blobs the listing still names.
+let planCache = new Map<string, Record<string, string>>()
+
+/** What `readBriefs` reads from `origin/main`. */
+type BriefsRead = {
+  onDeck: Deck[]
+  /** Each brief's cycle count by its key; a brief whose blobs could not be read is absent. */
+  cycles: Record<string, number>
+  afters: Record<string, string[]>
+  splits: Record<string, number>
+  /** Each brief's `Epic:` value by its key, a running brief's kept after its archive. */
+  epics: Record<string, string>
+  recordedEpics: Record<string, string>
+  planTitles: Record<string, Record<string, string>>
+}
 
 /**
- * The briefs on deck, and each running brief's cycle count, from one
- * `git ls-tree -r origin/main docs/briefs/` in the checkout.
+ * The briefs on deck, each brief's cycle count and epic, the epics
+ * `sittings.json` records, and each plan's epic titles, from one
+ * `git ls-tree -r origin/main docs/briefs/ docs/plans/` in the checkout.
  */
-async function readBriefs(
-  $: EngineInterface,
-  home: string,
-  raw: RawStatus,
-): Promise<{ onDeck: Deck[]; cycles: Record<string, number>; afters: Record<string, string[]>; splits: Record<string, number> }> {
+async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Promise<BriefsRead> {
   const cwd = `${home}/${REPO}`
   const cycles: Record<string, number> = {}
+  const epics: Record<string, string> = {}
   const keys = raw.running.map(r => briefKey(r.brief))
-  const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/'], { cwd, timeoutMs: 5000 })
+  const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/', 'docs/plans/'], { cwd, timeoutMs: 5000 })
   if (ls.exitCode !== 0) {
-    for (const k of keys) if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
-    return { onDeck: [], cycles, afters: {}, splits: {} }
+    for (const k of keys) {
+      if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
+      if (epicCache.has(k)) epics[k] = epicCache.get(k) ?? ''
+    }
+    return { onDeck: [], cycles, afters: {}, splits: {}, epics, recordedEpics: {}, planTitles: {} }
   }
   const next = new Map<string, string>()
-  const briefs: { path: string; sha: string; text: string }[] = []
+  const briefs: { path: string; sha: string; text: string | null }[] = []
   for (const f of briefFiles(ls.stdout)) briefs.push({ ...f, text: await blobText($, cwd, f.sha, next) })
-  for (const k of keys) {
+  for (const f of briefs) {
+    const epic = f.text === null ? '' : briefHeader(f.text).epic
+    if (epic !== '') epics[briefKey(f.path)] = epic
+  }
+  // Every brief's cycles, and each running one's from the cache once its brief has left.
+  for (const k of new Set([...briefs.map(f => briefKey(f.path)), ...keys])) {
+    const isRunning = keys.includes(k)
     const shas = cycleBlobs(ls.stdout, k)
     if (shas.length > 0) {
       const texts = await Promise.all(shas.map(sha => blobText($, cwd, sha, next)))
-      cyclesCache.set(k, cycleCount(texts.join('\n')))
-    }
-    if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
+      const count = texts.some(t => t === null) ? null : cycleCount(texts.join('\n'))
+      if (count !== null) cycles[k] = count
+      // A failed blob read keeps no entry, so the next poll reads the blob again.
+      if (isRunning && count !== null) cyclesCache.set(k, count)
+      else if (isRunning) cyclesCache.delete(k)
+    } else if (isRunning && cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
+    if (!isRunning) continue
+    if (Object.hasOwn(epics, k)) epicCache.set(k, epics[k] ?? '')
+    else if (epicCache.has(k)) epics[k] = epicCache.get(k) ?? ''
   }
-  for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
+  for (const cache of [cyclesCache, epicCache]) for (const k of [...cache.keys()]) if (!keys.includes(k)) cache.delete(k)
+  const planTitles: Record<string, Record<string, string>> = {}
+  const plans = new Map<string, Record<string, string>>()
+  for (const p of planBlobs(ls.stdout)) {
+    let titles = planCache.get(p.sha) ?? plans.get(p.sha)
+    if (titles === undefined) {
+      const text = await blobText($, cwd, p.sha, next)
+      // A failed blob read keeps no entry, so the next poll reads the blob again.
+      if (text === null) continue
+      titles = planHeadings(text)
+    }
+    plans.set(p.sha, titles)
+    planTitles[p.plan] = titles
+  }
+  planCache = plans
   const registry = sittingsBlob(ls.stdout)
-  const sittingsJson = registry === null ? '' : await blobText($, cwd, registry, next)
+  const sittingsJson = (registry === null ? null : await blobText($, cwd, registry, next)) ?? ''
   blobCache = next
-  const afters = Object.fromEntries(briefs.map(f => [briefKey(f.path), afterSittings(briefHeader(f.text).after)]))
+  const read = briefs.map(f => ({ ...f, text: f.text ?? '' }))
+  const afters = Object.fromEntries(read.map(f => [briefKey(f.path), afterSittings(briefHeader(f.text).after)]))
   return {
-    onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)),
+    onDeck: onDeckOf(read, [...raw.running, ...raw.queued].map(r => r.brief)),
     cycles,
     afters,
-    splits: splitCounts(briefs, sittingsJson),
+    splits: splitCounts(read, sittingsJson),
+    epics,
+    recordedEpics: recordedEpics(sittingsJson),
+    planTitles,
   }
 }
 
@@ -477,7 +543,9 @@ async function poll($: EngineInterface): Promise<void> {
   const status = text === undefined ? null : parseStatus(text)
   const loop = await readLoop($, home).catch(() => null)
   const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
-  const { onDeck, cycles, afters, splits } = await readBriefs($, home, raw).catch(() => ({ onDeck: [] as Deck[], cycles: {}, afters: {}, splits: {} }))
+  const { onDeck, cycles, afters, splits, epics, recordedEpics, planTitles } = await readBriefs($, home, raw).catch(
+    (): BriefsRead => ({ onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, planTitles: {} }),
+  )
   if (status === null && loop === null && onDeck.length === 0) {
     await update($, board, () => null)
     return
@@ -512,7 +580,7 @@ async function poll($: EngineInterface): Promise<void> {
     tools,
     cycles,
     utcOffset,
-    spend: read?.spend ?? null,
+    spend: read === null ? null : { ...read.spend, days: daySums(read.spends, now, utcOffset) },
     plans: read?.plans ?? null,
     afters,
     endings,
@@ -520,6 +588,9 @@ async function poll($: EngineInterface): Promise<void> {
     deployStages,
     launches,
     splits,
+    epics,
+    recordedEpics,
+    planTitles,
   })
 
   await update($, board, () => next)
@@ -674,12 +745,100 @@ export const register: Register = on => {
         </Text>
       )
     // A figure right-aligned in a column `width` cells wide: the pad, then the figure in its own span.
-    const cell = (value: string, width: number, color: string, bold = false) => (
+    const cell = (value: string, width: number, color: string, bold = false, dim = false) => (
       <Text>
         {' '.repeat(Math.max(0, width - value.length))}
-        <Text bold={bold} color={color}>{value}</Text>
+        <Text bold={bold} color={color} dimColor={dim}>
+          {value}
+        </Text>
       </Text>
     )
+
+    // On deck as a tree, and the box at the right edge of each queue and deck
+    // row: a square per cycle in a slot as wide as the most cycles, then the
+    // projected cost right-aligned to the widest cost. One width serves both
+    // cards, so every cost ends in one column whatever a row's indent.
+    const deckRows = deckTree(b.onDeck, liveDepths(b, queueRows), new Set(b.queued.map(q => q.sitting)))
+    const boxed = [...queueRows.map(r => r.sitting), ...deckRows.filter(r => r.kind !== 'group').map(r => r.sitting)]
+    const projected = (c: BriefCost): string => (c.usd === null ? '~$?' : `~${dollars(c.usd)}`)
+    const slotCells = Math.max(1, ...boxed.map(s => b.costs[s]?.cycles ?? 0))
+    const projectedCells = Math.max(0, ...boxed.map(s => (b.costs[s] === undefined ? 0 : projected(b.costs[s]).length)))
+    // `color` paints the squares; a running row's `lit` squares, the cycles done
+    // or under way, are peach and the rest grey. A held row's cost is dim yellow.
+    const costBox = (sitting: string, color: string, isHeld: boolean, lit: number | null = null) => {
+      const c = b.costs[sitting]
+      const n = c?.cycles ?? null
+      const squares =
+        n === null ? null : n === 0 ? (
+          <Text color={F.surface2}>·</Text>
+        ) : lit === null ? (
+          <Text color={color}>{'■'.repeat(n)}</Text>
+        ) : (
+          [
+            lit > 0 && <Text color={F.peach}>{'■'.repeat(Math.min(lit, n))}</Text>,
+            lit < n && <Text color={F.surface2}>{'■'.repeat(n - Math.max(0, lit))}</Text>,
+          ]
+        )
+      return (
+        <Box flexShrink={0}>
+          <Text>
+            {squares}
+            {' '.repeat(slotCells - (n === null ? 0 : Math.max(1, n)) + 1)}
+            {c === undefined ? ' '.repeat(projectedCells) : cell(projected(c), projectedCells, isHeld ? F.yellow : F.peach, false, isHeld)}
+          </Text>
+        </Box>
+      )
+    }
+
+    // The epics card's columns: the label padded to the widest label, the
+    // cells to the widest epic, cut with `…` past the room the label, the
+    // count and the widest state leave, then `shipped/total` and the state.
+    const stateText = (x: EpicRow): string =>
+      x.next === null
+        ? ''
+        : { running: `● ${x.next.sitting} running`, blocked: `blocked at ${x.next.sitting}`, held: '‖ held', queued: 'queued', deck: 'on deck' }[x.next.kind]
+    const countText = (x: EpicRow): string => `${x.shipped}/${x.cells.length}`
+    const epicLabelCells = widest(b.epics.map(e => e.label))
+    const epicCountCells = widest(b.epics.map(countText))
+    const epicCellRoom = Math.max(2, e.props.bodyColumns - 4 - epicLabelCells - 2 - 2 - epicCountCells - 2 - widest(b.epics.map(stateText)))
+    const epicCells = Math.min(epicCellRoom, Math.max(0, ...b.epics.map(x => x.cells.length)))
+    const epicRow = (x: EpicRow) => {
+      const shown = x.cells.length > epicCells ? x.cells.slice(0, epicCells - 1) : x.cells
+      const runs: { cell: EpicCell; count: number }[] = []
+      for (const c of shown) {
+        const last = runs[runs.length - 1]
+        if (last !== undefined && last.cell === c) last.count++
+        else runs.push({ cell: c, count: 1 })
+      }
+      const next = x.next
+      return (
+        <Text wrap="truncate-end">
+          <Text color={F.text}>{x.label.padEnd(epicLabelCells)}</Text>
+          {'  '}
+          {runs.map(r => (
+            <Text color={EPIC_CELL[r.cell].color}>{EPIC_CELL[r.cell].glyph.repeat(r.count)}</Text>
+          ))}
+          {shown.length < x.cells.length && <Text color={F.overlay0}>…</Text>}
+          {' '.repeat(Math.max(0, epicCells - x.cells.length))}
+          {'  '}
+          <Text color={F.overlay2}>{countText(x).padStart(epicCountCells)}</Text>
+          {'  '}
+          {next?.kind === 'running' && (
+            <Text color={F.peach}>
+              ● <Text bold>{next.sitting}</Text> running
+            </Text>
+          )}
+          {next?.kind === 'blocked' && (
+            <Text color={F.red}>
+              blocked at <Text bold>{next.sitting}</Text>
+            </Text>
+          )}
+          {next?.kind === 'held' && <Text color={F.yellow}>‖ held</Text>}
+          {next?.kind === 'queued' && <Text color={F.blue}>queued</Text>}
+          {next?.kind === 'deck' && <Text color={F.mauve}>on deck</Text>}
+        </Text>
+      )
+    }
 
     // A foldable card's header: a Button on the card's hotkey that flips its
     // fold and keeps the choice, with the one-line summary while folded.
@@ -749,18 +908,28 @@ export const register: Register = on => {
       </Text>
     )
 
-    // Spend over the last 24 hours, 7 days and 30 days, and in all, from
-    // token-ledger. The windows roll, so the words name the span, not a
-    // calendar day, week or month.
-    const spendWindows: [number, string][] =
-      b.spend === null
-        ? []
-        : [
-            [b.spend.day, '24h'],
-            [b.spend.week, '7d'],
-            [b.spend.month, '30d'],
-            [b.spend.all, 'all'],
-          ]
+    // Spend over the last 14 local days from token-ledger: a bar per day,
+    // today's peach, a day with spend grey and an empty day faint, then what
+    // today and the 14 days came to. The figures keep their width; the bars
+    // give way first.
+    const sparkline = (days: readonly number[]) => (
+      <Box marginTop={1} columnGap={1}>
+        <Box flexShrink={1} minWidth={0}>
+          <Text wrap="truncate-end" color={F.overlay2}>
+            {'spend '}
+            {[...sparkGlyphs(days)].map((bar, i) => (
+              <Text color={i === days.length - 1 ? F.peach : (days[i] ?? 0) > 0 ? F.overlay1 : F.surface2}>{bar}</Text>
+            ))}
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text color={F.overlay2}>
+            <Text color={F.peach}>{shortDollars(days[days.length - 1] ?? 0)}</Text> today ·{' '}
+            <Text color={F.subtext0}>{shortDollars(days.reduce((a, d) => a + d, 0))}</Text> 14d
+          </Text>
+        </Box>
+      </Box>
+    )
     const tileRow = (row: typeof tiles) => (
       <Box marginTop={1} justifyContent="space-between" columnGap={2}>
         {row.map(t => {
@@ -792,18 +961,7 @@ export const register: Register = on => {
             </Text>
           </Box>
           {tileRow(tiles)}
-          {spendWindows.length > 0 && (
-            <Box marginTop={1}>
-              <Text wrap="truncate-end" color={F.overlay2}>
-                spend
-                {spendWindows.map(([usd, span], i) => (
-                  <Text>
-                    {i > 0 ? ' ·' : ''} <Text color={F.subtext0}>{dollars(usd)}</Text> {span}
-                  </Text>
-                ))}
-              </Text>
-            </Box>
-          )}
+          {b.spend !== null && sparkline(b.spend.days)}
         </Box>
 
         {hasBlocked && (
@@ -919,69 +1077,93 @@ export const register: Register = on => {
           </Box>
         ))}
 
+        {b.epics.length > 0 && (
+          <Box {...CARD}>
+            {cardHead('epics', 'epics', F.lavender)}
+            {!folded('epics') && b.epics.map(epicRow)}
+          </Box>
+        )}
+
         {(b.queued.length > 0 || b.blocked.some(k => k.holds.length > 0)) && (
           <Box {...CARD}>
             {cardHead('queued', 'queued', F.lavender)}
-            {!folded('queued') && queueRows.map((r, i) => (
-              // A joint means the entry needs its parent shipped; a yellow `‖` that a block holds it.
-              <Box justifyContent="space-between" columnGap={2} marginTop={r.kind === 'block' && i > 0 ? 1 : 0}>
-                <Text wrap="truncate-end">
-                  <Text color={r.kind === 'hold' ? F.yellow : F.overlay0}>{r.rails}</Text>
-                  <Text color={r.kind === 'hold' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
-                  <Text color={r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
-                    {r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
-                  </Text>
-                  <Text bold color={r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
-                  {r.slug !== '' && <Text color={r.kind === 'block' ? F.yellow : F.subtext0}> {r.slug}</Text>}
-                  {(b.splits[r.sitting] ?? 0) > 0 && <Text color={F.overlay0}>{` split ×${b.splits[r.sitting] ?? 0}`}</Text>}
-                </Text>
-                {r.kind === 'run' ? (
-                  <Text>
-                    <Text color={LANE_COLOR[r.lane] ?? F.surface2}>{r.lane}</Text>
-                    <Text color={F.overlay2}> · running</Text>
-                  </Text>
-                ) : (
-                  <Text wrap="truncate-end" color={r.kind === 'held' || r.kind === 'block' ? F.yellow : F.overlay2}>
-                    {r.note}
-                  </Text>
-                )}
-              </Box>
-            ))}
+            {!folded('queued') &&
+              queueRows.map((r, i) => {
+                const isHeld = r.kind === 'held' || r.kind === 'block' || r.kind === 'hold'
+                const lit = r.kind === 'run' ? (b.running.find(x => x.sitting === r.sitting)?.phases.filter(p => p.label.startsWith('cycle ') && p.state !== 'todo').length ?? 0) : null
+                return (
+                  // A joint means the entry needs its parent shipped; a yellow `‖` that a block holds it.
+                  // The note sits between the name and the box, and gives way first.
+                  <Box columnGap={2} marginTop={r.kind === 'block' && i > 0 ? 1 : 0}>
+                    <Box flexShrink={1} minWidth={0}>
+                      <Text wrap="truncate-end">
+                        <Text color={r.kind === 'hold' ? F.yellow : F.overlay0}>{r.rails}</Text>
+                        <Text color={r.kind === 'hold' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
+                        <Text color={r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
+                          {r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
+                        </Text>
+                        <Text bold color={r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
+                        {r.slug !== '' && <Text color={r.kind === 'block' ? F.yellow : F.subtext0}> {r.slug}</Text>}
+                        {(b.splits[r.sitting] ?? 0) > 0 && <Text color={F.overlay0}>{` split ×${b.splits[r.sitting] ?? 0}`}</Text>}
+                      </Text>
+                    </Box>
+                    <Box flexGrow={1} flexShrink={NOTE_SHRINK} minWidth={0} justifyContent="flex-end">
+                      {r.kind === 'run' ? (
+                        <Text wrap="truncate-end">
+                          <Text color={LANE_COLOR[r.lane] ?? F.surface2}>{r.lane}</Text>
+                          <Text color={F.overlay2}> · running</Text>
+                        </Text>
+                      ) : (
+                        <Text wrap="truncate-end" color={r.kind === 'held' || r.kind === 'block' ? F.yellow : F.overlay2}>
+                          {r.note}
+                        </Text>
+                      )}
+                    </Box>
+                    {costBox(r.sitting, isHeld ? F.yellow : F.blue, isHeld, lit)}
+                  </Box>
+                )
+              })}
           </Box>
         )}
 
         {b.onDeck.length > 0 && (
           <Box {...CARD}>
             {cardHead('deck', 'on deck', F.lavender)}
-            {!folded('deck') && deckTree(b.onDeck, liveDepths(b, queueRows), new Set(b.queued.map(q => q.sitting))).map(r =>
-              r.kind === 'group' ? (
-                <Text>
-                  <Text bold color={DECK_COLOR[r.mode]}>{r.slug}</Text>
-                  <Text color={F.overlay0}> {r.note}</Text>
-                </Text>
-              ) : (
-                // A solid joint waits on the brief above it; a dashed one hangs under its group.
-                <Box justifyContent="space-between" columnGap={2}>
-                  <Text wrap="truncate-end">
-                    <Text color={F.overlay0}>{r.rails}</Text>
-                    <Text color={r.kind === 'after' ? DECK_COLOR[r.mode] : F.surface2}>{r.joint}</Text>
-                    <Text color={DECK_COLOR[r.mode]}>◇ </Text>
-                    <Text bold color={F.text}>{r.sitting}</Text>
-                    <Text color={F.subtext0}> {r.slug}</Text>
+            {!folded('deck') &&
+              deckRows.map(r =>
+                r.kind === 'group' ? (
+                  <Text>
+                    <Text bold color={DECK_COLOR[r.mode]}>{r.slug}</Text>
+                    <Text color={F.overlay0}> {r.note}</Text>
                   </Text>
-                  <Text wrap="truncate-end" color={F.overlay2}>
-                    {r.wait !== '' && (
-                      // The nearest wait, its sitting blue when it is queued.
-                      <Text>
-                        after <Text color={r.isWaitQueued ? F.blue : F.overlay2}>{r.wait}</Text>
+                ) : (
+                  // A solid joint waits on the brief above it; a dashed one hangs under its group.
+                  <Box columnGap={2}>
+                    <Box flexShrink={1} minWidth={0}>
+                      <Text wrap="truncate-end">
+                        <Text color={F.overlay0}>{r.rails}</Text>
+                        <Text color={r.kind === 'after' ? DECK_COLOR[r.mode] : F.surface2}>{r.joint}</Text>
+                        <Text color={DECK_COLOR[r.mode]}>◇ </Text>
+                        <Text bold color={F.text}>{r.sitting}</Text>
+                        <Text color={F.subtext0}> {r.slug}</Text>
                       </Text>
-                    )}
-                    {r.wait !== '' && r.note !== '' ? ' · ' : ''}
-                    {r.note}
-                  </Text>
-                </Box>
-              ),
-            )}
+                    </Box>
+                    <Box flexGrow={1} flexShrink={NOTE_SHRINK} minWidth={0} justifyContent="flex-end">
+                      <Text wrap="truncate-end" color={F.overlay2}>
+                        {r.wait !== '' && (
+                          // The nearest wait, its sitting blue when it is queued.
+                          <Text>
+                            after <Text color={r.isWaitQueued ? F.blue : F.overlay2}>{r.wait}</Text>
+                          </Text>
+                        )}
+                        {r.wait !== '' && r.note !== '' ? ' · ' : ''}
+                        {r.note}
+                      </Text>
+                    </Box>
+                    {costBox(r.sitting, DECK_COLOR[r.mode], false)}
+                  </Box>
+                ),
+              )}
           </Box>
         )}
 
