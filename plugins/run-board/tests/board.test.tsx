@@ -835,6 +835,19 @@ test('a red deploy stops being stuck once a re-run of its own run passes', async
   expect(deployStateOf('failure', ['Deploy to Staging & E2E'])).toBe('staging')
 })
 
+// S689's run 44933073127 failed in production, and run 44934802905, shipped by
+// hand from an interactive session, went live on main with no autopilot end after it.
+test('a red deploy stops being stuck once a newer deploy run on main goes live', async () => {
+  const endings = [{ base: 'kickoff-sitting-s689-nav-residues', text: 'finished: shipped; deploy failed (run 44933073127). ($8.00, 14 min)', mtimeMs: 30 }]
+  const raw = { dispatcher: null, running: [], queued: [], finished: [] }
+  const deployStages = { '44933073127': 'prod' }
+  const blocked = (liveDeploy: string) => buildBoard(raw, {}, new Set(), NOW, { endings, deployStages, liveDeploy }).blocked.map(b => b.sitting)
+  expect(blocked('')).toEqual(['S689'])
+  expect(blocked('44933073127')).toEqual(['S689'])
+  expect(blocked('44930000000')).toEqual(['S689'])
+  expect(blocked('44934802905')).toEqual([])
+})
+
 test('recent and on deck fold themselves while BLOCKED shows, unless set by hand', async () => {
   expect(isFolded('recent', {}, true)).toBe(true)
   expect(isFolded('deck', {}, true)).toBe(true)

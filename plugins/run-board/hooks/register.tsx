@@ -8,6 +8,7 @@ import {
   DEPLOY_LIVE,
   deployRunOf,
   deployStateOf,
+  supersededBy,
   foldSummary,
   isFolded,
   lastEnd,
@@ -389,20 +390,52 @@ async function readHandoffs($: EngineInterface, home: string, endings: readonly 
 const deployCache = new Map<string, { state: string; askedMs: number }>()
 const DEPLOY_REASK_MS = 60_000
 
+// The newest deploy.yml run on main that went live, and when it was asked. A
+// deploy shipped by hand goes live with no autopilot end, so `gh` is asked.
+let liveDeployCache = { run: '', askedMs: Number.NEGATIVE_INFINITY }
+
 /**
- * Each red deploy's state by run: where its latest attempt broke, or
- * `DEPLOY_LIVE` once an attempt passed. A run older than the newest live run
- * blocks nothing, so it is asked once.
+ * The newest deploy.yml run on main whose latest attempt passed, every job
+ * through production, or the last answer when `gh` fails. If deploy.yml is
+ * renamed, update the workflow name here.
  */
-async function readDeployStages($: EngineInterface, home: string, endings: readonly Ending[], now: number): Promise<Record<string, string>> {
+async function readLiveDeploy($: EngineInterface, home: string, now: number): Promise<string> {
+  if (now - liveDeployCache.askedMs < DEPLOY_REASK_MS) return liveDeployCache.run
+  const r = await $.process
+    .run(['gh', 'run', 'list', '--workflow', 'deploy.yml', '--branch', 'main', '--status', 'success', '--limit', '1', '--json', 'databaseId', '--jq', '.[0].databaseId // empty'], {
+      cwd: `${home}/${REPO}`,
+      timeoutMs: 10000,
+    })
+    .catch(() => ({ exitCode: 1, stdout: '' }))
+  const run = r.stdout.trim()
+  if (r.exitCode === 0 && /^\d*$/.test(run)) liveDeployCache = { run: run || liveDeployCache.run, askedMs: now }
+  return liveDeployCache.run
+}
+
+/**
+ * Each red deploy's state by run, and the newest live deploy run on main. A
+ * run's state is where its latest attempt broke, or `DEPLOY_LIVE` once an
+ * attempt passed. A run older than the newest live autopilot end, or than
+ * the newest live deploy on main, blocks nothing, so it is asked once.
+ * Nothing asks for the live deploy while no red run can block.
+ */
+async function readDeployStages(
+  $: EngineInterface,
+  home: string,
+  endings: readonly Ending[],
+  now: number,
+): Promise<{ stages: Record<string, string>; live: string }> {
   const out: Record<string, string> = {}
   let newestLive = Number.NEGATIVE_INFINITY
   for (const e of endings) if (lastEnd(e.text)?.isLive) newestLive = Math.max(newestLive, e.mtimeMs)
+  const reds = endings.filter(e => e.mtimeMs > newestLive && deployRunOf(lastEnd(e.text)?.outcome ?? '') !== '')
+  const live = reds.length === 0 ? liveDeployCache.run : await readLiveDeploy($, home, now)
   for (const e of endings) {
     const run = deployRunOf(lastEnd(e.text)?.outcome ?? '')
     if (run === '') continue
     const known = deployCache.get(run)
-    const reask = known !== undefined && known.state !== DEPLOY_LIVE && e.mtimeMs > newestLive && now - known.askedMs >= DEPLOY_REASK_MS
+    const reask =
+      known !== undefined && known.state !== DEPLOY_LIVE && e.mtimeMs > newestLive && !supersededBy(run, live) && now - known.askedMs >= DEPLOY_REASK_MS
     if (known === undefined || reask) {
       const r = await $.process
         .run(['gh', 'run', 'view', run, '--json', 'status,conclusion,jobs', '--jq', '(.status + "\\t" + .conclusion), (.jobs[] | select(.conclusion == "failure") | .name)'], {
@@ -421,7 +454,7 @@ async function readDeployStages($: EngineInterface, home: string, endings: reado
     const state = deployCache.get(run)?.state
     if (state !== undefined) out[run] = state
   }
-  return out
+  return { stages: out, live }
 }
 
 // Brief texts by blob id; a blob's text never changes. Pruned each poll to
@@ -546,10 +579,10 @@ async function poll($: EngineInterface): Promise<void> {
     .run(['date', '+%z'], { timeoutMs: 5000 })
     .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
     .catch(() => '')
-  const [handoffs, launches, deployStages, utcOffset, read] = await Promise.all([
+  const [handoffs, launches, deploys, utcOffset, read] = await Promise.all([
     readHandoffs($, home, endings).catch(() => ({})),
     readLaunchCounts($, dir, endings, mtimes).catch(() => ({})),
-    readDeployStages($, home, endings, now).catch(() => ({})),
+    readDeployStages($, home, endings, now).catch(() => ({ stages: {}, live: '' })),
     offset,
     readSpend($, home, now, offset).catch(() => null),
   ])
@@ -565,7 +598,8 @@ async function poll($: EngineInterface): Promise<void> {
     afters,
     endings,
     handoffs,
-    deployStages,
+    deployStages: deploys.stages,
+    liveDeploy: deploys.live,
     launches,
     splits,
     epics,

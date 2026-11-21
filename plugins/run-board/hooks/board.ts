@@ -628,6 +628,8 @@ export function buildBoard(
     handoffs?: Readonly<Record<string, string>>
     /** Each red deploy's failed strip stage, by run. */
     deployStages?: Readonly<Record<string, string>>
+    /** The newest deploy.yml run on main that went live, or empty when it could not be read. */
+    liveDeploy?: string
     /** Each sitting's plan cost by sitting, from token-ledger, or null when it could not be read. */
     plans?: Readonly<Record<string, number>> | null
     /** Each run's launch count from its `.launches` file, by run name. */
@@ -649,6 +651,7 @@ export function buildBoard(
     afters,
     handoffs: extra.handoffs,
     deployStages: extra.deployStages,
+    liveDeploy: extra.liveDeploy,
     plans,
     launches: extra.launches,
   })
@@ -1937,6 +1940,14 @@ export const deployStageOf = (failedJobs: readonly string[]): string =>
 export const DEPLOY_LIVE = 'live'
 
 /**
+ * True when deploy run `run` is older than `live`, the newest deploy.yml run
+ * on main that went live: production then runs a later main, so `run` blocks
+ * nothing. GitHub numbers runs in the order it creates them.
+ */
+export const supersededBy = (run: string, live: string): boolean =>
+  /^\d+$/.test(run) && /^\d+$/.test(live) && BigInt(run) < BigInt(live)
+
+/**
  * A finished deploy run's state from its latest attempt: `DEPLOY_LIVE` when
  * it concluded `success`, else the strip stage its failed jobs stand for.
  */
@@ -1969,7 +1980,8 @@ export const handoffStops = (handoff: string): string[] => {
  *
  * A sitting is stuck when its last end is not live, nothing runs or queues
  * it, and either its brief is still on `origin/main`, or it is a red deploy
- * with no live run after it and whose run's latest attempt did not pass. A queued entry is held by the cause the
+ * with no live run after it, whose run's latest attempt did not pass, and
+ * whose run is not older than the newest deploy.yml run on main that went live. A queued entry is held by the cause the
  * dispatcher names; a record without the `cause` key, from a dispatcher older
  * than the field, is held when an `After:` sitting is stuck or held. A brief
  * on main that nothing runs or queues is held the same way. A stuck sitting
@@ -1985,12 +1997,14 @@ export function blockedOf(input: {
   handoffs?: Readonly<Record<string, string>>
   /** Each red deploy's failed strip stage, by run. */
   deployStages?: Readonly<Record<string, string>>
+  /** The newest deploy.yml run on main that went live, or empty. */
+  liveDeploy?: string
   /** Each sitting's plan cost, or null when the ledger could not be read. */
   plans?: Readonly<Record<string, number>> | null
   /** Each run's launch count from its `.launches` file, by run name. */
   launches?: Readonly<Record<string, number>>
 }): { blocks: Block[]; drawn: Set<string> } {
-  const { raw, endings, afters, handoffs = {}, deployStages = {}, plans = null, launches = {} } = input
+  const { raw, endings, afters, handoffs = {}, deployStages = {}, liveDeploy = '', plans = null, launches = {} } = input
   const running = new Set(raw.running.map(r => sittingOf(r.brief).sitting))
   const queued = new Map(raw.queued.map(q => [sittingOf(q.brief).sitting, q]))
   const onMain = new Map(Object.keys(afters).map(k => [sittingOf(k).sitting, k]))
@@ -2019,7 +2033,8 @@ export function blockedOf(input: {
   const stuck = new Map<string, Info>()
   for (const [s, i] of ends) {
     if (running.has(s) || queued.has(s)) continue
-    const redDeploy = i.mtimeMs > newestLive && deployStages[deployRunOf(i.end.outcome)] !== DEPLOY_LIVE
+    const run = deployRunOf(i.end.outcome)
+    const redDeploy = i.mtimeMs > newestLive && deployStages[run] !== DEPLOY_LIVE && !supersededBy(run, liveDeploy)
     if (i.kind === 'deploy-red' ? redDeploy : onMain.has(s)) stuck.set(s, i)
   }
 
