@@ -212,10 +212,11 @@ describe("a ship-docs token admits only /ship's docs subject", () => {
       const sb = sandbox(t);
       const repo = sb.repo();
       sb.mint(repo, 'ship-docs');
+      const before = sb.head(repo);
 
       const r = sb.commit(repo, `${subject}\n\nChanges:\n  README — updated\n`, claude());
 
-      assert.equal(r.status, 0, r.stderr);
+      sb.landed(repo, r, before);
     });
   }
 });
