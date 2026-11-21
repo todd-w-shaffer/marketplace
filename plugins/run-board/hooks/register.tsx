@@ -523,8 +523,12 @@ export const register: Register = on => {
     const tiles: { value: string; label: string; color: string; isZero: boolean }[] = [
       { value: String(b.running.length), label: 'running', color: F.peach, isZero: b.running.length === 0 },
       { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
-      { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },    ]
+      { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
+    ]
     const recentMax = Math.max(0, ...b.recent.map(d => d.usd ?? 0))
+    const queueRows = queueTree(b.running, b.queued, b.blocked)
+    // A rule across the card, inside its border and padding.
+    const rule = (color: string) => <Text color={color}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>
     const totals = recentTotals(b.recent, b.checkedAt)
     // A figure right-aligned in a column `width` cells wide: the pad, then the figure in its own span.
     const cell = (value: string, width: number, color: string, bold = false) => (
@@ -632,7 +636,7 @@ export const register: Register = on => {
                 const chain = chainLine(k)
                 return (
                 <Box flexDirection="column" marginTop={1}>
-                  {i > 0 && <Text color={F.surface1}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>}
+                  {i > 0 && rule(F.surface1)}
                   <Text wrap="wrap">
                     <Text backgroundColor={KIND_COLOR[k.kind]} color={F.mantle} bold>
                       {` ${KIND_TAG[k.kind]} `}
@@ -737,7 +741,7 @@ export const register: Register = on => {
         {(b.queued.length > 0 || b.blocked.some(k => k.holds.length > 0)) && (
           <Box {...CARD}>
             {cardHead('queued', 'queued', F.lavender)}
-            {!folded('queued') && queueTree(b.running, b.queued, b.blocked).map((r, i) => (
+            {!folded('queued') && queueRows.map((r, i) => (
               // A joint means the entry needs its parent shipped; a yellow `‖` that a block holds it.
               <Box justifyContent="space-between" columnGap={2} marginTop={r.kind === 'block' && i > 0 ? 1 : 0}>
                 <Text wrap="truncate-end">
@@ -767,7 +771,7 @@ export const register: Register = on => {
         {b.onDeck.length > 0 && (
           <Box {...CARD}>
             {cardHead('deck', 'on deck', F.lavender)}
-            {!folded('deck') && deckTree(b.onDeck, liveDepths(b), new Set(b.queued.map(q => q.sitting))).map(r =>
+            {!folded('deck') && deckTree(b.onDeck, liveDepths(b, queueRows), new Set(b.queued.map(q => q.sitting))).map(r =>
               r.kind === 'group' ? (
                 <Text>
                   <Text bold color={DECK_COLOR[r.mode]}>{r.slug}</Text>
@@ -835,7 +839,7 @@ export const register: Register = on => {
               // The totals under a rule, each figure under its column; the
               // meter and age cells stay blank so the figures line up.
               <Box flexDirection="column">
-                <Text color={F.surface0}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>
+                {rule(F.surface0)}
                 <Box columnGap={2}>
                   <Box flexGrow={1} flexShrink={1} minWidth={0}>
                     <Text wrap="truncate-end" color={F.overlay2}>

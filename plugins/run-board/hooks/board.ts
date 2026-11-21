@@ -752,12 +752,16 @@ export function queueTree(
 
 /**
  * How deep each running and queued sitting sits in the queue tree: a running
- * sitting is 0, and a queued one is its row's depth in `queueTree`.
+ * sitting is 0, and a queued one is its row's depth in `queueTree`. Pass
+ * `rows` when the caller has the tree already.
  */
-export function liveDepths(b: Pick<Board, 'running' | 'queued' | 'blocked'>): Map<string, number> {
+export function liveDepths(
+  b: Pick<Board, 'running' | 'queued' | 'blocked'>,
+  rows: readonly TreeRow[] = queueTree(b.running, b.queued, b.blocked),
+): Map<string, number> {
   const queued = new Set(b.queued.map(q => q.sitting))
   const depths = new Map(b.running.map(r => [r.sitting, 0]))
-  for (const r of queueTree(b.running, b.queued, b.blocked)) {
+  for (const r of rows) {
     if (queued.has(r.sitting)) depths.set(r.sitting, r.rails.length / 2 + (r.joint === '' ? 0 : 1))
   }
   return depths
@@ -808,7 +812,8 @@ export type DeckRow = {
  */
 export function deckTree(deck: readonly Deck[], live: ReadonlyMap<string, number>, queued: ReadonlySet<string>): DeckRow[] {
   const onDeck = new Map(deck.map(d => [d.sitting, d]))
-  const waits = (d: Deck): string[] => afterSittings(d.after).filter(s => s !== d.sitting && (live.has(s) || onDeck.has(s)))
+  const waitsOf = new Map(deck.map(d => [d.sitting, afterSittings(d.after).filter(s => s !== d.sitting && (live.has(s) || onDeck.has(s)))]))
+  const waits = (d: Deck): string[] => waitsOf.get(d.sitting) ?? []
   const reach = new Map<string, number>()
   const reachOf = (s: string, seen: Set<string>): number => {
     const known = live.get(s) ?? reach.get(s)
