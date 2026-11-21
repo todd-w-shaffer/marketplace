@@ -60,10 +60,8 @@ import type { Ending, LoopFile, RawStatus, Spend } from './board'
 // the same whatever the terminal theme.
 const F = {
   text: '#cad3f5',
-  subtext1: '#b8c0e0',
   subtext0: '#a5adcb',
   overlay2: '#939ab7',
-  overlay1: '#8087a2',
   overlay0: '#6e738d',
   surface2: '#5b6078',
   surface1: '#494d64',
@@ -99,8 +97,8 @@ const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 const DECK_COLOR: Record<DeckMode, string> = { ready: F.green, enrich: F.yellow, interactive: F.red }
 // How many braille cells a recent row's cost meter takes.
 const RECENT_METER_CELLS = 6
-// The widths of a recent row's time, cost and age columns, each with its
-// leading gap: `14h52m`, ` $1,238`, ` 12h`.
+// The least widths of a recent row's time, cost and age columns, the cost and
+// age with a leading gap: `14h52m`, ` $1,238`, ` 12h`. A wider figure widens its column.
 const RECENT_TIME_CELLS = 6
 const RECENT_COST_CELLS = 7
 const RECENT_AGE_CELLS = 4
@@ -530,6 +528,9 @@ export const register: Register = on => {
     // A rule across the card, inside its border and padding.
     const rule = (color: string) => <Text color={color}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>
     const totals = recentTotals(b.recent, b.checkedAt)
+    const widest = (xs: (string | null)[]): number => Math.max(0, ...xs.map(x => x?.length ?? 0))
+    const timeCells = Math.max(RECENT_TIME_CELLS, widest([...b.recent.map(d => (d.minutes === null ? null : hoursMinutes(d.minutes))), totals.minutes === null ? null : hoursMinutes(totals.minutes)]))
+    const costCells = Math.max(RECENT_COST_CELLS, 1 + widest([...b.recent.map(d => (d.usd === null ? null : dollars(d.usd))), totals.usd === null ? null : dollars(totals.usd)]))
     // A figure right-aligned in a column `width` cells wide: the pad, then the figure in its own span.
     const cell = (value: string, width: number, color: string, bold = false) => (
       <Text>
@@ -616,11 +617,11 @@ export const register: Register = on => {
           {tileRow(tiles)}
           {spendWindows.length > 0 && (
             <Box marginTop={1}>
-              <Text wrap="truncate-end" color={F.overlay1}>
+              <Text wrap="truncate-end" color={F.overlay2}>
                 spend
                 {spendWindows.map(([usd, span], i) => (
                   <Text>
-                    {i > 0 ? ' ·' : ''} <Text color={F.subtext1}>{dollars(usd)}</Text> {span}
+                    {i > 0 ? ' ·' : ''} <Text color={F.subtext0}>{dollars(usd)}</Text> {span}
                   </Text>
                 ))}
               </Text>
@@ -790,8 +791,8 @@ export const register: Register = on => {
                   <Text wrap="truncate-end" color={F.overlay2}>
                     {r.wait !== '' && (
                       // The nearest wait, its sitting blue when it is queued.
-                      <Text color={F.overlay1}>
-                        after <Text color={r.isWaitQueued ? F.blue : F.overlay1}>{r.wait}</Text>
+                      <Text>
+                        after <Text color={r.isWaitQueued ? F.blue : F.overlay2}>{r.wait}</Text>
                       </Text>
                     )}
                     {r.wait !== '' && r.note !== '' ? ' · ' : ''}
@@ -824,12 +825,12 @@ export const register: Register = on => {
                   </Box>
                   <Box flexShrink={0}>
                     <Text wrap="truncate-end">
-                      {cell(d.minutes === null ? '—' : hoursMinutes(d.minutes), RECENT_TIME_CELLS, isSlow ? F.peach : F.subtext0)}
+                      {cell(d.minutes === null ? '—' : hoursMinutes(d.minutes), timeCells, isSlow ? F.peach : F.overlay2)}
                       {'  '}
                       <Text color={F.peach}>{meter.fill}</Text>
                       <Text color={F.surface1}>{meter.rest}</Text>
-                      {cell(d.usd === null ? '—' : dollars(d.usd), RECENT_COST_CELLS, F.text)}
-                      {cell(agoShort(d.endedMs, b.checkedAt), RECENT_AGE_CELLS, F.overlay1)}
+                      {cell(d.usd === null ? '—' : dollars(d.usd), costCells, F.text)}
+                      {cell(agoShort(d.endedMs, b.checkedAt), RECENT_AGE_CELLS, F.overlay0)}
                     </Text>
                   </Box>
                 </Box>
@@ -848,9 +849,9 @@ export const register: Register = on => {
                   </Box>
                   <Box flexShrink={0}>
                     <Text wrap="truncate-end">
-                      {cell(totals.minutes === null ? '' : hoursMinutes(totals.minutes), RECENT_TIME_CELLS, F.subtext0)}
+                      {cell(totals.minutes === null ? '' : hoursMinutes(totals.minutes), timeCells, F.overlay2)}
                       {' '.repeat(2 + RECENT_METER_CELLS)}
-                      {cell(totals.usd === null ? '' : dollars(totals.usd), RECENT_COST_CELLS, F.text, true)}
+                      {cell(totals.usd === null ? '' : dollars(totals.usd), costCells, F.text, true)}
                       {' '.repeat(RECENT_AGE_CELLS)}
                     </Text>
                   </Box>

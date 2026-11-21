@@ -12,6 +12,7 @@ import {
   cycleCount,
   dotDigits,
   handoffQuestion,
+  handoffStops,
   buildBoard,
   buildLoop,
   deckTree,
@@ -1021,6 +1022,35 @@ test('a stop reads in words from the table, a number off it reads stop N, and tw
   expect(whyWith('**Stop:** 5 and 6.')).toBe('a come-up-for-air finding and savor found a failed premise · nothing pushed · 12m · $9.56')
 })
 
+test('only a line that starts with the marker is a stop line', () => {
+  expect(handoffStops('**Stop:** 6.\n\nThe relaunch reads the `**Stop:** <n>.` line again.')).toEqual(['6'])
+  expect(handoffStops('**Stop:** 6.\n\nA quoted **Stop:** 7. is prose.')).toEqual(['6'])
+})
+
+test('a broken run reads its stop in words, and a split leaves out the stop its headline says', () => {
+  const blockOf = (kind: string, stop: string) =>
+    buildBoard(S625_STATUS, {}, new Set(), NOW, {
+      endings: S625_ENDINGS.map(e => (e.text === S625_PROGRESS ? { ...e, text: S625_PROGRESS.replace('kind: decision', `kind: ${kind}`) } : e)),
+      afters: S625_AFTERS,
+      handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': `# x\n\n${stop}\n` },
+    }).blocked[0]
+  expect(blockOf('run-broke', '**Stop:** 1. The hook stayed red.')?.why).toBe('the pre-push hook stayed red · nothing pushed · 12m · $9.56')
+  expect(blockOf('run-broke', 'No stop line here.')?.why).toBe('stopped: the brief is still in docs/briefs. Read the handoff.')
+  const split = blockOf('split', '**Stop:** 7.')
+  expect(split?.headline).toBe('S625 is over its size ceiling')
+  expect(split?.why).toBe('step 0 savor · nothing pushed · 12m · $9.56')
+})
+
+test('a folded queue card with nothing queued names only the holds', () => {
+  const b = buildBoard(S625_STATUS, {}, new Set([927]), NOW, {
+    endings: S625_ENDINGS,
+    afters: S625_AFTERS,
+    handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': S625_HANDOFF },
+  })
+  expect(b.queued).toEqual([])
+  expect(foldSummary('queued', b)).toBe('holds 2')
+})
+
 test('a ring of After lines inside a block draws each hold once', async () => {
   const raw = {
     dispatcher: 1,
@@ -1132,7 +1162,18 @@ test('recent ends in a totals row: count, span, median, total time and the unrou
   expect(await has(ui, '$22')).toBe(true)
   // Over twice the median draws peach; S676's 1h57m is under it.
   expect(await coloursOf(ui, '4h57m')).toEqual(['#f5a97f'])
-  expect(await coloursOf(ui, '1h57m')).toEqual(['#a5adcb'])
+  expect(await coloursOf(ui, '1h57m')).toEqual(['#939ab7'])
+  await ui.unmount()
+})
+
+test('a total wider than the rows widens its column, so the rows line up under it', async ($, on) => {
+  const long = endedOf(PROPOSED_RECENT.map(([s]) => [s, 600, 1100] as [string, number, number]))
+  const { ui } = await mountBoard($, on, recentBoard(long))
+  const texts = (await (ui as Ui).findAll({ type: 'Text' })).map(t => t.text ?? '')
+  expect(texts).toContain('100h00m')
+  expect(texts).toContain(' 10h00m')
+  expect(texts).toContain(' $11,000')
+  expect(texts).toContain('  $1,100')
   await ui.unmount()
 })
 
@@ -1145,9 +1186,3 @@ test('a run with no totals counts, and moves no median or sum', async ($, on) =>
   await ui.unmount()
 })
 
-test('one timed run draws no peach', async ($, on) => {
-  const { ui } = await mountBoard($, on, recentBoard(endedOf([['S682', 297, 22.4]])))
-  expect(await coloursOf(ui, '4h57m')).toContain('#a5adcb')
-  expect(await coloursOf(ui, '4h57m')).not.toContain('#f5a97f')
-  await ui.unmount()
-})

@@ -72,8 +72,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   the queue ↓`: the first three in the queue's order), and one `next` line. The why-line states the handoff's
   `**Stop:**` number in words from the stop table in `hooks/board.ts`, which copies `docs/briefs/rules/autopilot.md`
   § "Stop only for these" (`savor found a failed premise · nothing pushed · 19m · $13.12`); two numbers join with
-  `and`, a number off the table reads `stop N` after the stage where it broke, and a handoff with no stop line keeps
-  that stage. The kind is
+  `and`, a number off the table reads `stop N` after the stop words, or after the stage where it broke when the line
+  names no known number, and a handoff with no stop line keeps that stage. A split leaves out stop 7, which its
+  headline says; a broken run with no stop line reads the launcher's outcome sentence. The kind is
   status.json's `finished[].kind`, else the `kind:` line above the progress file's last `finished:` line. A queued
   entry is held by status.json's `queued[].cause`; a dispatcher that writes no `cause` key is read through the
   `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never

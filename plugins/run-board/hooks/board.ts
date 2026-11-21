@@ -648,8 +648,8 @@ export type TreeRow = {
  * The queue as a tree of who waits on whom. Each running run is a root, drawn
  * only when something waits on it. An entry hangs under the running or queued
  * sitting on its `After:` line that sits deepest in the tree, which is the one
- * to ship last; a sitting that is neither running, queued nor held has shipped
- * and draws no edge. An entry that needs nothing in the tree is a root of its
+ * to ship last; a sitting that is neither running nor queued draws no edge:
+ * a held one sits under its block, and one that is neither has shipped. An entry that needs nothing in the tree is a root of its
  * own under the dispatcher's reason; a running run it does not name is not its
  * parent, since slots order nothing. Siblings go in queue order.
  *
@@ -1056,9 +1056,12 @@ export const handoffQuestion = (handoff: string): string => {
   return text.trim()
 }
 
-/** Every stop number a handoff's last `**Stop:**` line names before its first period: `**Stop:** 5 and 6.` gives 5 and 6. */
+/**
+ * Every stop number a handoff's last `**Stop:**` line names before its first period: `**Stop:** 5 and 6.` gives 5 and 6.
+ * The line starts with the marker, as `scripts/autopilot.sh` reads it, so a marker quoted in prose is not a stop.
+ */
 export const handoffStops = (handoff: string): string[] => {
-  const line = [...handoff.matchAll(/\*\*Stop:\*\* ([^.\n]*)/g)].pop()?.[1] ?? ''
+  const line = [...handoff.matchAll(/^\*\*Stop:\*\* ([^.\n]*)/gm)].pop()?.[1] ?? ''
   return [...line.matchAll(/\d+/g)].map(m => m[0])
 }
 
@@ -1278,7 +1281,10 @@ function blockFace(
       next: `re-run it if it is a flake, else fix main; the next green deploy clears it${releases}`,
     }
   }
-  const why = [...stopWords(handoffStops(handoff), broke === 'savor' ? 'step 0 savor' : (broke ?? '')), pushed ? 'pushed' : 'nothing pushed', ...spent]
+  const stops = handoffStops(handoff)
+  // A split's headline already says stop 7.
+  const said = kind === 'split' ? stops.filter(n => n !== '7') : stops
+  const why = [...stopWords(said, broke === 'savor' ? 'step 0 savor' : (broke ?? '')), pushed ? 'pushed' : 'nothing pushed', ...spent]
     .filter(p => p !== '')
     .join(' · ')
   if (kind === 'decision') {
@@ -1286,7 +1292,8 @@ function blockFace(
     return { ...base, headline: q === '' ? `${root} needs a decision` : `${root} asks: ${q}`, why, next: `answer in the handoff, then relaunch ${root}` }
   }
   if (kind === 'split') return { ...base, headline: `${root} is over its size ceiling`, why, next: `split the brief, then relaunch ${root}` }
-  return { ...base, headline: `${root}: the run broke`, why: sentence, next: `read the log, then relaunch ${root}` }
+  // A broken run with no stop line reads the launcher's outcome sentence.
+  return { ...base, headline: `${root}: the run broke`, why: stops.length > 0 ? why : sentence, next: `read the log, then relaunch ${root}` }
 }
 
 /** How long ago an instant was: `24m ago`, `5h12m ago`, `3d ago` past two days. */
@@ -1507,7 +1514,10 @@ export type RecentTotals = {
   minutes: number | null
   /** The listed runs' costs added up unrounded, or null when none has a cost. */
   usd: number | null
-  /** A run over this many minutes draws its time in peach; null under two timed runs. */
+  /**
+   * A run over this many minutes draws its time in peach; null when no run is timed. Under two timed runs no
+   * time can pass twice the median, so nothing draws peach.
+   */
   slowOver: number | null
 }
 
@@ -1528,7 +1538,7 @@ export function recentTotals(recent: readonly Ended[], now: number): RecentTotal
     words: `${recent.length} live in ${span}${median === null ? '' : ` · median ${hoursMinutes(median)}`}`,
     minutes: sum(timed),
     usd: sum(costs),
-    slowOver: median === null || timed.length < 2 ? null : 2 * median,
+    slowOver: median === null ? null : 2 * median,
   }
 }
 
@@ -1598,7 +1608,7 @@ export function foldSummary(card: FoldCard, b: Board): string {
   }
   if (card === 'queued') {
     const held = b.blocked.reduce((n, k) => n + k.holds.length, 0)
-    return [plural(b.queued.length, 'waiting', 'waiting'), held > 0 ? `holds ${held}` : ''].filter(p => p !== '').join(' · ')
+    return [b.queued.length > 0 ? `${b.queued.length} waiting` : '', held > 0 ? `holds ${held}` : ''].filter(p => p !== '').join(' · ')
   }
   if (card === 'deck')
     return DECK_GROUPS.map(g => [g.label, b.onDeck.filter(d => d.mode === g.mode).length] as const)
