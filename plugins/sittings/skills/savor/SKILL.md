@@ -22,7 +22,7 @@ The mandate is **tighten, not grow or shrink**. Findings fix corner cases, clari
 
 ## Input
 
-The user provides a path to a spec (markdown). If no path is given, check `docs/backlog/` for recently modified `.spec.md` files and confirm which one.
+The user provides a path to a spec (markdown). If no path is given, ask which spec.
 
 ## Modes
 
@@ -41,7 +41,7 @@ picks a mode only when it asks for that mode by name ("run a decision pass", "sa
 same required arguments. In decision and
 launch mode every argument in the mode's row is required: a missing one is a usage error, so state the row's
 invocation as `Usage:` and stop. Launch mode's two trailing arguments come as a pair or not at all: one alone is a
-usage error. Neither mode searches `docs/backlog/`, and launch mode needs the findings file
+usage error. Neither mode searches for a spec, and launch mode needs the findings file
 because a caller that runs headless reads the findings from it.
 
 Decision and launch modes read the repo's checks doc (§ Repo checks) for four things the skill does not name:
@@ -90,6 +90,8 @@ for goes to a reviewer as a raw hit.
 
 Launch the structural agents **in parallel**: systems and integration always, and testing strategy whenever the spec proposes tests (see Agent 3's trigger). Each gets the spec path and a brief of what files to read. No agent sees another's findings — independent perspectives are the point.
 
+Every reviewer brief in this skill ends with the **reviewer footer**: "Report as a numbered list. Do not suggest scope changes. Keep it under 400 words."
+
 ### Agent 1: Systems Reviewer
 
 "You are a systems programmer reviewing a spec for correctness before implementation."
@@ -102,7 +104,7 @@ This agent reads the spec against the **language and runtime**. It looks for:
 - **Memory and performance** — does the spec's cost analysis hold? Are buffer sizes reasonable? Could a loop or scan become expensive at scale?
 - **Semantic drift** — does a proposed change subtly alter the meaning of an existing return value, counter, or flag in a way callers won't expect?
 
-Instruct the agent: "Report findings as a numbered list. For each: what the issue is, why it matters, and what the fix is if obvious. Do not suggest scope changes — only flag things that would cause test failures, bugs, or silent behavioral changes. Keep it under 400 words."
+Instruct the agent: "For each finding: what the issue is, why it matters, and what the fix is if obvious. Only flag things that would cause test failures, bugs, or silent behavioral changes." Then the reviewer footer.
 
 ### Agent 2: Integration Reviewer
 
@@ -117,11 +119,11 @@ This agent reads the spec against the **codebase as it exists today**. It looks 
 - **Convention mismatch** — does the spec follow the project's patterns (test naming, constant placement, error handling, struct initialization) or accidentally introduce a new one?
 - **Missing state transitions** — are there events, modes, or lifecycle moments the spec doesn't handle (reset, shutdown, reconnect, first-run)?
 
-Instruct the agent: "Report findings as a numbered list. For each: what the spec says, what the code actually does, and whether it's a problem. Do not suggest scope changes. Keep it under 400 words."
+Instruct the agent: "For each finding: what the spec says, what the code actually does, and whether it's a problem." Then the reviewer footer.
 
 ### Agent 3: Testing-Strategy Reviewer
 
-**Trigger:** launch when the spec proposes tests — a TDD plan, RED steps, a test file in the touchlist, or named mutations. Skip for documentation-only specs and specs with no test plan; say so in the Phase 4 summary. This trigger is mechanical, like the historical reviewer's, so the agent is structural and never takes a contextual slot.
+**Trigger:** launch when the spec proposes tests — a TDD plan, RED steps, a test file in the touchlist, or named mutations. Skip for documentation-only specs and specs with no test plan; say so in the Phase 4 summary. This trigger is mechanical, so the agent is structural and never takes a contextual slot.
 
 "You are a test engineer reviewing the tests a spec proposes, before any of them is written."
 
@@ -136,7 +138,7 @@ This agent reads the spec's **test plan** against the test harness and doubles a
 - **What the suite cannot see** — which behavior the spec commits to has no test that could observe it (chunk boundaries, encodings, wiring between two units that are each tested alone)? Name it, and name the one fixture or test that would make it visible, or say it belongs in the spec's residues.
 - **Level** — is each test at the level that can see the fault (unit vs integration vs route)? Where is the wiring between tested units left untested?
 
-Instruct the agent: "Report findings as a numbered list. For each: which proposed test, what it cannot prove as written, and the smallest change that fixes it. Tighten only the tests the spec already commits to; do not propose coverage for behavior the spec does not change. A fixture that exposes a gap in committed behavior counts as tightening. Do not suggest scope changes. Keep it under 400 words."
+Instruct the agent: "For each finding: which proposed test, what it cannot prove as written, and the smallest change that fixes it. Tighten only the tests the spec already commits to; do not propose coverage for behavior the spec does not change. A fixture that exposes a gap in committed behavior counts as tightening." Then the reviewer footer.
 
 ## Phase 2b: Contextual Personas
 
@@ -145,9 +147,7 @@ After launching the structural reviewers, read the spec one more time and ask:
 are blind to?**
 
 Pick 1–2 contextual personas whose expertise covers those surfaces. Launch them
-in parallel (they can overlap with the Phase 2 agents if timing allows). Each
-gets the same mandate as Phase 2 agents: tighten only, no scope changes, 400
-words, numbered findings.
+in parallel (they can overlap with the Phase 2 agents if timing allows).
 
 **Announce your picks before launching.** Example:
 
@@ -167,24 +167,19 @@ Pure plumbing specs (rename a field, add a config key) get 0.
 | Visual rendering pipeline             | **Visual fidelity reviewer**     | Terminal compatibility, color space assumptions, animation frame budget, layout overflow, glyph width math |
 | Security or trust boundaries          | **Attacker persona**             | Input validation, privilege escalation, injection surfaces, trust boundary crossings               |
 | Data migration or schema change       | **Data integrity reviewer**      | Backward compatibility, zero-downtime migration, rollback path, data loss scenarios                |
-| Touchlist with files that have deep git history (>10 commits at HEAD) | **Historical reviewer** | Re-litigation of reverted approaches, eroded rationale of origin commits, dormant-area risk, re-introduction patterns (cites SHAs) |
+| Deep-history touchlist (§ The Historical Reviewer) | **Historical reviewer** | Re-litigation of reverted approaches, eroded rationale of origin commits, dormant-area risk, re-introduction patterns (cites SHAs) |
 
 Most specs get 1 contextual persona. Specs that touch two surfaces in the table
 get 2. Cap at 2 — more dilutes focus. There is no chaos-engineer row: its one
 recurring finding, a race test with no deterministic twin, is on Agent 3's
 checklist, and runtime ordering and TOCTOU belong to the systems reviewer.
 
-**The historical reviewer is additive** — when its trigger fires (any
-touchlist file exists at HEAD with >10 commits, and the spec is not
-documentation-only — see its dedicated section below for the full
-rule), it launches *in addition to* the structural-pattern picks and
-does not count against the 2-cap. The cap exists to prevent
-judgment-picked personas from diluting focus; the historical reviewer
-is mechanically triggered by a touchlist property, not a judgment call.
+The historical reviewer is mechanically triggered, so it launches in
+addition to the judgment picks and does not count against the cap of 2.
 
 Each contextual persona gets the same brief structure as the structural agents:
 a role sentence, the spec path, the files to read, and the checklist of what to
-look for. The "do not suggest scope changes" instruction is mandatory.
+look for, then the reviewer footer.
 
 ### The Historical Reviewer (embedded brief)
 
@@ -203,7 +198,7 @@ as executable prompt code and trigger the reviewer normally.
 **Announce the pick:** *"This spec touches files with deep history, so I'm
 adding a **historical reviewer**."*
 
-**Brief (pass to the agent verbatim):**
+**Brief (pass to the agent verbatim, then append the reviewer footer):**
 
 > You are a regression auditor reviewing a spec against the git history of
 > touched files. Flag four specific patterns. You are not writing provenance
@@ -245,18 +240,12 @@ adding a **historical reviewer**."*
 >    ```
 >    Read the rationale. If the body is terse ("initial commit", "add
 >    file"), note that — eroded-rationale findings need a quotable stated
->    reason to land.
+>    reason to land. Don't add `-1`: it cuts the output before `--follow`
+>    resolves renames. The `sed` already keeps one record.
 >
->    **Do not add `-1` to this command.** `-1` truncates before `--follow`
->    resolves renames, so it silently returns nothing. The `sed` bounds the
->    output to one record; `head -1` can't, because the body is multi-line.
->
->    **Known limitation:** `--follow` may still resolve to the rename commit
->    rather than the true origin when a file has been renamed. If the
->    returned commit subject looks like a rename ("rename", "move", "split
->    out"), flag the file in `investigation_notes` as "origin uncertain
->    (likely rename)" and downgrade eroded-rationale findings against it to
->    low-confidence.
+>    If the origin's subject looks like a rename, note "origin uncertain
+>    (likely rename)" in `investigation_notes` and treat eroded-rationale
+>    findings for that file as low-confidence.
 >
 > 2. **Inflection candidates (top 3 per file).**
 >    ```bash
@@ -345,18 +334,17 @@ adding a **historical reviewer**."*
 >
 > **Discipline:**
 >
-> - **Tighten only.** No scope changes. No "this file has churned a lot,
->   consider redesigning."
+> - **No redesigns.** No "this file has churned a lot, consider redesigning."
 > - **Cite SHAs.** Every finding references at least one commit.
 > - **State gaps.** Don't pad with weak findings.
 > - **Weak-finding test:** for each candidate, ask "would this change a
 >   Phase 3 classification decision — fix-in-spec, code-comment, or
 >   discard?" If the answer is "no, this is a vague historical
 >   observation," drop it.
-> - **400-word cap** on findings (excluding `investigation_notes`).
-> - **Budget precedence:** if findings would exceed 400 words, drop the
->   weakest findings first; never truncate SHAs or quoted commit bodies
->   mid-finding.
+> - **Budget:** the 400-word cap excludes `investigation_notes`. Over it,
+>   drop the weakest findings first; never truncate SHAs or quoted commit
+>   bodies mid-finding.
+
 
 **Default Phase 3 classification heuristics** (still subject to the signal
 filter):
@@ -403,8 +391,7 @@ Savor: [spec name]
   No scope changes.
 ```
 
-The `Contextual:` line lists every persona that actually ran, including
-the **historical reviewer** when its trigger fired (see Phase 2b). When
+The `Contextual:` line lists every persona that actually ran. When
 nothing contextual ran, write `"none — pure plumbing"`.
 
 The `Kept by reviewer:` line counts findings that survived the signal
@@ -445,7 +432,7 @@ Decision mode edits nothing else in the spec: no fact, cycle, inventory row or t
 
 ### The premise prober
 
-**Brief (pass to the agent verbatim):**
+**Brief (pass to the agent verbatim, then append the reviewer footer):**
 
 > You check the premises of a spec's decisions against the code as it is today. You do not judge whether a
 > decision is a good idea.
@@ -456,12 +443,12 @@ Decision mode edits nothing else in the spec: no fact, cycle, inventory row or t
 >    report does not answer.
 > 3. Answer `holds` or `fails` for each claim, with the file and the symbol you read, and one sentence of what the
 >    code does. A claim you cannot settle by reading is `unread`, with the reason.
-> 4. Report as a numbered list, one claim per item: the decision's number, the claim, the answer, the read. Keep
->    it under 400 words. Suggest no change to the spec.
+> 4. One claim per item: the decision's number, the claim, the answer, the read. Suggest no change to the spec.
+
 
 ### The product-critique reviewer
 
-**Brief (pass to the agent verbatim):**
+**Brief (pass to the agent verbatim, then append the reviewer footer):**
 
 > You are a product owner's sparring partner, reviewing a spec's decisions before they are settled. You press
 > the decisions themselves: product direction, user behaviour, business trade-offs. You do not review how the
@@ -478,8 +465,8 @@ Decision mode edits nothing else in the spec: no fact, cycle, inventory row or t
 >    structure. Another review covers those.
 > 5. Where a decision rests on a claim about the code that looks false, name the claim in one line, marked
 >    `premise:`, and do not investigate it. A separate agent reads the code.
-> 6. Report as a numbered list, one decision per item: its door, the scenarios, and the question, or
->    `no question` with the reason. Keep it under 400 words. Suggest no new feature and no removed scope.
+> 6. One decision per item: its door, the scenarios, and the question, or `no question` with the reason.
+
 
 ### Decision mode's summary
 
@@ -632,4 +619,4 @@ line as `<name> (no delta)`:
 - **Fresh context is the point.** The agents don't see the conversation that produced the spec. Their naivete is the value — they'll ask "wait, does this actually work?" about things the author assumed.
 - **Launch mode never asks; it stops.** § Launch mode says where its questions go and when it stops.
 - **One pass.** Savor runs once. If the user wants another round after fixes, they invoke `/savor` again. Don't recursively self-audit.
-- **No implementation.** Savor edits the spec markdown. It never creates or modifies source code, tests, or build files. That's `/spec-to-ship`'s job.
+- **No implementation.** Savor edits the spec markdown. It never creates or modifies source code, tests, or build files. That's the implementer's job.
