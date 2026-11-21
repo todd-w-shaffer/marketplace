@@ -1608,3 +1608,169 @@ test('one poll reads the files and the ledger, and writes a board with plan cost
   expect(rows.find(r => r.startsWith('slot 1 '))?.includes('S682')).toBe(true)
   await ui.unmount()
 })
+
+const DONE_LIVE = 'finished: shipped; production is live (run 1). ($9.00, 40 min)'
+const statusOf = (s: object) => {
+  const raw = parseStatus(JSON.stringify({ dispatcher: null, running: [], queued: [], finished: [], ...s }))
+  if (raw === null) throw new Error('status did not parse')
+  return raw
+}
+
+test('a finished record whose slot was never released draws once, to its span end or the file mtime', () => {
+  const raw = statusOf({
+    finished: [
+      { entry: 1, brief: `${BRIEFS}s681-dropped.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 2, slot_taken: iso(NOW - 4 * HOUR), slot_released: null },
+      { entry: 2, brief: `${BRIEFS}s682-no-slot-line.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 1, slot_taken: iso(NOW - 4 * HOUR), slot_released: null },
+    ],
+  })
+  const endings = [
+    { base: 'kickoff-sitting-s681-dropped', text: stampedAt([[NOW - 4 * HOUR + 3000, 'slot: 2'], [NOW - 3 * HOUR, DONE_LIVE]]), mtimeMs: NOW - 3 * HOUR },
+    // No `slot:` line to match: the record draws to the file's mtime.
+    { base: 'kickoff-sitting-s682-no-slot-line', text: stampedAt([[NOW - 4 * HOUR, 'skill: simplify x'], [NOW - 150 * MIN, DONE_LIVE]]), mtimeMs: NOW - 150 * MIN },
+  ]
+  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: {} })
+  expect(barsOf(b, 2)).toEqual(['S681 live -240..-180'])
+  expect(barsOf(b, 1)).toEqual(['S682 live -240..-150'])
+})
+
+test('a running bar that ends at now holds its slot in the folded line', () => {
+  expect(foldSummary('timeline', tlBoard([]))).toBe('slot 1 S692 · slot 2 idle · 3 held')
+})
+
+test("a relaunched run's earlier launches draw on their own slots", () => {
+  const brief = `${BRIEFS}s684-home-gallery-sections.md`
+  const raw = statusOf({
+    running: [{ entry: 5, brief, lane: '', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 1, slot: 1, slot_taken: iso(NOW - 30 * MIN), slot_released: null }],
+  })
+  const text = stampedAt([
+    [NOW - 4 * HOUR, 'slot: 2'],
+    [NOW - 2 * HOUR, 'finished: stopped: the brief is still in docs/briefs. ($5.00, 120 min)'],
+    [NOW - 30 * MIN, 'slot: 1'],
+  ])
+  const b = buildBoard(raw, { [brief]: text }, new Set([11]), NOW, { endings: [], afters: {} })
+  expect(barsOf(b, 2)).toEqual(['S684 stopped -240..-120'])
+  expect(barsOf(b, 1)).toEqual(['S684 running -30..0'])
+})
+
+test('a slot span with nothing after it closes at the next slot line, else the last stamp, else the mtime', () => {
+  const endings = [
+    {
+      base: 'kickoff-sitting-s681-dropped',
+      text: stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 330 * MIN, 'skill: x'], [NOW - 5 * HOUR, 'slot: 2'], [NOW - 4 * HOUR, 'skill: y']]),
+      mtimeMs: NOW - 3 * HOUR,
+    },
+    { base: 'kickoff-sitting-s690-lone', text: stampedAt([[NOW - 200 * MIN, 'slot: 1']]), mtimeMs: NOW - 150 * MIN },
+  ]
+  const b = buildBoard(statusOf({}), {}, new Set(), NOW, { endings, afters: {} })
+  expect(barsOf(b, 2)).toEqual(['S681 stopped -360..-300', 'S681 stopped -300..-240'])
+  expect(barsOf(b, 1)).toEqual(['S690 stopped -200..-150'])
+})
+
+test('an empty or unparsable at line keeps the stamp above it', () => {
+  expect(lineTimes(`at: ${iso(T0)}\nslot: 1\nat: \nskill: x\nat: garbage\nbash: y`)).toEqual([T0, T0, T0, T0, T0, T0])
+})
+
+test('plan costs add unrounded', () => {
+  const spend = JSON.stringify({ kind: 'commit', ts: '2026-10-31T08:00:00Z', phase: 'plan', sitting: 682, cost: { usd: 0.004 } })
+  const plans = planCosts(ledgerSpends([spend, spend, spend].join('\n')))
+  expect(Math.abs((plans.S682 ?? 0) - 0.012) < 1e-9).toBe(true)
+})
+
+test("you starts at the stop of the ending BLOCKED reads, the sitting's newest", () => {
+  const raw = parseStatus(TL_STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  const older = `${stampedAt([[NOW - 4 * HOUR, 'skill: x'], [NOW - 3 * HOUR, 'kind: decision']])}\nfinished: stopped: an older stop. ($1.00, 60 min)`
+  const b = buildBoard(raw, {}, new Set([1, 11]), NOW, {
+    recent: endedOf(PROPOSED_RECENT),
+    afters: TL_AFTERS,
+    endings: [
+      { base: 'kickoff-sitting-s684-an-older-slug', text: older, mtimeMs: NOW - 3 * HOUR },
+      { base: S684_RUN, text: S684_STOP, mtimeMs: NOW - 19 * MIN },
+    ],
+    utcOffset: '-0500',
+  })
+  expect(b.timeline.you?.sitting).toBe('S684 ? 19m')
+})
+
+test('a running record whose slot_taken does not parse draws on its slot from its start, projected', () => {
+  const raw = statusOf({
+    running: [{ entry: 5, brief: `${BRIEFS}s692-design-tokens.md`, lane: '', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 1, slot: 2, slot_taken: 'not a time', slot_released: null }],
+  })
+  const b = buildBoard(raw, {}, new Set([11]), NOW, { recent: endedOf(PROPOSED_RECENT), endings: [], afters: {} })
+  expect(barsOf(b, 1)).toEqual([])
+  expect(barsOf(b, 2)).toEqual(['S692 running -30..34 live to 0'])
+})
+
+test("recent's totals put the time and cost under the rows' columns when plan cells show", async ($, on) => {
+  const recent = endedOf(PROPOSED_RECENT.slice(0, 3))
+  const { ui } = await mountBoard($, on, recentBoard(recent, { plans: planCosts(ledgerSpends(PLAN_LEDGER)) }))
+  const texts = (await (ui as Ui).findAll({ type: 'Text' })).map(t => t.text ?? '')
+  // How many cells follow a figure's last cell in its line.
+  const after = (line: string | undefined, figure: string): number => (line === undefined ? -1 : line.length - (line.indexOf(figure) + figure.length))
+  const row = texts.find(t => t.includes('$34') && t.includes('+$40'))
+  const total = texts.find(t => t.includes('$95') && t.includes('+ $46 plan'))
+  expect(after(total, '$95')).toBe(after(row, '$34'))
+  expect(after(total, '4h39m')).toBe(after(row, '1h39m'))
+  await ui.unmount()
+})
+
+test('a lane label of two digits keeps a space before its track', async ($, on) => {
+  const raw = statusOf({
+    finished: [{ entry: 1, brief: `${BRIEFS}s677-drafts.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 16, slot_taken: iso(NOW - 2 * HOUR), slot_released: iso(NOW - HOUR) }],
+  })
+  const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set(), NOW, { endings: [], afters: {} }))
+  const texts = (await (ui as Ui).findAll({ type: 'Text' })).map(t => t.text ?? '')
+  const lanes = texts.filter(t => /^slot \d+/.test(t) && t.length > 8)
+  expect(lanes.length).toBe(16)
+  expect(lanes.filter(t => !/^slot \d+ +[^ ]/.test(t))).toEqual([])
+  expect(new Set(lanes.map(t => t.length)).size).toBe(1)
+  await ui.unmount()
+})
+
+test('a brief blob that fails to read is asked for again on the next poll', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { HOME })
+  mock.store(on, { folds: {} })
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'board' } }))
+  on('ui.status', () => ({ value: undefined }))
+  const status = JSON.stringify({ dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
+  on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: status } : { deny: 'no such file' }))
+  on('fs.list', (_: unknown, e: { path: string }) =>
+    e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
+  )
+  const blobs: Record<string, string> = { b686: SPLIT_BRIEFS[0]?.text ?? '', b690: SPLIT_BRIEFS[1]?.text ?? '', '5150': SITTINGS_JSON }
+  let registryReads = 0
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+    const [cmd = '', ...args] = e.argv
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (cmd === 'git' && args[0] === 'ls-tree')
+      return out(`100644 blob b686\t${BRIEFS}s686-dashboard-rail.md\n100644 blob b690\t${BRIEFS}s690-nav-overlays.md\n100644 blob 5150\tdocs/briefs/sittings.json\n`)
+    if (cmd === 'git' && args[0] === 'cat-file') {
+      const sha = args[2] ?? ''
+      // The registry's first read fails.
+      if (sha === '5150' && registryReads++ === 0) return out('', 128)
+      return sha in blobs ? out(blobs[sha] ?? '') : out('', 128)
+    }
+    if (cmd === 'date') return out('-0500')
+    if (cmd === 'ps') return out('1\n')
+    return out('', 1)
+  })
+  const mount = () =>
+    $.ui.mount({
+      plugin: 'run-board',
+      component: 'Pane',
+      requestId: 'run-board',
+      surface: 'terminal',
+      props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(0)
+  const first = await mount()
+  expect(await has(first, 'split ×1')).toBe(true)
+  await first.unmount()
+  await clock.advance(5000)
+  const second = await mount()
+  expect(await has(second, 'split ×2')).toBe(true)
+  await second.unmount()
+})

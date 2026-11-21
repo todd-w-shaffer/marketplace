@@ -316,13 +316,14 @@ const STAMP = /^at: (.*)$/
 /**
  * Each line's time: the time on the nearest `at:` line above it, an `at:`
  * line's own for itself. An `at:` line whose time does not parse, an empty
- * one included, is no stamp, so the lines under it have no time.
+ * one included, is no stamp, so it and the lines under it keep the stamp
+ * above it.
  */
 export function lineTimes(progress: string): (number | null)[] {
   let at: number | null = null
   return progress.split('\n').map(line => {
     const m = STAMP.exec(line)
-    if (m) at = parseMs((m[1] ?? '').trim())
+    if (m) at = parseMs((m[1] ?? '').trim()) ?? at
     return at
   })
 }
@@ -678,16 +679,29 @@ type SlotSpan = { slot: number | null; startMs: number; endMs: number | null; is
  * while the launch has neither. A launch is live unless its `finished:` line
  * says the run never went live. A `slot:` line with no stamp above it opens
  * no launch.
+ *
+ * A launch with neither line ends, stopped, at the next `slot:` line's stamp.
+ * With `mtimeMs`, for a file whose run has ended, the last such launch ends,
+ * stopped, at the file's last stamp, or at `mtimeMs` when no stamp follows its
+ * own; without it, the last launch stays open.
  */
-function slotSpans(progress: string): SlotSpan[] {
+function slotSpans(progress: string, mtimeMs: number | null = null): SlotSpan[] {
   const times = lineTimes(progress)
   const out: SlotSpan[] = []
   let open: SlotSpan | null = null
+  const close = (span: SlotSpan, at: number | null) => {
+    if (span.endMs !== null || at === null || at <= span.startMs) return
+    span.endMs = at
+    span.isLive = false
+  }
   progress.split('\n').forEach((line, i) => {
     const at = times[i] ?? null
     const slot = /^slot: (\S+)/.exec(line)
     if (slot) {
-      if (open !== null) out.push(open)
+      if (open !== null) {
+        close(open, at)
+        out.push(open)
+      }
       open = at === null ? null : { slot: slotNumber(Number(slot[1])), startMs: at, endMs: null, isLive: true }
       return
     }
@@ -697,7 +711,15 @@ function slotSpans(progress: string): SlotSpan[] {
     if (open.endMs === null) open.endMs = at
     if (isFinished) open.isLive = LIVE.test(line.slice('finished: '.length))
   })
-  if (open !== null) out.push(open)
+  // The callback assigns `open`, which the compiler does not follow.
+  const tail = open as SlotSpan | null
+  if (tail !== null) {
+    if (mtimeMs !== null) {
+      const last = times[times.length - 1] ?? null
+      close(tail, last !== null && last > tail.startMs ? last : mtimeMs)
+    }
+    out.push(tail)
+  }
   return out
 }
 
@@ -755,11 +777,15 @@ function offsetMinutes(utcOffset: string): number | null {
  * TIMELINE_AHEAD_MS after.
  *
  * A running or finished record with slot fields spans `slot_taken` to
- * `slot_released`, or to now while a running record holds its slot. A run's
+ * `slot_released`, or to now while a running record holds its slot. A
+ * finished record with no `slot_released` ends where the span its
+ * `slot_taken` matches ends, else at its progress file's mtime. A running
+ * record whose `slot_taken` does not parse starts at the run's start. A run's
  * progress file adds a span for each stamped `slot: <k>` line that no record's
- * `slot_taken` matches, so a run the finished list dropped keeps its slot. A
- * finished run that names no slot anywhere goes on the lowest slot free over
- * its span, and is not drawn when none is free.
+ * `slot_taken` matches, so a run the finished list dropped keeps its slot and a
+ * relaunched run keeps its earlier launches. A finished run that names no slot
+ * anywhere goes on the lowest slot free over its span, and is not drawn when
+ * none is free.
  *
  * With a median, the running run is projected to its start plus the median,
  * or to now once it is over. Then each queued entry that nothing holds, in
@@ -811,16 +837,28 @@ export function timelineOf(input: {
     highest = Math.max(highest, r.slot)
   }
 
+  const isSameLaunch = (takenMs: number, span: SlotSpan): boolean => Math.abs(takenMs - span.startMs) <= SLOT_MATCH_MS
+
   raw.running.forEach((r, i) => {
     const { sitting } = sittingOf(r.brief)
     const spans = slotSpans(progress[r.brief] ?? '').filter(s => s.slot !== null)
     const last = spans[spans.length - 1]
+    // A run whose start does not parse starts at now, so it draws no bar.
+    const started = input.running[i]?.startedMs ?? now
+    const startedMs = started < now ? started : null
+    // The launches before this one: each closed span that no record takes.
+    // Without a record's slot, the file's last span is this launch.
+    const taken = recorded.get(baseName(r.brief)) ?? []
+    for (const s of spans) {
+      if (s.slot === null || s.endMs === null || s.endMs <= s.startMs || (r.slot == null && s === last)) continue
+      if (taken.some(t => isSameLaunch(t, s))) continue
+      highest = Math.max(highest, s.slot)
+      placed.push({ slot: s.slot, bar: bar(sitting, s.isLive ? 'live' : 'stopped', s.startMs, s.endMs) })
+    }
     const slot = r.slot ?? last?.slot ?? null
-    const from = r.slot != null ? (r.slotTakenMs ?? null) : (last?.startMs ?? null)
+    const from = r.slot != null ? (r.slotTakenMs ?? startedMs) : (last?.startMs ?? null)
     if (slot === null || from === null) {
-      // A run whose start does not parse starts at now, so it draws no bar.
-      const started = input.running[i]?.startedMs ?? now
-      if (started < now) unslotted.push({ sitting, tone: 'running', startMs: started, endMs: now })
+      if (startedMs !== null) unslotted.push({ sitting, tone: 'running', startMs: startedMs, endMs: now })
       return
     }
     highest = Math.max(highest, slot)
@@ -832,22 +870,35 @@ export function timelineOf(input: {
     placed.push({ slot, bar: bar(sitting, 'running', from, end, liveEnd, isOver) })
     ends.set(sitting, end)
   })
+  // A finished record whose slot was never released, by run name: its progress file ends it.
+  const unreleased = new Map<string, { slot: number; takenMs: number; tone: BarTone }[]>()
   for (const f of raw.finished) {
-    if (f.slot == null || f.slotTakenMs == null || f.slotReleasedMs == null) continue
-    const outcome = outcomeOf(f)
+    if (f.slot == null || f.slotTakenMs == null) continue
+    const tone: BarTone = LIVE.test(outcomeOf(f)) ? 'live' : 'stopped'
+    if (f.slotReleasedMs == null) {
+      const base = baseName(f.brief)
+      unreleased.set(base, [...(unreleased.get(base) ?? []), { slot: f.slot, takenMs: f.slotTakenMs, tone }])
+      continue
+    }
     const to = Math.max(f.slotTakenMs, f.slotReleasedMs)
-    placed.push({ slot: f.slot, bar: bar(sittingOf(f.brief).sitting, LIVE.test(outcome) ? 'live' : 'stopped', f.slotTakenMs, to) })
+    placed.push({ slot: f.slot, bar: bar(sittingOf(f.brief).sitting, tone, f.slotTakenMs, to) })
   }
   for (const e of endings) {
     const { sitting } = sittingOf(e.base)
-    const spans = slotSpans(e.text).filter(s => s.slot !== null)
+    const spans = slotSpans(e.text, e.mtimeMs).filter(s => s.slot !== null)
     for (const s of spans) highest = Math.max(highest, s.slot ?? 1)
     const taken = recorded.get(e.base) ?? []
     for (const s of spans) {
       if (s.slot === null || s.endMs === null || s.endMs <= s.startMs) continue
-      if (taken.some(t => Math.abs(t - s.startMs) <= SLOT_MATCH_MS)) continue
+      if (taken.some(t => isSameLaunch(t, s))) continue
       placed.push({ slot: s.slot, bar: bar(sitting, s.isLive ? 'live' : 'stopped', s.startMs, s.endMs) })
     }
+    // An unreleased record ends where the span it takes ends, else at the file's mtime.
+    for (const u of unreleased.get(e.base) ?? []) {
+      const to = spans.find(s => isSameLaunch(u.takenMs, s))?.endMs ?? e.mtimeMs
+      if (to > u.takenMs) placed.push({ slot: u.slot, bar: bar(sitting, u.tone, u.takenMs, to) })
+    }
+    unreleased.delete(e.base)
     if (spans.length > 0 || recorded.has(e.base)) continue
     const span = unslottedSpan(e.text, e.mtimeMs)
     if (span !== null) unslotted.push({ sitting, tone: span.isLive ? 'live' : 'stopped', startMs: span.startMs, endMs: span.endMs })
@@ -899,11 +950,15 @@ export function timelineOf(input: {
     for (const d of onDeck) if (d.mode === 'ready') project(d.sitting, afterSittings(d.after), 'deck')
   }
 
-  // The oldest decision stop, from its finish to now. A sitting's first ending stands for it.
+  // The oldest decision stop, from its finish to now. A sitting's ending is
+  // the one blockedOf reads: its newest by mtime that did not go live.
   const endingOf = new Map<string, Ending>()
   for (const e of endings) {
+    const end = lastEnd(e.text)
+    if (end === null || end.isLive) continue
     const { sitting } = sittingOf(e.base)
-    if (!endingOf.has(sitting)) endingOf.set(sitting, e)
+    const known = endingOf.get(sitting)
+    if (known === undefined || known.mtimeMs < e.mtimeMs) endingOf.set(sitting, e)
   }
   const stops = blocks
     .filter(k => k.kind === 'decision')
@@ -2050,13 +2105,14 @@ export function ledgerSpends(text: string): Spend[] {
  * it: the commits with `phase: "plan"` that carry that `sitting`, in order. A
  * plan ship carries no sitting of its own, and a session is no commit, so
  * neither counts. Adding a ledger chunk by chunk gives what one pass over the
- * whole ledger gives.
+ * whole ledger gives. The sums stay unrounded: `dollars` rounds once, where a
+ * cost or a total is drawn.
  */
 export function addPlanCosts(into: Record<string, number>, spends: readonly Spend[]): Record<string, number> {
   for (const s of spends) {
     if (s.kind !== 'commit' || s.phase !== 'plan' || s.sitting === null) continue
     const key = `S${s.sitting}`
-    into[key] = Math.round(((into[key] ?? 0) + s.usd) * 100) / 100
+    into[key] = (into[key] ?? 0) + s.usd
   }
   return into
 }
@@ -2241,8 +2297,10 @@ export function foldSummary(card: FoldCard, b: Board): string {
   if (card === 'timeline') {
     // What holds each slot at now: a run, or idle.
     const now = b.timeline.nowMs
-    const atNow = (bars: readonly TimelineBar[]): string =>
-      bars.find(x => (x.tone === 'running' || x.tone === 'live' || x.tone === 'stopped') && x.startMs <= now && now < x.endMs)?.sitting ?? 'idle'
+    // A running bar holds its slot through its end, which is now while it has no projection.
+    const holds = (x: TimelineBar): boolean =>
+      x.tone === 'running' ? x.startMs <= now && now <= x.endMs : (x.tone === 'live' || x.tone === 'stopped') && x.startMs <= now && now < x.endMs
+    const atNow = (bars: readonly TimelineBar[]): string => bars.find(holds)?.sitting ?? 'idle'
     return [...b.timeline.slots.map(l => `slot ${l.slot} ${atNow(l.bars)}`), b.timeline.held.count > 0 ? `${b.timeline.held.count} held` : '']
       .filter(p => p !== '')
       .join(' · ')

@@ -118,9 +118,10 @@ const TONE_COLOR: Record<CellTone, string> = {
   held: F.yellow,
   blank: F.surface1,
 }
-// The timeline's lane labels take this many cells, `slot 1 `; the card's
-// border and padding take 4 more, and the track the rest.
-const TIMELINE_LABEL_CELLS = 7
+// The timeline's lane labels take the widest label and one space, `slot 1 `
+// or `slot 12 `; the card's border and padding take 4 more, and the track the rest.
+const labelCells = (slots: readonly { slot: number }[]): number =>
+  1 + Math.max('held'.length, ...slots.map(l => `slot ${l.slot}`.length))
 // The least widths of a recent row's time, cost and age columns, the cost and
 // age with a leading gap: `14h52m`, ` $1,238`, ` 12h`. A wider figure widens its column.
 const RECENT_TIME_CELLS = 6
@@ -407,13 +408,16 @@ let blobCache = new Map<string, string>()
 
 /** The text of `sha` in the checkout at `cwd`, read once per blob. */
 async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<string, string>): Promise<string> {
-  let text = blobCache.get(sha) ?? next.get(sha)
-  if (text === undefined) {
-    const blob = await $.process.run(['git', 'cat-file', 'blob', sha], { cwd, timeoutMs: 5000 })
-    text = blob.exitCode === 0 ? blob.stdout : ''
+  const known = blobCache.get(sha) ?? next.get(sha)
+  if (known !== undefined) {
+    next.set(sha, known)
+    return known
   }
-  next.set(sha, text)
-  return text
+  // A failed read is not kept, so the next poll asks for the blob again.
+  const blob = await $.process.run(['git', 'cat-file', 'blob', sha], { cwd, timeoutMs: 5000 })
+  if (blob.exitCode !== 0) return ''
+  next.set(sha, blob.stdout)
+  return blob.stdout
 }
 
 // Each running brief's cycle count by its key, kept after the archive moves
@@ -644,9 +648,13 @@ export const register: Register = on => {
     // A recent row's plan cost after its cost, `+$6`, or `+—` when the ledger
     // holds none; no cell while the ledger could not be read.
     const planText = (d: Ended): string | null => (d.plan === 'unread' ? null : d.plan === 'none' ? '+—' : `+${dollars(d.plan)}`)
+    // The totals row writes ` + $46 plan` where a row has its plan and age
+    // cells, so the plan column widens until the totals' text fits beside the
+    // age column, and the times and costs above stay in one column.
     const planWidth = widest(b.recent.map(planText))
-    const planCells = planWidth === 0 ? 0 : 1 + planWidth
     const planTotal = b.recent.reduce((n, d) => n + (typeof d.plan === 'number' ? d.plan : 0), 0)
+    const planTotalText = ` + ${dollars(planTotal)} plan`
+    const planCells = planWidth === 0 ? 0 : Math.max(1 + planWidth, planTotalText.length - RECENT_AGE_CELLS)
     // The columns a recent row's figures take, and the room left for its slug
     // beside them, after the card's border and padding, the gap, `● `, the
     // sitting and its space.
@@ -698,7 +706,8 @@ export const register: Register = on => {
     // The timeline's track, and one lane drawn as runs of cells that share a
     // tone: a name on its bar is mantle on the bar's colour, every other cell
     // its tone's colour.
-    const track = Math.max(1, e.props.bodyColumns - 4 - TIMELINE_LABEL_CELLS)
+    const labelWidth = labelCells(b.timeline.slots)
+    const track = Math.max(1, e.props.bodyColumns - 4 - labelWidth)
     const laneRow = (name: string, cells: readonly TimelineCell[]) => {
       const runs: { text: string; tone: CellTone; isLabel: boolean }[] = []
       for (const c of cells) {
@@ -708,7 +717,7 @@ export const register: Register = on => {
       }
       return (
         <Text wrap="truncate-end">
-          <Text color={F.overlay2}>{name.padEnd(TIMELINE_LABEL_CELLS).slice(0, TIMELINE_LABEL_CELLS)}</Text>
+          <Text color={F.overlay2}>{name.padEnd(labelWidth).slice(0, labelWidth)}</Text>
           {runs.map(r => (
             <Text color={r.isLabel ? F.mantle : TONE_COLOR[r.tone]} backgroundColor={r.isLabel ? TONE_COLOR[r.tone] : undefined}>
               {r.text}
@@ -721,11 +730,11 @@ export const register: Register = on => {
       const t = b.timeline
       const now = nowCell(t, track)
       return [
-        <Text color={F.overlay0}>{`${' '.repeat(TIMELINE_LABEL_CELLS)}${axisCells(t, track)}`}</Text>,
+        <Text color={F.overlay0}>{`${' '.repeat(labelWidth)}${axisCells(t, track)}`}</Text>,
         ...t.slots.map(l => laneRow(`slot ${l.slot}`, laneCells(t, l.bars, track, true))),
         laneRow('you', laneCells(t, t.you === null ? [] : [t.you], track, false)),
         laneRow('held', heldCells(t, track)),
-        <Text color={F.peach}>{`${' '.repeat(TIMELINE_LABEL_CELLS + Math.max(0, Math.min(now - 1, track - 3)))}now`}</Text>,
+        <Text color={F.peach}>{`${' '.repeat(labelWidth + Math.max(0, Math.min(now - 1, track - 3)))}now`}</Text>,
       ]
     }
 
@@ -1047,7 +1056,7 @@ export const register: Register = on => {
                       {' '.repeat(2 + RECENT_SPLIT_CELLS)}
                       {cell(totals.usd === null ? '' : dollars(totals.usd), costCells, F.text, true)}
                       {planCells > 0 ? (
-                        <Text color={F.overlay1}>{` + ${dollars(planTotal)} plan`}</Text>
+                        <Text color={F.overlay1}>{planTotalText.padEnd(planCells + RECENT_AGE_CELLS)}</Text>
                       ) : (
                         ' '.repeat(planCells + RECENT_AGE_CELLS)
                       )}
