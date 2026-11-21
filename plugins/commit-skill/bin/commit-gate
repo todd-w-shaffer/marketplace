@@ -79,11 +79,23 @@ function hookFile(dir) {
   return hooks && path.join(hooks, 'commit-msg');
 }
 
+/**
+ * What the commit-msg hook at `file` is: 'ours' for the stub, 'foreign' for
+ * any other hook, null when there is none. A hook that cannot be read throws.
+ */
+function stubOf(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null;
+    throw e;
+  }
+  return text.includes(MARKER) ? 'ours' : 'foreign';
+}
+
 /** Whether `dir` is in a repository whose commit-msg hook is the stub. */
 function isGated(dir) {
   if (!dir) return false;
-  const file = hookFile(dir);
-  try { return fs.readFileSync(file, 'utf8').includes(MARKER); } catch { return false; }
+  try { return stubOf(hookFile(dir)) === 'ours'; } catch { return false; }
 }
 
 function tokenDir(dir) {
@@ -288,7 +300,7 @@ function install() {
     return fail('core.hooksPath is set; the gate needs the commit-msg hook in .git/hooks');
   }
   const file = hookFile(cwd);
-  if (fs.existsSync(file) && !fs.readFileSync(file, 'utf8').includes(MARKER)) {
+  if (stubOf(file) === 'foreign') {
     return fail(`${file} exists and was not written by commit-gate; leaving it alone`);
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -302,11 +314,12 @@ function uninstall() {
   if (fromTerminal('uninstall')) return 1;
   const file = hookFile(process.cwd());
   if (!file) return fail('not in a git repository');
-  if (!fs.existsSync(file)) {
+  const stub = stubOf(file);
+  if (!stub) {
     process.stdout.write('commit-gate: no commit-msg hook; nothing to remove\n');
     return 0;
   }
-  if (!fs.readFileSync(file, 'utf8').includes(MARKER)) {
+  if (stub === 'foreign') {
     return fail(`${file} was not written by commit-gate; leaving it alone`);
   }
   fs.unlinkSync(file);

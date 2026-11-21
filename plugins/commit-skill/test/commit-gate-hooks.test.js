@@ -16,17 +16,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { SESSION, OTHER, hookCommands, sandbox } = require('./gate-sandbox');
-
-const skillCall = (repo, skill, sid = SESSION) => ({
-  session_id: sid, cwd: repo, hook_event_name: 'PreToolUse', tool_name: 'Skill', tool_input: { skill },
-});
-const prompt = (repo, text) => ({
-  session_id: SESSION, cwd: repo, hook_event_name: 'UserPromptSubmit', prompt: text,
-});
-const bash = (cwd, command) => ({
-  session_id: SESSION, cwd, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command },
-});
+const { SESSION, OTHER, bash, hookCommands, prompt, sandbox, skillCall } = require('./gate-sandbox');
 
 /** A gated repository, and the mint run against it as the project. */
 function minting(t) {

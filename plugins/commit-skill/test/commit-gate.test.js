@@ -13,7 +13,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const {
-  GATE, SESSION, OTHER, RECIPE, NO_TOKEN, NO_RECIPE, NO_SESSION, NOT_ENABLED, claude, run, sandbox,
+  GATE, SESSION, OTHER, RECIPE, NO_TOKEN, NO_RECIPE, NO_SESSION, NOT_ENABLED, claude, prompt, run, sandbox, skillCall,
 } = require('./gate-sandbox');
 const { SHIP_DOCS, NOT_SHIP_DOCS, shipDocsSubjects } = require('./cases');
 
@@ -28,8 +28,7 @@ describe('outside a Claude Code shell the gate admits every commit', () => {
 
     const r = sb.commit(repo, 'plain message\n');
 
-    assert.equal(r.status, 0, r.stderr);
-    assert.notEqual(sb.head(repo), before);
+    sb.landed(repo, r, before);
   });
 
   test("lands Todd's commit in a gated repository with commit-skill disabled", (t) => {
@@ -41,8 +40,7 @@ describe('outside a Claude Code shell the gate admits every commit', () => {
 
     const r = sb.commit(repo, 'plain message\n', { PATH: `${sb.bin('git-only', ['git'])}:/bin` });
 
-    assert.equal(r.status, 0, r.stderr);
-    assert.notEqual(sb.head(repo), before);
+    sb.landed(repo, r, before);
   });
 });
 
@@ -89,8 +87,7 @@ describe('a commit token admits one commit with a Recipe line', () => {
 
     const first = sb.commit(repo, RECIPE, claude());
 
-    assert.equal(first.status, 0, first.stderr);
-    assert.notEqual(sb.head(repo), before);
+    sb.landed(repo, first, before);
     assert.equal(fs.existsSync(sb.token(repo, 'commit')), false);
 
     const landed = sb.head(repo);
@@ -185,8 +182,7 @@ describe("a ship-docs token admits only /ship's docs subject", () => {
 
       const r = sb.commit(repo, message, claude());
 
-      assert.equal(r.status, 0, r.stderr);
-      assert.notEqual(sb.head(repo), before);
+      sb.landed(repo, r, before);
       assert.equal(fs.existsSync(sb.token(repo, 'ship-docs')), false);
     });
   }
@@ -230,32 +226,25 @@ describe('the token the mint writes is the token the gate spends', () => {
   test('admits the commit after a /commit Skill call', (t) => {
     const sb = sandbox(t);
     const repo = sb.repo();
-    const m = sb.hook('PreToolUse', 'Skill', {
-      session_id: SESSION, cwd: repo, hook_event_name: 'PreToolUse', tool_name: 'Skill',
-      tool_input: { skill: 'commit-skill:commit' },
-    }, { CLAUDE_PROJECT_DIR: repo });
+    const m = sb.hook('PreToolUse', 'Skill', skillCall(repo, 'commit-skill:commit'), { CLAUDE_PROJECT_DIR: repo });
     assert.equal(m.status, 0, m.stderr);
     const before = sb.head(repo);
 
     const r = sb.commit(repo, RECIPE, claude());
 
-    assert.equal(r.status, 0, r.stderr);
-    assert.notEqual(sb.head(repo), before);
+    sb.landed(repo, r, before);
   });
 
   test('admits the docs commit after Todd types /ship', (t) => {
     const sb = sandbox(t);
     const repo = sb.repo();
-    const m = sb.hook('UserPromptSubmit', '', {
-      session_id: SESSION, cwd: repo, hook_event_name: 'UserPromptSubmit', prompt: '/ship',
-    }, { CLAUDE_PROJECT_DIR: repo });
+    const m = sb.hook('UserPromptSubmit', '', prompt(repo, '/ship'), { CLAUDE_PROJECT_DIR: repo });
     assert.equal(m.status, 0, m.stderr);
     const before = sb.head(repo);
 
     const r = sb.commit(repo, 'Update docs to reflect: Add a thing\n', claude());
 
-    assert.equal(r.status, 0, r.stderr);
-    assert.notEqual(sb.head(repo), before);
+    sb.landed(repo, r, before);
   });
 });
 

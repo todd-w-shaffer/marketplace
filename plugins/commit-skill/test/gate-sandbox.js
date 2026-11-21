@@ -58,6 +58,17 @@ function run(cmd, args, opts) {
 const claude = (sid = SESSION) => ({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: sid });
 
 /** The commands hooks.json runs for `event` and `matcher` ('' for none). */
+/** Mint payloads: a Skill call, a typed prompt, and a Bash call, as Claude Code sends them. */
+const skillCall = (repo, skill, sid = SESSION) => ({
+  session_id: sid, cwd: repo, hook_event_name: 'PreToolUse', tool_name: 'Skill', tool_input: { skill },
+});
+const prompt = (repo, text) => ({
+  session_id: SESSION, cwd: repo, hook_event_name: 'UserPromptSubmit', prompt: text,
+});
+const bash = (cwd, command) => ({
+  session_id: SESSION, cwd, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command },
+});
+
 function hookCommands(event, matcher) {
   const cfg = JSON.parse(fs.readFileSync(HOOKS_JSON, 'utf8'));
   return (cfg.hooks[event] || [])
@@ -183,6 +194,12 @@ function sandbox(t) {
     },
   };
 
+  /** Asserts a commit landed: it exited 0 and HEAD moved. */
+  sb.landed = (cwd, r, before) => {
+    assert.equal(r.status, 0, r.stderr);
+    assert.notEqual(sb.head(cwd), before, 'HEAD did not move');
+  };
+
   /** Asserts a commit was refused for `reason`, and that HEAD did not move. */
   sb.refused = (cwd, r, before, reason) => {
     assert.notEqual(r.status, 0, 'the commit landed');
@@ -195,5 +212,5 @@ function sandbox(t) {
 
 module.exports = {
   ROOT, GATE, SESSION, OTHER, RECIPE, NO_TOKEN, NO_RECIPE, NO_SESSION, NOT_ENABLED,
-  baseSandbox, claude, hookCommands, run, sandbox,
+  baseSandbox, bash, claude, hookCommands, prompt, run, sandbox, skillCall,
 };
