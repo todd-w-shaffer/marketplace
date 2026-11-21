@@ -60,8 +60,7 @@ const SESSION_ID = /^[A-Za-z0-9-]+$/;
 const DAY_MS = 24 * 3600 * 1000;
 
 // Exact names only: a skill name carries no marketplace, so another plugin's
-// `foo:ship` must not mint. A typed `/commit` gives `commit`. ship-skill's
-// deprecated copy of /ship hands off to commit-skill:ship.
+// `foo:ship` must not mint. A typed `/commit` gives `commit`.
 const GRANTS = {
   commit: new Set(['commit', 'commit-skill:commit']),
   'ship-docs': new Set(['ship', 'commit-skill:ship']),

@@ -134,8 +134,8 @@ The gate, mint and guard are bash with `jq` and `perl`. As plugin code, they'd m
 - Each caller keeps its own way of extracting the subject. The gate reads the raw message file: the first line
   that is neither blank nor starts with `#`. `#` is fixed, as today; `core.commentChar` is not read. The ledger
   reads git's cleaned `%s`.
-- `hasRecipe(message)` is `/^Recipe:/m` over the raw text, comment lines included, as `grep -q '^Recipe:'` reads it
-  today. A CRLF message is a test row.
+- `hasRecipe(message)` checks for a line starting `Recipe:` in the raw text, comment lines included, as
+  `grep -q '^Recipe:'` reads it. Lines end at `\n` only, not `/m`, which also breaks on `\r`. A CRLF message is a test row.
 
 **`check` keeps today's order and spends the token atomically.** It checks the `commit` token before
 `ship-docs`, and a refused message keeps its token. It claims a token with `unlinkSync` and admits the commit only
@@ -203,7 +203,7 @@ Ordered so that no step leaves shoots.film unable to commit.
      front; the test "the mint writes no token into an ungated project when only the cwd is gated" catches it.
    - Add `lib/commit-format.js`, `bin/commit-gate`, `scripts/gated`, `hooks/hooks.json` and `skills/ship/`, and point `token-ledger`
      at the shared matcher. `/ship` still writes `Update docs to reflect:`; the matcher accepts both forms.
-   - Port both shoots.film test files to `node:test` (see Testing). CI runs `node --test plugins/commit-skill/test/`
+   - Port both shoots.film test files to `node:test` (see Testing). CI runs `node --test plugins/commit-skill/test/*.test.js`
      in place of the one hardcoded file.
    - Point `token-ledger.test.js`'s `shipDocsSubjects()` at `../skills/ship/SKILL.md`. It reads
      `../../ship-skill/...` today, which would keep passing on the stale copy.
@@ -313,11 +313,12 @@ These rows don't port; they stay in shoots.film with what they test:
     refuses when `core.hooksPath` is set.
   - `uninstall` removes only its own stub.
   - Both refuse when `CLAUDECODE` is set.
-- **`isShipDocs` and `hasRecipe` share one table of raw messages**, including rows with `#` comments, leading
-  blank lines, case variants and CRLF.
-  - The gate runs each row through a real commit under the matching token.
-  - The ledger runs the `isShipDocs` rows through `git log %s` and `ship`.
-  - `hasRecipe` has no caller in the ledger, so its rows run against the gate only.
+- **`isShipDocs` reads one table of subjects** (`test/cases.js`: `SHIP_DOCS` and `NOT_SHIP_DOCS`), including case
+  variants and the slips a model makes.
+  - The gate runs each row through a real commit under a `ship-docs` token.
+  - The ledger runs the `SHIP_DOCS` rows through `git log %s` and `ship`.
+  - `hasRecipe` has no caller in the ledger, so its rows (`#` comments, a mid-line `Recipe:`, CRLF) sit inline in
+    `commit-gate.test.js` and run against the gate only.
 - **The drift test, gate side:** ship's `SKILL.md` subject template (`../skills/ship/SKILL.md`) passes `check` under
   a `ship-docs` token.
 - **The guard's fast path.** The test builds a bin directory holding only `git`, `grep` and `cat` (the front's tools), plus a fake `node`

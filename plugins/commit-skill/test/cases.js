@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 
 const SHIP_DOCS = [
   'Update docs to reflect: add a.txt',
-  // The typed subject /ship is to move to (Migration step 4).
+  // The typed subject /ship writes today.
   'docs(a): sync with add a.txt',
   'docs: sync with add a.txt',
   // Slips a model can make copying the code commit's prefix or the phrase.
