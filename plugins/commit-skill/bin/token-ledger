@@ -63,11 +63,6 @@ function gitRoots(cwd) {
   return { repo, project: path.dirname(common) };
 }
 
-function projectRoot() {
-  const roots = gitRoots();
-  return roots && roots.project;
-}
-
 function plural(n, word) {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
 }
@@ -515,11 +510,6 @@ async function startFor(sess, rows, id) {
   return last === null ? await firstTimestamp(sess.file) - 1 : last;
 }
 
-// A scan is a window and the usage in it: {startMs, endMs, lead, sub}.
-async function scanOf(sess, startMs, endMs) {
-  return { startMs, endMs, ...await collect(sess, startMs, endMs) };
-}
-
 // The usage past `startMs`, up to the last usage line across the lead file
 // and its subagent files; null when there is none.
 async function tailOf(sess, startMs) {
@@ -528,19 +518,18 @@ async function tailOf(sess, startMs) {
   return { startMs, endMs: Math.max(lead.lastMs, sub.lastMs), lead, sub };
 }
 
-// A writer scans from `startMs` before it takes the lock, so a /commit never
-// waits behind a whole scan. Under the lock it re-reads the ledger, and when
-// another writer moved the session's start meanwhile, it answers `rescan` of
-// the new start instead of `scanned`.
-async function rescanIfMoved(sess, id, startMs, scanned, rescan, rows = readLedger()) {
-  const now = await startFor(sess, rows, id);
-  return now === startMs ? scanned : rescan(now);
-}
-
-// A commit's or a ship's rescan: from the moved start to the end it scanned to,
-// or to the start itself when the start moved past that end.
-function rescanTo(sess, scan0) {
-  return (startMs) => scanOf(sess, startMs, Math.max(scan0.endMs, startMs));
+// A commit's or a ship's scan: a window and the usage in it, {startMs, endMs,
+// lead, sub}, from the session's start in `rows` to now. A writer scans before
+// it takes the lock, so a /commit never waits behind a whole scan. Under the
+// lock it re-reads the ledger and passes its first scan as `prev`: when another
+// writer moved the session's start meanwhile, it scans again from the new start
+// to the end it scanned to, or to the start itself when the start moved past
+// that end; otherwise `prev` stands.
+async function scanWindow(sess, id, { rows = readLedger(), prev = null } = {}) {
+  const startMs = await startFor(sess, rows, id);
+  if (prev && prev.startMs === startMs) return prev;
+  const endMs = prev ? Math.max(prev.endMs, startMs) : Date.now();
+  return { startMs, endMs, ...await collect(sess, startMs, endMs) };
 }
 
 function windowOf(scan) {
@@ -627,7 +616,7 @@ function sessionEntry(id, via, tail) {
 // scan but stamped before the end would fall outside every window. A sweep
 // passes the session it found and the ledger it read once for every session.
 async function recordSession(id, { via, sess = findSession(id), rows = readLedger(), sweep = false, dryRun = false } = {}) {
-  if (!sess) throw new Error(`no transcript found for session ${id}`);
+  transcriptOf(id, sess);
   const before = sweep ? sizesOf(sess) : null;
   const startMs = await startFor(sess, rows, id);
   const scanned = await tailOf(sess, startMs);
@@ -636,7 +625,9 @@ async function recordSession(id, { via, sess = findSession(id), rows = readLedge
   if (!scanned) return null;
   if (dryRun) return sessionEntry(id, via, scanned);
   return withLock(async () => {
-    const tail = await rescanIfMoved(sess, id, startMs, scanned, (s) => tailOf(sess, s));
+    // As scanWindow does under the lock, but a tail keeps its own end.
+    const now = await startFor(sess, readLedger(), id);
+    const tail = now === startMs ? scanned : await tailOf(sess, now);
     if (!tail) return null;
     const entry = sessionEntry(id, via, tail);
     appendLedger(entry);
@@ -646,29 +637,33 @@ async function recordSession(id, { via, sess = findSession(id), rows = readLedge
 
 // ---------- subcommands ----------
 
-// This process's worktree and project; outside a work tree it throws.
-function hereRoots() {
+function transcriptOf(id, sess = findSession(id)) {
+  if (!sess) throw new Error(`no transcript found for session ${id}`);
+  return sess;
+}
+
+// The session a commit or a ship tallies against, and this process's worktree,
+// project and branch. Outside a work tree it throws.
+function currentSession() {
+  const id = sessionId();
+  const sess = transcriptOf(id);
   const roots = gitRoots();
   if (!roots) throw new Error('not inside a git work tree');
-  return roots;
+  const branch = gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']);
+  return { id, sess, repo: roots.repo, project: roots.project, branch };
 }
 
 async function cmdCommit(args) {
-  const id = sessionId();
-  const sess = findSession(id);
-  if (!sess) throw new Error(`no transcript found for session ${id}`);
-  const { repo, project } = hereRoots();
+  const { id, sess, repo, project, branch } = currentSession();
   const sha = git(['rev-parse', args.sha || 'HEAD']);
-  const start0 = await startFor(sess, readLedger(), id);
-  const scan0 = await scanOf(sess, start0, Date.now());
+  const scan0 = await scanWindow(sess, id);
   const stat = diffStat(sha);
-  const branch = gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']);
   const subject = gitSafe(['log', '-1', '--format=%s', sha]);
   const tags = tagsFor({ repo, branch, subject }, project);
   const patchId = patchIdOf(sha);
 
   const s = await withLock(async () => {
-    const w = await rescanIfMoved(sess, id, start0, scan0, rescanTo(sess, scan0));
+    const w = await scanWindow(sess, id, { prev: scan0 });
     const sum = summarise(w.lead, w.sub);
     appendLedger({
       v: 1,
@@ -725,10 +720,7 @@ function cmdShipBegin() {
 }
 
 async function cmdShip() {
-  const id = sessionId();
-  const sess = findSession(id);
-  if (!sess) throw new Error(`no transcript found for session ${id}`);
-  const { repo, project } = hereRoots();
+  const { id, sess, repo, project, branch } = currentSession();
   const markers = readMarkers();
   const marker = markers[repo];
   const head = git(['rev-parse', 'HEAD']);
@@ -738,24 +730,23 @@ async function cmdShip() {
   const pushed = ref && gitSafe(['rev-parse', ref]) === head ? gitSafe(['rev-parse', `${ref}@{1}`]) : null;
   const base = (marker && marker.base) || pushed;
   if (!base) throw new Error('no ship base: run `token-ledger ship-begin` before pushing');
-  const shas = (gitSafe(['rev-list', '--reverse', `${base}..${head}`]) || '').split('\n').filter(Boolean);
-  const patchIds = new Map(shas.map((sha) => [sha, patchIdOf(sha)]));
+  // Oldest first. The trim drops the space after the last commit's subject when it is empty.
   const subjects = new Map();
-  for (const line of (gitSafe(['log', '--format=%H %s', `${base}..${head}`]) || '').split('\n')) {
-    const sp = line.indexOf(' ');
-    if (sp > 0) subjects.set(line.slice(0, sp), line.slice(sp + 1));
+  for (const line of (gitSafe(['log', '--reverse', '--format=%H %s', `${base}..${head}`]) || '').split('\n')) {
+    const m = /^([0-9a-f]+)(?: (.*))?$/.exec(line);
+    if (m) subjects.set(m[1], m[2]);
   }
-  const branch = gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const shas = [...subjects.keys()];
+  const patchIds = new Map(shas.map((sha) => [sha, patchIdOf(sha)]));
   const tags = tagsFor({ repo, branch }, project);
   // Everything since this session's last ledger entry is the ship's own cost.
-  const start0 = await startFor(sess, readLedger(), id);
-  const scan0 = await scanOf(sess, start0, Date.now());
+  const scan0 = await scanWindow(sess, id);
 
   // The matching, the entry and the marker cleanup sit between the lock's
   // ledger read and its append.
   const out = await withLock(async () => {
     const rows = readLedger();
-    const w = await rescanIfMoved(sess, id, start0, scan0, rescanTo(sess, scan0), rows);
+    const w = await scanWindow(sess, id, { rows, prev: scan0 });
     const { lead, sub } = w;
     const byPatch = new Map();
     const bySha = new Map();
@@ -872,7 +863,7 @@ function sinceMs(spec) {
 
 function cmdReport(args) {
   const cutoff = sinceMs(args.since);
-  const repo = args.all ? null : projectRoot();
+  const repo = args.all ? null : gitRoots()?.project;
   const by = args.by === 'commit' ? 'commit' : 'ship';
   const inScope = (r) => (!repo || inProject(r, repo)) && Date.parse(r.ts) >= cutoff;
   const ledger = readLedger();
@@ -1016,8 +1007,7 @@ async function cmdSessionEnd() {
 // Diagnostic: cost an arbitrary session or window without recording anything.
 async function cmdStats(args) {
   const id = args.session || sessionId();
-  const sess = findSession(id);
-  if (!sess) throw new Error(`no transcript found for session ${id}`);
+  const sess = transcriptOf(id);
   const startMs = args.from ? Date.parse(args.from) : (await firstTimestamp(sess.file)) - 1;
   const endMs = args.to ? Date.parse(args.to) : Date.now();
   const { lead, sub } = await collect(sess, startMs, endMs);
