@@ -319,16 +319,29 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
 }
 
 /**
- * The highest `cycle k` that a `/commit` line in a progress file names, or 0
- * when none names one. A `/commit` that names no cycle adds nothing, so this
- * is not `phasesOf`'s count.
+ * The highest `cycle k` that a cycle commit in a progress file names, or 0
+ * when none names one. A cycle commit is a `/commit` that `phasesOf` counts
+ * toward a cycle: after the savor closes, and before `/simplify`, `/ship` or
+ * a push. A cycle commit that names no cycle adds nothing, so this is not
+ * `phasesOf`'s count.
  */
 export function namedCycles(progress: string): number {
   let most = 0
+  let savor: 'none' | 'live' | 'done' = 'none'
+  let after = false
   for (const line of progress.split('\n')) {
     const commit = COMMIT_LINE.exec(line)
-    const k = commit === null ? null : CYCLE_NAMED.exec(commit[1] ?? '')
-    if (k) most = Math.max(most, Number(k[1]))
+    if (commit) {
+      if (savor === 'live') savor = 'done'
+      else if (!after) {
+        const k = CYCLE_NAMED.exec(commit[1] ?? '')
+        if (k) most = Math.max(most, Number(k[1]))
+      }
+    } else if (/^skill: sittings:savor launch\b/.test(line)) {
+      if (savor === 'none') savor = 'live'
+    } else if (line.startsWith('savored: ')) {
+      if (savor === 'live') savor = 'done'
+    } else if (/^skill: (simplify|commit-skill:ship)\b/.test(line) || (line.startsWith('bash: ') && line.includes('push:checked'))) after = true
   }
   return most
 }
@@ -683,10 +696,10 @@ export function buildBoard(
   // Each live sitting's state for the epics card; a later line outranks an earlier one.
   const states = new Map<string, EpicState['kind']>()
   for (const d of onDeck) states.set(d.sitting, 'deck')
-  for (const q of raw.queued) states.set(sittingOf(q.brief).sitting, 'queued')
+  for (const q of raw.queued) states.set(briefName(q.brief).sitting, 'queued')
   for (const k of blocks) for (const h of k.holds) states.set(h.sitting, 'held')
   for (const k of blocks) states.set(k.sitting, 'blocked')
-  for (const r of raw.running) states.set(sittingOf(r.brief).sitting, 'running')
+  for (const r of raw.running) states.set(briefName(r.brief).sitting, 'running')
   const live = Object.entries(extra.epics ?? {}).map(([key, epic]) => {
     const { sitting } = briefName(key)
     return { sitting, epic, state: states.get(sitting) ?? 'deck' }
@@ -2412,10 +2425,9 @@ const SPARK_BARS = '▁▂▃▄▅▆▇█'
  * A bar per day sum, scaled to the 90th-percentile day: by nearest rank over
  * 14 days, the 13th of the sums in ascending order, zeros included, so one
  * runaway day tops out and the rest keep their shape. With under two days of
- * spend, the cap is the highest day. A
- * bar is `ceil(r × 8) − 1` of `▁`–`█`, clamped to 0..7, where `r` is the day's
- * sum over the cap, capped at 1. A day with no spend, and every day while the
- * cap is 0, draws `▁`.
+ * spend, the cap is the highest day. A bar is `ceil(r × 8) − 1` of `▁`–`█`,
+ * clamped to 0..7, where `r` is the day's sum over the cap, capped at 1. A day
+ * with no spend, and every day while the cap is 0, draws `▁`.
  */
 export function sparkGlyphs(days: readonly number[]): string {
   const sorted = [...days].sort((a, b) => a - b)
@@ -2616,4 +2628,3 @@ export const laneTag = (d: Done | Ended): string => (d.lane === '' ? '' : ` (${d
 export function finishedToast(d: Done): string {
   return `${d.isShipped ? '✓' : '✗'} ${d.sitting} ${d.slug}${laneTag(d)} · ${d.detail}`
 }
-

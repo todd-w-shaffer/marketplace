@@ -18,6 +18,7 @@ import {
   buildBoard,
   chainLine,
   buildLoop,
+  briefFiles,
   briefKey,
   briefsBlobs,
   briefsRead,
@@ -434,8 +435,9 @@ async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<
     next.set(sha, known)
     return known
   }
-  // A failed read is not kept, so the next poll asks for the blob again.
-  const blob = await $.process.run(['git', 'cat-file', 'blob', sha], { cwd, timeoutMs: 5000 })
+  // A failed read is not kept, so the next poll asks for the blob again. A run
+  // that throws is a failed read, so one blob does not cost the poll the rest.
+  const blob = await $.process.run(['git', 'cat-file', 'blob', sha], { cwd, timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' }))
   if (blob.exitCode !== 0) return null
   next.set(sha, blob.stdout)
   return blob.stdout
@@ -446,12 +448,18 @@ async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<
 // and the epics card its sitting to the end.
 const cyclesCache = new Map<string, { cycles?: number; epic?: string }>()
 
+// The last listing's cycles, epics, recorded epics and plan titles, which a
+// poll whose listing fails draws again.
+let lastRead: Pick<BriefsRead, 'cycles' | 'epics' | 'recordedEpics' | 'planTitles'> = { cycles: {}, epics: {}, recordedEpics: {}, planTitles: {} }
+
 /**
  * The briefs on deck, each brief's cycle count and epic, the epics
  * `sittings.json` records, and each plan's epic titles, from one
  * `git ls-tree -r origin/main docs/briefs/ docs/plans/` in the checkout.
  * Each blob the listing names is read at once, and a running brief that has
- * left the listing reads its cycles and epic from `cyclesCache`.
+ * left the listing, or whose brief blob could not be read, reads its cycles
+ * and epic from `cyclesCache`. A failed listing reads no deck and gives the
+ * last listing's cycles, epics, recorded epics and plan titles.
  */
 async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Promise<BriefsRead> {
   const cwd = `${home}/${REPO}`
@@ -459,7 +467,15 @@ async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Pro
   const keys = running.map(briefKey)
   const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/', 'docs/plans/'], { cwd, timeoutMs: 5000 })
   if (ls.exitCode !== 0) {
-    const read: BriefsRead = { onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, planTitles: {} }
+    const read: BriefsRead = {
+      onDeck: [],
+      cycles: { ...lastRead.cycles },
+      afters: {},
+      splits: {},
+      epics: { ...lastRead.epics },
+      recordedEpics: lastRead.recordedEpics,
+      planTitles: lastRead.planTitles,
+    }
     for (const k of keys) {
       const kept = cyclesCache.get(k)
       if (kept?.cycles !== undefined) read.cycles[k] = kept.cycles
@@ -473,6 +489,7 @@ async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Pro
   blobCache = next
   const read = briefsRead(blobs, sha => texts.get(sha) ?? null, running, raw.queued.map(r => r.brief))
   const listed = cycleBlobMap(blobs)
+  const briefShas = new Map(briefFiles(blobs).map(f => [briefKey(f.path), f.sha]))
   for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
   for (const k of keys) {
     const kept = { ...cyclesCache.get(k) }
@@ -480,10 +497,14 @@ async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Pro
     // A failed blob read keeps no entry, so the next poll reads the blob again.
     else if (listed.has(k)) delete kept.cycles
     else if (kept.cycles !== undefined) read.cycles[k] = kept.cycles
+    const sha = briefShas.get(k)
     if (Object.hasOwn(read.epics, k)) kept.epic = read.epics[k]
+    // A listed brief that reads cleanly with no `Epic:` line names no epic.
+    else if (sha !== undefined && (texts.get(sha) ?? null) !== null) delete kept.epic
     else if (kept.epic !== undefined) read.epics[k] = kept.epic
     cyclesCache.set(k, kept)
   }
+  lastRead = { cycles: read.cycles, epics: read.epics, recordedEpics: read.recordedEpics, planTitles: read.planTitles }
   return read
 }
 

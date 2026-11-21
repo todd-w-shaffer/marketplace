@@ -2129,3 +2129,137 @@ test('one poll counts every brief, reads epics from sittings.json and the plan, 
   expect(await epicCells(second, 'design system')).toEqual([`■ ${GREEN}`, `□ ${SURFACE2}`])
   await second.unmount()
 })
+
+test('namedCycles counts only the cycle commits, not the savor, simplify, review fix or archive commits', () => {
+  const savor = ['skill: sittings:savor launch x', 'skill: commit-skill:commit Step 0 of S701: savor edits split its cycle 3 into S703', 'skill: commit-skill:commit Cycle 1 of S701: x'].join('\n')
+  expect(namedCycles(savor)).toBe(1)
+  const tail = [
+    'skill: commit-skill:commit Cycle 1 of S701: x',
+    'skill: code-review low a b',
+    'skill: simplify x',
+    'skill: commit-skill:commit simplify cycle 2 of the fix list',
+    'skill: code-review xhigh a b',
+    'skill: commit-skill:commit xhigh fixes to cycle 4',
+    'bash: npm run push:checked -- origin HEAD:main',
+    'skill: commit-skill:commit archive: split its cycle 5 into S703',
+  ].join('\n')
+  expect(namedCycles(tail)).toBe(1)
+})
+
+// An issue brief on dashboard/E1 beside S700 on deck on the same epic.
+const ISSUE_BRIEF = 'docs/briefs/kickoff-527-fix-thing.md'
+const ISSUE_LS = [`100644 blob a527\t${ISSUE_BRIEF}`, `100644 blob a700\t${BRIEFS}s700-rail-polish.md`, '100644 blob e901\tdocs/plans/dashboard.md'].join('\n')
+const ISSUE_BLOBS: Record<string, string> = { a527: briefText('#527', 'dashboard/E1', '', 1), a700: briefText('S700', 'dashboard/E1', '', 1), e901: DASHBOARD_PLAN }
+
+test('an issue brief keys its epic state by its #number, queued or running', async ($, on) => {
+  const queued = statusOf({ dispatcher: 1, queued: [{ entry: 1, brief: ISSUE_BRIEF, lane: '', reason: 'a free slot', cause: null }] })
+  // An issue number sorts after every sitting, so the queued state shows on an epic #527 holds alone.
+  const alone = ISSUE_LS.split('\n').filter(l => !l.includes('s700')).join('\n')
+  const q = buildBoard(queued, {}, new Set([1]), NOW, fromTree(alone, ISSUE_BLOBS, queued))
+  expect(q.epics.map(e => `${e.label} ${e.cells.join(',')} ${e.next?.kind} ${e.next?.sitting}`)).toEqual(['nav todo queued #527'])
+  const running = statusOf({ dispatcher: 1, running: [{ entry: 1, brief: ISSUE_BRIEF, lane: '1', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 2 }] })
+  const r = buildBoard(running, {}, new Set([1, 11]), NOW, fromTree(ISSUE_LS, ISSUE_BLOBS, running))
+  expect(r.epics.map(e => `${e.label} ${e.cells.join(',')} ${e.next?.kind} ${e.next?.sitting}`)).toEqual(['nav running,todo running #527'])
+  const { ui } = await mountBoard($, on, r)
+  expect(await epicCells(ui, 'nav')).toEqual([`■ ${PEACH}`, `□ ${SURFACE2}`])
+  expect(await has(ui, '● #527 running')).toBe(true)
+  await ui.unmount()
+})
+
+type GitAnswer = { stdout: string; exitCode?: number } | 'deny'
+
+/**
+ * A poll over `status`, with `git` answered by `answer(poll, args)`, where
+ * `poll` counts from 0; `mount` draws the pane the last poll wrote.
+ */
+async function pollFixture($: any, on: any, status: object, answer: (poll: number, args: readonly string[]) => GitAnswer) {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { HOME })
+  mock.store(on, { folds: {} })
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'board' } }))
+  on('ui.status', () => ({ value: undefined }))
+  const text = JSON.stringify({ dispatcher: 1, running: [], queued: [], finished: [], ...status })
+  on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: text } : { deny: 'no such file' }))
+  on('fs.list', (_: unknown, e: { path: string }) =>
+    e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
+  )
+  let poll = 0
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+    const [cmd = '', ...args] = e.argv
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (cmd === 'git') {
+      if (args[0] === 'ls-tree') poll++
+      const a = answer(poll - 1, args)
+      return a === 'deny' ? { deny: 'spawn failed' } : out(a.stdout, a.exitCode ?? 0)
+    }
+    if (cmd === 'date') return out('-0500')
+    if (cmd === 'ps') return out('1\n')
+    return out('', 1)
+  })
+  const mount = () =>
+    $.ui.mount({
+      plugin: 'run-board',
+      component: 'Pane',
+      requestId: 'run-board',
+      surface: 'terminal',
+      props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(0)
+  return { clock, mount }
+}
+
+/** A `git` answer from an ls-tree listing and blob texts by id; a blob not in `blobs` fails. */
+const fromBlobs = (ls: string, blobs: Readonly<Record<string, string>>) => (args: readonly string[]): GitAnswer => {
+  if (args[0] === 'ls-tree') return { stdout: ls }
+  const sha = args[2] ?? ''
+  return sha in blobs ? { stdout: blobs[sha] ?? '' } : { stdout: '', exitCode: 128 }
+}
+
+test('a blob read that throws counts as a failed read, and the poll still draws the rest', async ($, on) => {
+  const ls = `100644 blob f710\t${BRIEFS}s710-throw-read.md\n100644 blob f901\tdocs/plans/dashboard.md\n`
+  const read = fromBlobs(ls, { f710: briefText('S710', 'dashboard/E2', '', 3), f901: DASHBOARD_PLAN })
+  const queued = [{ entry: 1, brief: `${BRIEFS}s710-throw-read.md`, lane: '', reason: 'a free slot', cause: null }]
+  // The plan's read throws on the first poll.
+  const { clock, mount } = await pollFixture($, on, { queued }, (poll, args) => (poll === 0 && args[2] === 'f901' ? 'deny' : read(args)))
+  const first = await mount()
+  expect((await costBox(first, 'S710 throw-read')).squares).toEqual([`■■■ ${BLUE}`])
+  expect(await epicCells(first, 'dashboard/E2')).toEqual([`□ ${SURFACE2}`])
+  await first.unmount()
+  await clock.advance(5000)
+  const second = await mount()
+  expect(await epicCells(second, 'design system')).toEqual([`□ ${SURFACE2}`])
+  await second.unmount()
+})
+
+test('a failed listing keeps the last good read: plan titles, recorded epics, epics and cycles', async ($, on) => {
+  const ls = `100644 blob f711\t${BRIEFS}s711-keep-read.md\n100644 blob f515\tdocs/briefs/sittings.json\n100644 blob f902\tdocs/plans/dashboard.md\n`
+  const read = fromBlobs(ls, { f711: briefText('S711', 'dashboard/E2', '', 3), f515: EPIC_SITTINGS, f902: DASHBOARD_PLAN })
+  const queued = [{ entry: 1, brief: `${BRIEFS}s711-keep-read.md`, lane: '', reason: 'a free slot', cause: null }]
+  // The second poll's listing fails.
+  const { clock, mount } = await pollFixture($, on, { queued }, (poll, args) => (poll === 1 && args[0] === 'ls-tree' ? { stdout: '', exitCode: 128 } : read(args)))
+  const first = await mount()
+  expect(await epicCells(first, 'design system')).toEqual([`■ ${GREEN}`, `□ ${SURFACE2}`])
+  await first.unmount()
+  await clock.advance(5000)
+  const second = await mount()
+  expect(await epicCells(second, 'design system')).toEqual([`■ ${GREEN}`, `□ ${SURFACE2}`])
+  expect((await costBox(second, 'S711 keep-read')).squares).toEqual([`■■■ ${BLUE}`])
+  await second.unmount()
+})
+
+test('a running brief whose Epic line leaves origin/main leaves the epics card', async ($, on) => {
+  const path = `${BRIEFS}s712-drop-epic.md`
+  const before = fromBlobs(`100644 blob f712\t${path}\n`, { f712: briefText('S712', 'dashboard/E2', '', 2) })
+  const after = fromBlobs(`100644 blob f713\t${path}\n`, { f713: briefText('S712', '', '', 2) })
+  const running = [{ entry: 1, brief: path, lane: '1', pid: 1, started: iso(NOW - 30 * MIN), session_cost: 2 }]
+  const { clock, mount } = await pollFixture($, on, { running }, (poll, args) => (poll === 0 ? before(args) : after(args)))
+  const first = await mount()
+  expect(await has(first, '● S712 running')).toBe(true)
+  await first.unmount()
+  await clock.advance(5000)
+  const second = await mount()
+  expect(await has(second, '▾ epics')).toBe(false)
+  await second.unmount()
+})
