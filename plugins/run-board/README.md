@@ -67,7 +67,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   runs with both. It reads `~$?` when the cycles or the median are unknown, and dim yellow on a held row. The box is
   one width across the queue and on deck, so the costs end in one column; the row's note sits between the name
   and the box and gives way first.
-  Then the TIMELINE: a lane per dispatcher slot (`slot 1` to the highest slot the board sees), then `you` and
+  The TIMELINE sits under BLOCKED and above the running cards: a lane per dispatcher slot (`slot 1` to the highest slot the board sees), then `you` and
   `held`, over a window from 8h before now to 6h after, under even-hour labels (`2p`, `12a`) and with a peach
   now-line. It draws in braille, 2 dots a cell. A bar is `⣿` cells in its colour with its last dot column blank:
   green for a run that went live, red for one that stopped, and the run in flight green to now and peach to its
@@ -81,7 +81,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `S684 ? 19m`, with `+N` for each other one. `held` is a dashed yellow strip from now, `3 held · ~3h12m`: every
   brief BLOCKED holds and every queued entry a `cause` holds, at the median each. With no median there are no
   projected bars and `held` reads its count alone.
-  Then RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
+  Under on deck, RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
   the sitting and its whole name where the pane is wide enough, then its time, a six-cell phase split (savor
   lavender, cycles green with simplify and the xhigh review, ship blue, with a legend in the card head), the cost in
   whole dollars, the plan cost, and how long ago it ended (`14m`, `5h`, `3d`). The split divides the time between
@@ -94,7 +94,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   runs with minutes; the cost sums the unrounded costs, then rounds,
   so it can differ from the rows' sum. A stop and a `shipped; deploy failed` run are left
   out: they belong to BLOCKED. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
-  outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and the timeline, lists each brief on
+  outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
   group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow
   `enrich` (no Mode line yet: it needs a pass before autopilot), and red `needs you` (marked
@@ -105,7 +105,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   a queued wait's sitting reads in blue. Then the epic, and for `needs you` the text after the marker, which says
   why: `└╌◇ S436 retire-held-path  after S434 · Removes a wrangler.toml line.`
   `/board` again closes it.
-- **BLOCKED.** A red-bordered card above the running cards, drawn only when something is stuck: one block per root cause,
+- **BLOCKED.** A red-bordered card above the timeline and the running cards, drawn only when something is stuck: one block per root cause,
   the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or
   queues it, and its brief is still on `origin/main`, or it is a red deploy (`shipped; deploy failed`) with no live
   run after it, whose run's latest attempt did not pass. Each block shows a kind tag by who acts (`? you` a decision, `÷ plan` a split, `✗ code` a red
@@ -130,7 +130,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   keeps `design system 1/3 · nav 0/7`. A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
   otherwise recent and on deck fold themselves while BLOCKED shows.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
-  on base, each section in a card on mantle (the lanes, the epics, the queue, on deck, the timeline, recent), green done, peach in flight, surface grey to come, lavender headings,
+  on base, each section in a card on mantle (the timeline, the lanes, the epics, the queue, on deck, recent), green done, peach in flight, surface grey to come, lavender headings,
   blue queued (an on-deck wait that is queued included), mauve on deck, yellow for a block's chain in the queue, on deck's groups in green, yellow and red, and peach
   for a recent run over twice the median. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint

@@ -1533,15 +1533,20 @@ test('at a narrow pane every timeline row is as long as the axis row', async ($,
   await ui.unmount()
 })
 
-test('the timeline card sits directly above RECENT, reads t: ▾ timeline, and t folds it', async ($, on) => {
+test('the timeline card sits under BLOCKED and above the running cards, reads t: ▾ timeline, and t folds it', async ($, on) => {
   const b = tlBoard()
   const { ui, sets } = await mountBoard($, on, b, { recent: false })
-  const head = await firstAt(ui, '▾ timeline')
-  const recent = await firstAt(ui, '▾ recent')
-  expect(head >= 0 && head < recent).toBe(true)
-  // Nothing but the timeline's own rows sits between its head and RECENT's.
-  const between = (await (ui as Ui).findAll({ type: 'Text' })).slice(head + 1, recent).map(t => t.text ?? '')
-  expect(between.some(t => /[▾▸] /.test(t))).toBe(false)
+  const texts = (await (ui as Ui).findAll({ type: 'Text' })).map(t => t.text ?? '')
+  // The card heads in order: BLOCKED, then the timeline, then the rest.
+  const heads = texts.filter(t => /^[▾▸] /.test(t))
+  expect(b.blocked.length > 0).toBe(true)
+  expect(heads.slice(0, 2)).toEqual(['▾ blocked', '▾ timeline'])
+  const head = texts.indexOf('▾ timeline')
+  // The running card's sitting draws after the timeline's now-line and before the next card head.
+  const nowLine = texts.findIndex((t, i) => i > head && t.trimStart() === 'now')
+  const running = texts.findIndex((t, i) => i > nowLine && t === 'S692')
+  const next = texts.findIndex((t, i) => i > head && /^[▾▸] /.test(t))
+  expect(nowLine > head && running > nowLine && running < next).toBe(true)
   // A plain Button draws its hotkey, a colon, then its label: `t: ▾ timeline`.
   const buttons: { text?: string; props?: { hotkey?: string; plain?: boolean } }[] = await ui.findAll({ type: 'Button' })
   expect(buttons.filter(x => x.text === '▾ timeline').map(x => [x.props?.hotkey, x.props?.plain])).toEqual([['t', true]])

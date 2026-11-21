@@ -996,6 +996,11 @@ export const register: Register = on => {
           </Box>
         )}
 
+        <Box {...CARD}>
+          {cardHead('timeline', 'timeline', F.lavender)}
+          {!folded('timeline') && <Box flexDirection="column">{timelineRows()}</Box>}
+        </Box>
+
         {lanesOf(b).map(({ lane, runs }) => (
           <Box {...CARD}>
             {lane === LOOP_LANE && b.loop !== null && (
@@ -1134,11 +1139,6 @@ export const register: Register = on => {
               )}
           </Box>
         )}
-
-        <Box {...CARD}>
-          {cardHead('timeline', 'timeline', F.lavender)}
-          {!folded('timeline') && <Box flexDirection="column">{timelineRows()}</Box>}
-        </Box>
 
         {b.recent.length > 0 && (
           <Box {...CARD}>
