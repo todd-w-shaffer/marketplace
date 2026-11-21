@@ -7,8 +7,12 @@ import {
   briefFiles,
   briefHeader,
   briefKey,
-  cycleBlobs,
+  briefsRead,
+  cycleBlobMap,
   cycleCount,
+  lsTreeBlobs,
+  shippedCount,
+  sittingsClaims,
   dotDigits,
   handoffQuestion,
   handoffStops,
@@ -37,7 +41,6 @@ import {
   recentCandidates,
   recentOf,
   segmentWidth,
-  spendTotals,
   runStartedMs,
   stageOf,
   statusLine,
@@ -64,7 +67,6 @@ import {
   planHeadings,
   recordedEpics,
   shortDollars,
-  sittingsBlob,
   sparkGlyphs,
 } from '../hooks/board'
 import type { Deck, Ended, Run } from '../types'
@@ -289,9 +291,10 @@ test('a brief counts its cycles by heading or bold line, and a directory brief r
     '100644 blob ddd\tdocs/briefs/s410-big/notes/deep.md',
     '100644 blob eee\tdocs/briefs/s410-big/data.json',
   ].join('\n')
-  expect(cycleBlobs(ls, 'docs/briefs/kickoff-sitting-s393-images-panel.md')).toEqual(['aaa'])
-  expect(cycleBlobs(ls, 'docs/briefs/s410-big')).toEqual(['bbb', 'ccc'])
-  expect(cycleBlobs(ls, 'docs/briefs/gone.md')).toEqual([])
+  const byKey = cycleBlobMap(lsTreeBlobs(ls))
+  expect(byKey.get('docs/briefs/kickoff-sitting-s393-images-panel.md')).toEqual(['aaa'])
+  expect(byKey.get('docs/briefs/s410-big')).toEqual(['bbb', 'ccc'])
+  expect(byKey.get('docs/briefs/gone.md')).toBe(undefined)
 })
 
 test('a running card and the hint line show the phase, the stage and the newest tool call', async () => {
@@ -376,15 +379,11 @@ const LEDGER = [
   '{"kind":"commit","ts":"2026-11-06T13:0',
 ].join('\n')
 
-test('the ledger reads as spends, and totals by day, week, month and all time', async () => {
+test('the ledger reads as spends', async () => {
   const spends = ledgerSpends(LEDGER)
   expect(spends.length).toBe(4)
   expect(spends[0]).toEqual({ startMs: Date.parse('2026-11-06T11:00:00Z'), endMs: Date.parse('2026-11-06T12:00:00Z'), usd: 6, kind: 'commit', phase: null, sitting: null })
   expect(spends[3]).toEqual({ startMs: Date.parse('2026-11-06T12:50:00Z'), endMs: Date.parse('2026-11-06T12:50:00Z'), usd: 2, kind: 'commit', phase: 'plan', sitting: 682 })
-  const now = Date.parse('2026-11-06T13:00:00Z')
-  // The October commit is outside the week and inside the month.
-  expect(spendTotals(spends, now)).toEqual({ day: 9.5, week: 9.5, month: 18.5, all: 18.5 })
-  expect(spendTotals(spends, Date.parse('2026-12-30T00:00:00Z'))).toEqual({ day: 0, week: 0, month: 0, all: 18.5 })
 })
 
 test('the ledger reads in chunks that cut lines anywhere', async () => {
@@ -554,13 +553,13 @@ const S342 = [
 ].join('\n')
 
 test('brief files are top-level kickoffs and directory READMEs, not rules or the index', async () => {
-  expect(briefFiles(LS_TREE).map(f => f.path)).toEqual([
+  expect(briefFiles(lsTreeBlobs(LS_TREE)).map(f => f.path)).toEqual([
     'docs/briefs/kickoff-sitting-s342-gallery-pass-keeps-stars.md',
     'docs/briefs/kickoff-sitting-s340-e8-help-pages.md',
     'docs/briefs/s350-split-work/README.md',
     'docs/briefs/kickoff-527-gallery-race.md',
   ])
-  expect(briefFiles(LS_TREE)[0]?.sha).toBe('bbb222')
+  expect(briefFiles(lsTreeBlobs(LS_TREE))[0]?.sha).toBe('bbb222')
 })
 
 test('a brief key is the queue path, and a directory brief is its directory', async () => {
@@ -654,7 +653,7 @@ test('an entry held off a run that shares its paths is a root tagged held, not a
 
 test('on deck lists unheld briefs by sitting, epic lane from the Epic line', async () => {
   const texts: Record<string, string> = { bbb222: S342, ccc333: '**Mode: autopilot.**\nEpic: account-basics/E8\n## a', fff666: '**Mode: autopilot.**\n## a', '222999': '# issue\n## a' }
-  const briefs = briefFiles(LS_TREE).map(f => ({ ...f, text: texts[f.sha] ?? '' }))
+  const briefs = briefFiles(lsTreeBlobs(LS_TREE)).map(f => ({ ...f, header: briefHeader(texts[f.sha] ?? '') }))
   const deck = onDeckOf(briefs, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
   expect(deck.map(d => `${d.sitting} ${d.slug} ${d.lane}${d.epic === '' ? '' : ` · ${d.epic}`}`)).toEqual([
     'S342 gallery-pass-keeps-stars epic · minisite/E4',
@@ -1092,7 +1091,7 @@ test('the header draws three figures and one spend line, and a running card has 
   if (raw === null) throw new Error('status did not parse')
   // The October commit is 11 days back and the only day of spend; the November ones are after now.
   const spends = ledgerSpends(LEDGER)
-  const spend = { ...spendTotals(spends, NOW), days: daySums(spends, NOW, '') }
+  const spend = { days: daySums(spends, NOW, '') }
   const b = buildBoard(raw, { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 }, new Set([5147, 21491]), NOW, { spend })
   const { ui } = await mountBoard($, on, b)
   expect(await has(ui, `spend ▁▁█${'▁'.repeat(11)}`)).toBe(true)
@@ -1360,10 +1359,11 @@ const SITTINGS_JSON = JSON.stringify({ floor: 60, claims: { s700: { slug: 'x', r
 
 test("a split parent's queue row reads how many briefs were split from it", async ($, on) => {
   expect(briefHeader(SPLIT_BRIEFS[1]?.text ?? '').splitFrom).toEqual(['S686'])
-  const splits = splitCounts(SPLIT_BRIEFS, SITTINGS_JSON)
+  const headed = SPLIT_BRIEFS.map(b => ({ path: b.path, header: briefHeader(b.text) }))
+  const splits = splitCounts(headed, sittingsClaims(SITTINGS_JSON))
   expect(splits).toEqual({ S686: 2, S690: 1 })
   // A sittings.json that does not parse counts only the live briefs.
-  expect(splitCounts(SPLIT_BRIEFS, '{"claims": ')).toEqual({ S686: 1 })
+  expect(splitCounts(headed, sittingsClaims('{"claims": '))).toEqual({ S686: 1 })
   const raw = { dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] }
   const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([1]), NOW, { splits }))
   expect(await has(ui, 'S686 dashboard-rail split ×2')).toBe(true)
@@ -1834,18 +1834,13 @@ const EPIC_BLOBS: Record<string, string> = {
 }
 
 /** What the poll reads from an `ls-tree` and its blobs, for `buildBoard`. */
-const fromTree = (ls: string, blobs: Readonly<Record<string, string>>, raw: Parameters<typeof buildBoard>[0]) => {
-  const briefs = briefFiles(ls).map(f => ({ ...f, text: blobs[f.sha] ?? '' }))
-  const keyed = briefs.map(f => [briefKey(f.path), f.text] as const)
-  return {
-    onDeck: onDeckOf(briefs, [...raw.running, ...raw.queued].map(r => r.brief)),
-    afters: Object.fromEntries(keyed.map(([k, text]) => [k, afterSittings(briefHeader(text).after)])),
-    cycles: Object.fromEntries(keyed.map(([k]) => [k, cycleCount(cycleBlobs(ls, k).map(sha => blobs[sha] ?? '').join('\n'))])),
-    epics: Object.fromEntries(keyed.map(([k, text]) => [k, briefHeader(text).epic])),
-    recordedEpics: recordedEpics(blobs[sittingsBlob(ls) ?? ''] ?? ''),
-    planTitles: Object.fromEntries(planBlobs(ls).map(p => [p.plan, planHeadings(blobs[p.sha] ?? '')])),
-  }
-}
+const fromTree = (ls: string, blobs: Readonly<Record<string, string>>, raw: Parameters<typeof buildBoard>[0]) =>
+  briefsRead(
+    lsTreeBlobs(ls),
+    sha => blobs[sha] ?? null,
+    raw.running.map(r => r.brief),
+    raw.queued.map(r => r.brief),
+  )
 
 // Four live runs: $7.70 over 1 cycle, $30 over 2, $10 over 2, and $1 whose commits name no cycle.
 const COST_FILES = [
@@ -1924,7 +1919,7 @@ test('namedCycles is the highest cycle a /commit line names, and recent writes i
 
 test('the epics card names each epic by its plan title, a cell per sitting, shipped over total, and the next state', async ($, on) => {
   const b = epicBoard()
-  expect(b.epics.map(e => `${e.label} ${e.cells.join(',')} ${e.shipped}/${e.cells.length} ${e.next?.kind} ${e.next?.sitting}`)).toEqual([
+  expect(b.epics.map(e => `${e.label} ${e.cells.join(',')} ${shippedCount(e)}/${e.cells.length} ${e.next?.kind} ${e.next?.sitting}`)).toEqual([
     'multi-gallery/E4 todo,todo 0/2 blocked S684',
     'nav todo 0/1 queued S686',
     'design system shipped,running,todo 1/3 running S693',
@@ -1958,9 +1953,9 @@ test('a sittings.json that does not parse draws the same epics with no shipped c
 
 test('a heading matches its epic id exactly, and a plan path is the part before the last slash', () => {
   expect(planHeadings(DASHBOARD_PLAN)).toEqual({ E10: 'later', E1: 'nav', E2: 'design system', E4: 'x' })
-  expect(planBlobs(EPIC_LS)).toEqual([{ plan: 'dashboard', sha: 'e901' }])
-  expect(recordedEpics(EPIC_SITTINGS)).toEqual({ S692: 'dashboard/E2' })
-  expect(recordedEpics('not json')).toEqual({})
+  expect(planBlobs(lsTreeBlobs(EPIC_LS))).toEqual([{ plan: 'dashboard', sha: 'e901' }])
+  expect(recordedEpics(sittingsClaims(EPIC_SITTINGS))).toEqual({ S692: 'dashboard/E2' })
+  expect(recordedEpics(sittingsClaims('not json'))).toEqual({})
 })
 
 test('the epics card starts open while BLOCKED shows, and e folds it to its one line', async ($, on) => {
@@ -2065,7 +2060,7 @@ test('spend sums by local day over 14 days, today last, and scales its bars to t
 })
 
 test('the header draws the 14-day sparkline, today peach, then today and 14d', async ($, on) => {
-  const spend = { ...spendTotals(SPARK_SPENDS, SPARK_NOW), days: daySums(SPARK_SPENDS, SPARK_NOW, '-1000') }
+  const spend = { days: daySums(SPARK_SPENDS, SPARK_NOW, '-1000') }
   const b = buildBoard(statusOf({ dispatcher: 1 }), {}, new Set([1]), SPARK_NOW, { spend, utcOffset: '-1000' })
   const { ui } = await mountBoard($, on, b)
   expect(await has(ui, 'spend ▁▁▁▁▁▁▁▁▃▃▄▄██')).toBe(true)

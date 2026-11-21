@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BlockKind, Board, BriefCost, Deck, DeckMode, Ended, EpicCell, EpicRow, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
+import type { BlockKind, Board, BriefCost, DeckMode, Ended, EpicCell, EpicRow, EpicState, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
 import {
   FOLD_KEY,
   KIND_TAG,
@@ -17,14 +17,14 @@ import {
   baseName,
   buildBoard,
   chainLine,
-  briefFiles,
   buildLoop,
-  afterSittings,
-  briefHeader,
   briefKey,
-  cycleBlobs,
-  cycleCount,
+  briefsBlobs,
+  briefsRead,
+  cycleBlobMap,
   daySums,
+  lsTreeBlobs,
+  shippedCount,
   deckTree,
   elapsed,
   hoursMinutes,
@@ -32,8 +32,6 @@ import {
   addPlanCosts,
   launchCount,
   RECENT_SPLIT_CELLS,
-  sittingsBlob,
-  splitCounts,
   finishedToast,
   isLoopLanding,
   lastToolOf,
@@ -42,17 +40,12 @@ import {
   phaseGlyphs,
   phaseLine,
   phaseName,
-  planBlobs,
-  planHeadings,
-  recordedEpics,
   segmentWidth,
   shortDollars,
   sparkGlyphs,
-  spendTotals,
   dollars,
   money,
   newestRunDir,
-  onDeckOf,
   queueTree,
   parseStatus,
   lanesOf,
@@ -66,7 +59,7 @@ import {
   laneCells,
   nowCell,
 } from './board'
-import type { CellTone, Ending, LoopFile, RawStatus, Spend, SpendTotals, TimelineCell } from './board'
+import type { BriefsRead, CellTone, Ending, LoopFile, RawStatus, Spend, TimelineCell } from './board'
 
 // Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
 // paints comes from here, the pane's own ground included, so the pane reads
@@ -142,6 +135,16 @@ const EPIC_CELL: Record<EpicCell, { glyph: string; color: string }> = {
   shipped: { glyph: '■', color: F.green },
   running: { glyph: '■', color: F.peach },
   todo: { glyph: '□', color: F.surface2 },
+}
+// Each state an epic's next sitting can be in: its colour, and its words with
+// the sitting bold. The epics card draws these words and measures its state
+// column from them.
+const EPIC_STATE: Record<EpicState['kind'], { color: string; parts: (sitting: string) => { text: string; bold?: boolean }[] }> = {
+  running: { color: F.peach, parts: s => [{ text: '● ' }, { text: s, bold: true }, { text: ' running' }] },
+  blocked: { color: F.red, parts: s => [{ text: 'blocked at ' }, { text: s, bold: true }] },
+  held: { color: F.yellow, parts: () => [{ text: '‖ held' }] },
+  queued: { color: F.blue, parts: () => [{ text: 'queued' }] },
+  deck: { color: F.mauve, parts: () => [{ text: 'on deck' }] },
 }
 
 const PANE = 'run-board'
@@ -271,18 +274,20 @@ async function readLedger($: EngineInterface, path: string): Promise<boolean> {
 }
 
 /**
- * Spend over the last 24 hours, 7 days and 30 days, and in all, every spend
- * read, and each sitting's plan cost, from one read of token-ledger; null when
- * it could not be read.
+ * What the spends came to on each of the last 14 local days in the offset
+ * `utcOffset` answers, and each sitting's plan cost, from one read of
+ * token-ledger; null when it could not be read.
  */
 async function readSpend(
   $: EngineInterface,
   home: string,
   now: number,
-): Promise<{ spend: SpendTotals; spends: readonly Spend[]; plans: Record<string, number> } | null> {
+  utcOffset: Promise<string>,
+): Promise<{ days: number[]; plans: Record<string, number> } | null> {
   if (ledgerRead === null) ledgerRead = readLedger($, `${home}/${LEDGER}`).finally(() => (ledgerRead = null))
-  if (!(await ledgerRead)) return null
-  return { spend: spendTotals(ledger.spends, now), spends: ledger.spends, plans: { ...ledger.plans } }
+  const [isRead, offset] = await Promise.all([ledgerRead, utcOffset])
+  if (!isRead) return null
+  return { days: daySums(ledger.spends, now, offset), plans: { ...ledger.plans } }
 }
 
 // Launch counts read from `.launches` files, by name, kept while their mtime holds.
@@ -439,96 +444,47 @@ async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<
 // Each running brief's cycle count and `Epic:` value by its key, kept after
 // the archive moves the brief off docs/briefs/, so the bar keeps its length
 // and the epics card its sitting to the end.
-const cyclesCache = new Map<string, number>()
-const epicCache = new Map<string, string>()
-
-// Each plan's epic titles by its blob id; a blob's text never changes. Pruned
-// each poll to the plan blobs the listing still names.
-let planCache = new Map<string, Record<string, string>>()
-
-/** What `readBriefs` reads from `origin/main`. */
-type BriefsRead = {
-  onDeck: Deck[]
-  /** Each brief's cycle count by its key; a brief whose blobs could not be read is absent. */
-  cycles: Record<string, number>
-  afters: Record<string, string[]>
-  splits: Record<string, number>
-  /** Each brief's `Epic:` value by its key, a running brief's kept after its archive. */
-  epics: Record<string, string>
-  recordedEpics: Record<string, string>
-  planTitles: Record<string, Record<string, string>>
-}
+const cyclesCache = new Map<string, { cycles?: number; epic?: string }>()
 
 /**
  * The briefs on deck, each brief's cycle count and epic, the epics
  * `sittings.json` records, and each plan's epic titles, from one
  * `git ls-tree -r origin/main docs/briefs/ docs/plans/` in the checkout.
+ * Each blob the listing names is read at once, and a running brief that has
+ * left the listing reads its cycles and epic from `cyclesCache`.
  */
 async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Promise<BriefsRead> {
   const cwd = `${home}/${REPO}`
-  const cycles: Record<string, number> = {}
-  const epics: Record<string, string> = {}
-  const keys = raw.running.map(r => briefKey(r.brief))
+  const running = raw.running.map(r => r.brief)
+  const keys = running.map(briefKey)
   const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/', 'docs/plans/'], { cwd, timeoutMs: 5000 })
   if (ls.exitCode !== 0) {
+    const read: BriefsRead = { onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, planTitles: {} }
     for (const k of keys) {
-      if (cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
-      if (epicCache.has(k)) epics[k] = epicCache.get(k) ?? ''
+      const kept = cyclesCache.get(k)
+      if (kept?.cycles !== undefined) read.cycles[k] = kept.cycles
+      if (kept?.epic !== undefined) read.epics[k] = kept.epic
     }
-    return { onDeck: [], cycles, afters: {}, splits: {}, epics, recordedEpics: {}, planTitles: {} }
+    return read
   }
+  const blobs = lsTreeBlobs(ls.stdout)
   const next = new Map<string, string>()
-  const briefs: { path: string; sha: string; text: string | null }[] = []
-  for (const f of briefFiles(ls.stdout)) briefs.push({ ...f, text: await blobText($, cwd, f.sha, next) })
-  for (const f of briefs) {
-    const epic = f.text === null ? '' : briefHeader(f.text).epic
-    if (epic !== '') epics[briefKey(f.path)] = epic
-  }
-  // Every brief's cycles, and each running one's from the cache once its brief has left.
-  for (const k of new Set([...briefs.map(f => briefKey(f.path)), ...keys])) {
-    const isRunning = keys.includes(k)
-    const shas = cycleBlobs(ls.stdout, k)
-    if (shas.length > 0) {
-      const texts = await Promise.all(shas.map(sha => blobText($, cwd, sha, next)))
-      const count = texts.some(t => t === null) ? null : cycleCount(texts.join('\n'))
-      if (count !== null) cycles[k] = count
-      // A failed blob read keeps no entry, so the next poll reads the blob again.
-      if (isRunning && count !== null) cyclesCache.set(k, count)
-      else if (isRunning) cyclesCache.delete(k)
-    } else if (isRunning && cyclesCache.has(k)) cycles[k] = cyclesCache.get(k) ?? 0
-    if (!isRunning) continue
-    if (Object.hasOwn(epics, k)) epicCache.set(k, epics[k] ?? '')
-    else if (epicCache.has(k)) epics[k] = epicCache.get(k) ?? ''
-  }
-  for (const cache of [cyclesCache, epicCache]) for (const k of [...cache.keys()]) if (!keys.includes(k)) cache.delete(k)
-  const planTitles: Record<string, Record<string, string>> = {}
-  const plans = new Map<string, Record<string, string>>()
-  for (const p of planBlobs(ls.stdout)) {
-    let titles = planCache.get(p.sha) ?? plans.get(p.sha)
-    if (titles === undefined) {
-      const text = await blobText($, cwd, p.sha, next)
-      // A failed blob read keeps no entry, so the next poll reads the blob again.
-      if (text === null) continue
-      titles = planHeadings(text)
-    }
-    plans.set(p.sha, titles)
-    planTitles[p.plan] = titles
-  }
-  planCache = plans
-  const registry = sittingsBlob(ls.stdout)
-  const sittingsJson = (registry === null ? null : await blobText($, cwd, registry, next)) ?? ''
+  const texts = new Map(await Promise.all(briefsBlobs(blobs, running).map(async sha => [sha, await blobText($, cwd, sha, next)] as const)))
   blobCache = next
-  const read = briefs.map(f => ({ ...f, text: f.text ?? '' }))
-  const afters = Object.fromEntries(read.map(f => [briefKey(f.path), afterSittings(briefHeader(f.text).after)]))
-  return {
-    onDeck: onDeckOf(read, [...raw.running, ...raw.queued].map(r => r.brief)),
-    cycles,
-    afters,
-    splits: splitCounts(read, sittingsJson),
-    epics,
-    recordedEpics: recordedEpics(sittingsJson),
-    planTitles,
+  const read = briefsRead(blobs, sha => texts.get(sha) ?? null, running, raw.queued.map(r => r.brief))
+  const listed = cycleBlobMap(blobs)
+  for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
+  for (const k of keys) {
+    const kept = { ...cyclesCache.get(k) }
+    if (Object.hasOwn(read.cycles, k)) kept.cycles = read.cycles[k]
+    // A failed blob read keeps no entry, so the next poll reads the blob again.
+    else if (listed.has(k)) delete kept.cycles
+    else if (kept.cycles !== undefined) read.cycles[k] = kept.cycles
+    if (Object.hasOwn(read.epics, k)) kept.epic = read.epics[k]
+    else if (kept.epic !== undefined) read.epics[k] = kept.epic
+    cyclesCache.set(k, kept)
   }
+  return read
 }
 
 // Finished entries already seen; null until the first read, which only
@@ -565,14 +521,17 @@ async function poll($: EngineInterface): Promise<void> {
     mtimes: new Map<string, number>(),
   }))
   const now = await $.clock.now()
-  const [handoffs, launches, deployStages, offset, read] = await Promise.all([
+  const offset = $.process
+    .run(['date', '+%z'], { timeoutMs: 5000 })
+    .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
+    .catch(() => '')
+  const [handoffs, launches, deployStages, utcOffset, read] = await Promise.all([
     readHandoffs($, home, endings).catch(() => ({})),
     readLaunchCounts($, dir, endings, mtimes).catch(() => ({})),
     readDeployStages($, home, endings, now).catch(() => ({})),
-    $.process.run(['date', '+%z'], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' })),
-    readSpend($, home, now).catch(() => null),
+    offset,
+    readSpend($, home, now, offset).catch(() => null),
   ])
-  const utcOffset = offset.exitCode === 0 ? offset.stdout.trim() : ''
   const next = buildBoard(raw, progress, alive, now, {
     loop,
     recent,
@@ -580,7 +539,7 @@ async function poll($: EngineInterface): Promise<void> {
     tools,
     cycles,
     utcOffset,
-    spend: read === null ? null : { ...read.spend, days: daySums(read.spends, now, utcOffset) },
+    spend: read === null ? null : { days: read.days },
     plans: read?.plans ?? null,
     afters,
     endings,
@@ -789,15 +748,26 @@ export const register: Register = on => {
         </Box>
       )
     }
+    // A queue or deck row: the name, then the note, which sits between the
+    // name and the box and gives way first, then the box.
+    const boxedRow = (name: JSX.Element, note: JSX.Element, box: JSX.Element, marginTop = 0) => (
+      <Box columnGap={2} marginTop={marginTop}>
+        <Box flexShrink={1} minWidth={0}>
+          {name}
+        </Box>
+        <Box flexGrow={1} flexShrink={NOTE_SHRINK} minWidth={0} justifyContent="flex-end">
+          {note}
+        </Box>
+        {box}
+      </Box>
+    )
 
     // The epics card's columns: the label padded to the widest label, the
     // cells to the widest epic, cut with `…` past the room the label, the
     // count and the widest state leave, then `shipped/total` and the state.
-    const stateText = (x: EpicRow): string =>
-      x.next === null
-        ? ''
-        : { running: `● ${x.next.sitting} running`, blocked: `blocked at ${x.next.sitting}`, held: '‖ held', queued: 'queued', deck: 'on deck' }[x.next.kind]
-    const countText = (x: EpicRow): string => `${x.shipped}/${x.cells.length}`
+    const stateParts = (x: EpicRow) => (x.next === null ? [] : EPIC_STATE[x.next.kind].parts(x.next.sitting))
+    const stateText = (x: EpicRow): string => stateParts(x).map(p => p.text).join('')
+    const countText = (x: EpicRow): string => `${shippedCount(x)}/${x.cells.length}`
     const epicLabelCells = widest(b.epics.map(e => e.label))
     const epicCountCells = widest(b.epics.map(countText))
     const epicCellRoom = Math.max(2, e.props.bodyColumns - 4 - epicLabelCells - 2 - 2 - epicCountCells - 2 - widest(b.epics.map(stateText)))
@@ -810,7 +780,6 @@ export const register: Register = on => {
         if (last !== undefined && last.cell === c) last.count++
         else runs.push({ cell: c, count: 1 })
       }
-      const next = x.next
       return (
         <Text wrap="truncate-end">
           <Text color={F.text}>{x.label.padEnd(epicLabelCells)}</Text>
@@ -823,19 +792,7 @@ export const register: Register = on => {
           {'  '}
           <Text color={F.overlay2}>{countText(x).padStart(epicCountCells)}</Text>
           {'  '}
-          {next?.kind === 'running' && (
-            <Text color={F.peach}>
-              ● <Text bold>{next.sitting}</Text> running
-            </Text>
-          )}
-          {next?.kind === 'blocked' && (
-            <Text color={F.red}>
-              blocked at <Text bold>{next.sitting}</Text>
-            </Text>
-          )}
-          {next?.kind === 'held' && <Text color={F.yellow}>‖ held</Text>}
-          {next?.kind === 'queued' && <Text color={F.blue}>queued</Text>}
-          {next?.kind === 'deck' && <Text color={F.mauve}>on deck</Text>}
+          {x.next !== null && <Text color={EPIC_STATE[x.next.kind].color}>{stateParts(x).map(p => (p.bold === true ? <Text bold>{p.text}</Text> : p.text))}</Text>}
         </Text>
       )
     }
@@ -1090,37 +1047,31 @@ export const register: Register = on => {
             {!folded('queued') &&
               queueRows.map((r, i) => {
                 const isHeld = r.kind === 'held' || r.kind === 'block' || r.kind === 'hold'
-                const lit = r.kind === 'run' ? (b.running.find(x => x.sitting === r.sitting)?.phases.filter(p => p.label.startsWith('cycle ') && p.state !== 'todo').length ?? 0) : null
-                return (
-                  // A joint means the entry needs its parent shipped; a yellow `‖` that a block holds it.
-                  // The note sits between the name and the box, and gives way first.
-                  <Box columnGap={2} marginTop={r.kind === 'block' && i > 0 ? 1 : 0}>
-                    <Box flexShrink={1} minWidth={0}>
-                      <Text wrap="truncate-end">
-                        <Text color={r.kind === 'hold' ? F.yellow : F.overlay0}>{r.rails}</Text>
-                        <Text color={r.kind === 'hold' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
-                        <Text color={r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
-                          {r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
-                        </Text>
-                        <Text bold color={r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
-                        {r.slug !== '' && <Text color={r.kind === 'block' ? F.yellow : F.subtext0}> {r.slug}</Text>}
-                        {(b.splits[r.sitting] ?? 0) > 0 && <Text color={F.overlay0}>{` split ×${b.splits[r.sitting] ?? 0}`}</Text>}
-                      </Text>
-                    </Box>
-                    <Box flexGrow={1} flexShrink={NOTE_SHRINK} minWidth={0} justifyContent="flex-end">
-                      {r.kind === 'run' ? (
-                        <Text wrap="truncate-end">
-                          <Text color={LANE_COLOR[r.lane] ?? F.surface2}>{r.lane}</Text>
-                          <Text color={F.overlay2}> · running</Text>
-                        </Text>
-                      ) : (
-                        <Text wrap="truncate-end" color={r.kind === 'held' || r.kind === 'block' ? F.yellow : F.overlay2}>
-                          {r.note}
-                        </Text>
-                      )}
-                    </Box>
-                    {costBox(r.sitting, isHeld ? F.yellow : F.blue, isHeld, lit)}
-                  </Box>
+                const lit = r.kind === 'run' ? (b.costs[r.sitting]?.lit ?? 0) : null
+                // A joint means the entry needs its parent shipped; a yellow `‖` that a block holds it.
+                return boxedRow(
+                  <Text wrap="truncate-end">
+                    <Text color={r.kind === 'hold' ? F.yellow : F.overlay0}>{r.rails}</Text>
+                    <Text color={r.kind === 'hold' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
+                    <Text color={r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
+                      {r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
+                    </Text>
+                    <Text bold color={r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
+                    {r.slug !== '' && <Text color={r.kind === 'block' ? F.yellow : F.subtext0}> {r.slug}</Text>}
+                    {(b.splits[r.sitting] ?? 0) > 0 && <Text color={F.overlay0}>{` split ×${b.splits[r.sitting] ?? 0}`}</Text>}
+                  </Text>,
+                  r.kind === 'run' ? (
+                    <Text wrap="truncate-end">
+                      <Text color={LANE_COLOR[r.lane] ?? F.surface2}>{r.lane}</Text>
+                      <Text color={F.overlay2}> · running</Text>
+                    </Text>
+                  ) : (
+                    <Text wrap="truncate-end" color={r.kind === 'held' || r.kind === 'block' ? F.yellow : F.overlay2}>
+                      {r.note}
+                    </Text>
+                  ),
+                  costBox(r.sitting, isHeld ? F.yellow : F.blue, isHeld, lit),
+                  r.kind === 'block' && i > 0 ? 1 : 0,
                 )
               })}
           </Box>
@@ -1138,30 +1089,26 @@ export const register: Register = on => {
                   </Text>
                 ) : (
                   // A solid joint waits on the brief above it; a dashed one hangs under its group.
-                  <Box columnGap={2}>
-                    <Box flexShrink={1} minWidth={0}>
-                      <Text wrap="truncate-end">
-                        <Text color={F.overlay0}>{r.rails}</Text>
-                        <Text color={r.kind === 'after' ? DECK_COLOR[r.mode] : F.surface2}>{r.joint}</Text>
-                        <Text color={DECK_COLOR[r.mode]}>◇ </Text>
-                        <Text bold color={F.text}>{r.sitting}</Text>
-                        <Text color={F.subtext0}> {r.slug}</Text>
-                      </Text>
-                    </Box>
-                    <Box flexGrow={1} flexShrink={NOTE_SHRINK} minWidth={0} justifyContent="flex-end">
-                      <Text wrap="truncate-end" color={F.overlay2}>
-                        {r.wait !== '' && (
-                          // The nearest wait, its sitting blue when it is queued.
-                          <Text>
-                            after <Text color={r.isWaitQueued ? F.blue : F.overlay2}>{r.wait}</Text>
-                          </Text>
-                        )}
-                        {r.wait !== '' && r.note !== '' ? ' · ' : ''}
-                        {r.note}
-                      </Text>
-                    </Box>
-                    {costBox(r.sitting, DECK_COLOR[r.mode], false)}
-                  </Box>
+                  boxedRow(
+                    <Text wrap="truncate-end">
+                      <Text color={F.overlay0}>{r.rails}</Text>
+                      <Text color={r.kind === 'after' ? DECK_COLOR[r.mode] : F.surface2}>{r.joint}</Text>
+                      <Text color={DECK_COLOR[r.mode]}>◇ </Text>
+                      <Text bold color={F.text}>{r.sitting}</Text>
+                      <Text color={F.subtext0}> {r.slug}</Text>
+                    </Text>,
+                    <Text wrap="truncate-end" color={F.overlay2}>
+                      {r.wait !== '' && (
+                        // The nearest wait, its sitting blue when it is queued.
+                        <Text>
+                          after <Text color={r.isWaitQueued ? F.blue : F.overlay2}>{r.wait}</Text>
+                        </Text>
+                      )}
+                      {r.wait !== '' && r.note !== '' ? ' · ' : ''}
+                      {r.note}
+                    </Text>,
+                    costBox(r.sitting, DECK_COLOR[r.mode], false),
+                  )
                 ),
               )}
           </Box>

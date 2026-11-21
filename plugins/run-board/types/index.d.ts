@@ -188,26 +188,23 @@ export type EpicRow = {
   label: string
   /** A cell per sitting: the shipped ones, then the running ones, then the rest, each by sitting. */
   cells: EpicCell[]
-  shipped: number
   /** The epic's next sitting: a running one, else the lowest sitting still to come; null once every one has shipped. */
   next: EpicState | null
 }
 
 /**
  * A brief's planned cycles and projected build cost. `cycles` is null when its brief could not be read;
- * `usd` is null when the cycles are 0 or unknown, or RECENT gives no cost per cycle.
+ * `usd` is null when the cycles are 0 or unknown, or RECENT gives no cost per cycle. `lit` is a running
+ * brief's cycles done or under way, and absent for a brief that is not running.
  */
-export type BriefCost = { cycles: number | null; usd: number | null }
+export type BriefCost = { cycles: number | null; usd: number | null; lit?: number }
 
 export type Board = {
   checkedAt: number
   /** `checkedAt` on a 12-hour clock in the machine's offset, `7:41 PM`. */
   clock: string
-  /**
-   * Spend over the last day, week and month, and in all, and `days`, the sums of the last 14 local days, oldest
-   * first, today last, from token-ledger; null when it could not be read.
-   */
-  spend: { day: number; week: number; month: number; all: number; days: number[] } | null
+  /** `days`, the spend of the last 14 local days, oldest first, today last, from token-ledger; null when it could not be read. */
+  spend: { days: number[] } | null
   isDispatcherLive: boolean
   loop: Loop | null
   running: Run[]

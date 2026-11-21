@@ -215,21 +215,29 @@ export function cycleCount(text: string): number {
 }
 
 /**
- * The blobs that hold a brief's cycles in an `ls-tree -r` listing: a file
- * brief's own blob, or every `.md` file directly in a directory brief, the
- * files scripts/autopilot.sh reads.
+ * The blobs that hold each brief's cycles, by brief key, from an `ls-tree -r`
+ * listing's blobs, in listing order: a file brief's own blob, or every `.md`
+ * file directly in a directory brief, the files scripts/autopilot.sh reads.
  */
-export function cycleBlobs(lsTree: string, key: string): string[] {
-  const out: string[] = []
-  for (const line of lsTree.split('\n')) {
-    const m = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line)
-    if (!m) continue
-    const path = m[2] ?? ''
-    const inDir = path.startsWith(`${key}/`) && /^[^/]+\.md$/.test(path.slice(key.length + 1))
-    if (path === key || inDir) out.push(m[1] ?? '')
+export function cycleBlobMap(blobs: readonly TreeBlob[]): Map<string, string[]> {
+  const out = new Map<string, string[]>()
+  const add = (key: string, sha: string) => {
+    const shas = out.get(key)
+    if (shas === undefined) out.set(key, [sha])
+    else shas.push(sha)
+  }
+  for (const { path, sha } of blobs) {
+    add(path, sha)
+    const dir = /^(.+)\/[^/]+\.md$/.exec(path)?.[1]
+    if (dir !== undefined) add(dir, sha)
   }
   return out
 }
+
+// A `/commit` line in a progress file, and the text after the skill's name.
+const COMMIT_LINE = /^skill: commit-skill:commit\b(.*)$/
+// The `cycle k` that a `/commit` line's text names.
+const CYCLE_NAMED = /\bcycle (\d+)/i
 
 /**
  * Where a run is in the fixed chain, from its progress file: step 0's savor
@@ -258,12 +266,12 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
   let archive = false
   let finished = false
   for (const line of progress.split('\n')) {
-    const commit = /^skill: commit-skill:commit\b(.*)$/.exec(line)
+    const commit = COMMIT_LINE.exec(line)
     if (commit) {
       if (savor === 'live') savor = 'done'
       else if (shipPushed) archive = true
       else if (!simplify && !ship) {
-        const k = /\bcycle (\d+)/i.exec(commit[1] ?? '')
+        const k = CYCLE_NAMED.exec(commit[1] ?? '')
         pending = k ? Number(k[1]) : done + 1
         named = Math.max(named, pending)
       }
@@ -318,8 +326,8 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
 export function namedCycles(progress: string): number {
   let most = 0
   for (const line of progress.split('\n')) {
-    const commit = /^skill: commit-skill:commit\b(.*)$/.exec(line)
-    const k = commit === null ? null : /\bcycle (\d+)/i.exec(commit[1] ?? '')
+    const commit = COMMIT_LINE.exec(line)
+    const k = commit === null ? null : CYCLE_NAMED.exec(commit[1] ?? '')
     if (k) most = Math.max(most, Number(k[1]))
   }
   return most
@@ -360,7 +368,7 @@ function nextSplitPhase(phase: SplitPhase, line: string): SplitPhase {
   if (line.startsWith('slot: ') || line.startsWith('finished: ')) return 'none'
   if (line === '' || line.startsWith('kind: ')) return phase
   if (/^skill: sittings:savor launch\b/.test(line)) return phase === 'none' ? 'savor' : phase
-  if (phase === 'savor') return line.startsWith('savored: ') || /^skill: commit-skill:commit\b/.test(line) ? 'cycles' : 'savor'
+  if (phase === 'savor') return line.startsWith('savored: ') || COMMIT_LINE.test(line) ? 'cycles' : 'savor'
   if (/^skill: commit-skill:ship\b/.test(line) || (line.startsWith('bash: ') && line.includes('push:checked'))) return 'ship'
   return phase === 'none' ? 'cycles' : phase
 }
@@ -597,7 +605,7 @@ export function buildBoard(
     cycles?: Readonly<Record<string, number>>
     /** The machine's UTC offset as `date +%z` prints it, `-0500`. */
     utcOffset?: string
-    /** Spend totals from token-ledger, or null when it could not be read. */
+    /** The day sums from token-ledger, or null when it could not be read. */
     spend?: Board['spend']
     /** Each brief's `After:` sittings, read from `origin/main`. */
     afters?: Readonly<Record<string, string[]>>
@@ -665,7 +673,13 @@ export function buildBoard(
     return { cycles: n, usd: n !== null && n > 0 && perCycle !== null ? perCycle * n : null }
   }
   for (const k of Object.keys(afters)) costs[briefName(k).sitting] = costOf(k)
-  for (const r of [...raw.running, ...raw.queued]) costs[sittingOf(r.brief).sitting] = costOf(briefKey(r.brief))
+  // A running sitting's cycles done or under way.
+  const lit = new Map(running.map(r => [r.sitting, r.phases.filter(p => p.label.startsWith('cycle ') && p.state !== 'todo').length]))
+  for (const r of [...raw.running, ...raw.queued]) {
+    const { sitting } = sittingOf(r.brief)
+    const n = lit.get(sitting)
+    costs[sitting] = n === undefined ? costOf(briefKey(r.brief)) : { ...costOf(briefKey(r.brief)), lit: n }
+  }
   // Each live sitting's state for the epics card; a later line outranks an earlier one.
   const states = new Map<string, EpicState['kind']>()
   for (const d of onDeck) states.set(d.sitting, 'deck')
@@ -1174,25 +1188,30 @@ export const nowCell = (t: Timeline, cells: number): number => Math.min(Math.max
 const planOf = (plans: Readonly<Record<string, number>> | null, sitting: string): PlanCost =>
   plans === null ? 'unread' : (plans[sitting] ?? 'none')
 
-/** A brief file in `git ls-tree -r origin/main docs/briefs/`: its path and blob. */
-export type BriefFile = { path: string; sha: string }
+/** A blob in `git ls-tree -r origin/main docs/briefs/ docs/plans/`: its path and id. */
+export type TreeBlob = { path: string; sha: string }
+
+/** The blobs an `ls-tree -r` listing names, in listing order. */
+export function lsTreeBlobs(lsTree: string): TreeBlob[] {
+  const out: TreeBlob[] = []
+  for (const line of lsTree.split('\n')) {
+    const m = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line)
+    if (m) out.push({ path: m[2] ?? '', sha: m[1] ?? '' })
+  }
+  return out
+}
 
 // A brief at the top of docs/briefs/, or a directory brief's entry file. The
 // README, `rules/` and `sittings.json` are not briefs.
 const FILE_BRIEF = /^docs\/briefs\/(kickoff-[^/]+)\.md$/
 const DIR_BRIEF = /^docs\/briefs\/([^/]+)\/README\.md$/
 
-/** The briefs in an `ls-tree -r` listing: top-level `kickoff-*.md` files and directory briefs' READMEs. */
-export function briefFiles(lsTree: string): BriefFile[] {
-  const out: BriefFile[] = []
-  for (const line of lsTree.split('\n')) {
-    const m = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line)
-    if (!m) continue
-    const path = m[2] ?? ''
+/** The briefs among a listing's blobs: top-level `kickoff-*.md` files and directory briefs' READMEs. */
+export function briefFiles(blobs: readonly TreeBlob[]): TreeBlob[] {
+  return blobs.filter(({ path }) => {
     const dir = DIR_BRIEF.exec(path)
-    if (FILE_BRIEF.test(path) || (dir && dir[1] !== 'rules')) out.push({ path, sha: m[1] ?? '' })
-  }
-  return out
+    return FILE_BRIEF.test(path) || (dir !== null && dir[1] !== 'rules')
+  })
 }
 
 /**
@@ -1212,7 +1231,7 @@ export function briefKey(path: string): string {
  * marker, and `enrich` for a brief that carries neither yet. `splitFrom` is
  * the sittings its `Split from:` line names.
  */
-export function briefHeader(text: string): { epic: string; after: string; mode: DeckMode; why: string; splitFrom: string[] } {
+export function briefHeader(text: string): BriefHeader {
   let epic = ''
   let after = ''
   let mode: DeckMode = 'enrich'
@@ -1238,24 +1257,37 @@ export function briefHeader(text: string): { epic: string; after: string; mode: 
 
 const INTERACTIVE = '**Mode: interactive.**'
 
+/** A brief's header lines as `briefHeader` reads them. */
+export type BriefHeader = { epic: string; after: string; mode: DeckMode; why: string; splitFrom: string[] }
+
+/** A brief on `origin/main`: its path and its header, read once. */
+export type HeadedBrief = { path: string; header: BriefHeader }
+
 /**
- * How many briefs were split from each sitting, by sitting: each brief on
- * `origin/main` whose `Split from:` line names it, and each claim in
- * `sittings.json` whose record's `split_from` list does. A child counts once
- * however many places name it. A `sittings.json` that does not parse adds no
- * claim.
+ * The claims in a `sittings.json`, by claim id; none when it does not parse
+ * or holds no claims.
  */
-export function splitCounts(briefs: readonly { path: string; text: string }[], sittingsJson: string): Record<string, number> {
-  const children = new Map<string, Set<string>>()
-  const add = (parent: string, child: string) => children.set(parent, (children.get(parent) ?? new Set()).add(child))
-  for (const b of briefs) for (const p of briefHeader(b.text).splitFrom) add(p, sittingOf(briefKey(b.path)).sitting)
+export function sittingsClaims(sittingsJson: string): Record<string, unknown> {
   let data: unknown = null
   try {
     data = JSON.parse(sittingsJson)
   } catch {
     data = null
   }
-  for (const [id, claim] of Object.entries(obj(obj(data)?.claims) ?? {})) {
+  return obj(obj(data)?.claims) ?? {}
+}
+
+/**
+ * How many briefs were split from each sitting, by sitting: each brief on
+ * `origin/main` whose `Split from:` line names it, and each claim in
+ * `sittings.json` whose record's `split_from` list does. A child counts once
+ * however many places name it. `claims` is `sittingsClaims`' answer.
+ */
+export function splitCounts(briefs: readonly HeadedBrief[], claims: Readonly<Record<string, unknown>>): Record<string, number> {
+  const children = new Map<string, Set<string>>()
+  const add = (parent: string, child: string) => children.set(parent, (children.get(parent) ?? new Set()).add(child))
+  for (const b of briefs) for (const p of b.header.splitFrom) add(p, sittingOf(briefKey(b.path)).sitting)
+  for (const [id, claim] of Object.entries(claims)) {
     const from = obj(obj(claim)?.record)?.split_from
     if (!Array.isArray(from)) continue
     for (const p of from) if (typeof p === 'string') for (const parent of afterSittings(p)) add(parent, afterSittings(id)[0] ?? id)
@@ -1263,11 +1295,12 @@ export function splitCounts(briefs: readonly { path: string; text: string }[], s
   return Object.fromEntries([...children].map(([parent, kids]) => [parent, kids.size]))
 }
 
-// The claims registry's blob in an `ls-tree -r` listing: each archived claim's record holds its `split_from` list.
-const SITTINGS_JSON = /^\d+ blob ([0-9a-f]+)\tdocs\/briefs\/sittings\.json$/m
-
-/** The blob of `docs/briefs/sittings.json` in an `ls-tree -r` listing, or null when it lists none. */
-export const sittingsBlob = (lsTree: string): string | null => SITTINGS_JSON.exec(lsTree)?.[1] ?? null
+/**
+ * The blob of the claims registry, `docs/briefs/sittings.json`, among a
+ * listing's blobs, or null when it lists none. Each archived claim's record
+ * holds its `split_from` list and its `epic`.
+ */
+export const sittingsBlob = (blobs: readonly TreeBlob[]): string | null => blobs.find(b => b.path === 'docs/briefs/sittings.json')?.sha ?? null
 
 /** A sitting's number for ordering, or none for an issue brief. */
 const sittingNumber = (sitting: string): number => {
@@ -1280,12 +1313,12 @@ const sittingNumber = (sitting: string): number => {
  * no run holds and the queue does not list. A brief with an `Epic:` line runs
  * on the epic lane; one without runs on fix.
  */
-export function onDeckOf(briefs: readonly (BriefFile & { text: string })[], held: readonly string[]): Deck[] {
+export function onDeckOf(briefs: readonly HeadedBrief[], held: readonly string[]): Deck[] {
   const taken = new Set(held.map(briefKey))
   return briefs
     .filter(b => !taken.has(briefKey(b.path)))
     .map(b => {
-      const { epic, after, mode, why } = briefHeader(b.text)
+      const { epic, after, mode, why } = b.header
       return { ...briefName(briefKey(b.path)), lane: epic === '' ? 'fix' : 'epic', epic, after, mode, why }
     })
     .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
@@ -1299,32 +1332,24 @@ function briefName(key: string): { sitting: string; slug: string } {
 
 /**
  * The epic each archived claim in `sittings.json` shipped on, by sitting: its
- * record's `epic`, trimmed. A claim with no record or no epic is absent, and a
- * `sittings.json` that does not parse gives none.
+ * record's `epic`, trimmed. A claim with no record or no epic is absent.
+ * `claims` is `sittingsClaims`' answer.
  */
-export function recordedEpics(sittingsJson: string): Record<string, string> {
-  let data: unknown = null
-  try {
-    data = JSON.parse(sittingsJson)
-  } catch {
-    data = null
-  }
+export function recordedEpics(claims: Readonly<Record<string, unknown>>): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const [id, claim] of Object.entries(obj(obj(data)?.claims) ?? {})) {
+  for (const [id, claim] of Object.entries(claims)) {
     const epic = obj(obj(claim)?.record)?.epic
     if (typeof epic === 'string' && epic.trim() !== '') out[afterSittings(id)[0] ?? id] = epic.trim()
   }
   return out
 }
 
-/** The plan files in an `ls-tree -r` listing: `docs/plans/dashboard.md` is the plan `dashboard`. */
-export function planBlobs(lsTree: string): { plan: string; sha: string }[] {
-  const out: { plan: string; sha: string }[] = []
-  for (const line of lsTree.split('\n')) {
-    const m = /^\d+ blob ([0-9a-f]+)\tdocs\/plans\/(.+)\.md$/.exec(line)
-    if (m) out.push({ plan: m[2] ?? '', sha: m[1] ?? '' })
-  }
-  return out
+/** The plan files among a listing's blobs: `docs/plans/dashboard.md` is the plan `dashboard`. */
+export function planBlobs(blobs: readonly TreeBlob[]): { plan: string; sha: string }[] {
+  return blobs.flatMap(({ path, sha }) => {
+    const plan = /^docs\/plans\/(.+)\.md$/.exec(path)?.[1]
+    return plan === undefined ? [] : [{ plan, sha }]
+  })
 }
 
 /** Each epic's title in a plan, by its id, from its `### E2: design system` heading; the first heading of an id wins. */
@@ -1365,23 +1390,101 @@ export function epicRows(
   planTitles: Readonly<Record<string, Readonly<Record<string, string>>>>,
 ): EpicRow[] {
   const bySitting = (a: string, b: string): number => sittingNumber(a) - sittingNumber(b) || a.localeCompare(b)
-  const epics = [...new Set(live.filter(l => l.epic !== '').map(l => l.epic))]
-  const rows = epics.map(epic => {
-    const shipped = Object.keys(recorded).filter(s => recorded[s] === epic).sort(bySitting)
-    const rest = live.filter(l => l.epic === epic && !Object.hasOwn(recorded, l.sitting)).sort((a, b) => bySitting(a.sitting, b.sitting))
+  const epics = [...new Set(live.filter(l => l.epic !== '').map(l => l.epic))].map(epic => ({
+    epic,
+    label: epicLabel(epic, planTitles),
+    rest: live.filter(l => l.epic === epic && !Object.hasOwn(recorded, l.sitting)).sort((a, b) => bySitting(a.sitting, b.sitting)),
+  }))
+  epics.sort((a, b) => bySitting(a.rest[0]?.sitting ?? '', b.rest[0]?.sitting ?? '') || a.label.localeCompare(b.label))
+  return epics.map(({ epic, label, rest }) => {
+    const shipped = Object.keys(recorded).filter(s => recorded[s] === epic)
     const running = rest.filter(l => l.state === 'running')
     const next = running[0] ?? rest[0]
     const cells: EpicCell[] = [...shipped.map((): EpicCell => 'shipped'), ...running.map((): EpicCell => 'running'), ...rest.filter(l => l.state !== 'running').map((): EpicCell => 'todo')]
-    return {
-      epic,
-      label: epicLabel(epic, planTitles),
-      cells,
-      shipped: shipped.length,
-      next: next === undefined ? null : { kind: next.state, sitting: next.sitting },
-      lowest: rest[0]?.sitting ?? '',
-    }
+    return { epic, label, cells, next: next === undefined ? null : { kind: next.state, sitting: next.sitting } }
   })
-  return rows.sort((a, b) => bySitting(a.lowest, b.lowest) || a.label.localeCompare(b.label)).map(({ lowest: _, ...row }) => row)
+}
+
+/** How many of an epic's sittings have shipped. */
+export const shippedCount = (row: EpicRow): number => row.cells.filter(c => c === 'shipped').length
+
+/** What the board reads from the briefs, the plans and the claims registry on `origin/main`. */
+export type BriefsRead = {
+  onDeck: Deck[]
+  /** Each brief's cycle count by its key; a brief whose blobs could not be read is absent. */
+  cycles: Record<string, number>
+  /** Each brief's `After:` sittings by its key. */
+  afters: Record<string, string[]>
+  splits: Record<string, number>
+  /** Each brief's `Epic:` value by its key; a brief that names none is absent. */
+  epics: Record<string, string>
+  recordedEpics: Record<string, string>
+  planTitles: Record<string, Record<string, string>>
+}
+
+/** The keys whose cycles the board counts: every brief's, and each running brief's. */
+const cycleKeys = (briefs: readonly TreeBlob[], running: readonly string[]): Set<string> =>
+  new Set([...briefs.map(f => briefKey(f.path)), ...running.map(briefKey)])
+
+/**
+ * The blob ids `briefsRead` reads from a listing's blobs: every brief, the
+ * cycle blobs of every brief and of each running brief, every plan, and the
+ * claims registry, each once.
+ */
+export function briefsBlobs(blobs: readonly TreeBlob[], running: readonly string[]): string[] {
+  const briefs = briefFiles(blobs)
+  const byKey = cycleBlobMap(blobs)
+  const registry = sittingsBlob(blobs)
+  return [
+    ...new Set([
+      ...briefs.map(f => f.sha),
+      ...[...cycleKeys(briefs, running)].flatMap(k => byKey.get(k) ?? []),
+      ...planBlobs(blobs).map(p => p.sha),
+      ...(registry === null ? [] : [registry]),
+    ]),
+  ]
+}
+
+/**
+ * What a listing's blobs and their texts give the board. `text` answers a
+ * blob's text, or null when it could not be read; `running` and `queued` are
+ * the briefs the dispatcher holds. A brief whose text could not be read reads
+ * as a brief with no header. A key with a cycle blob that could not be read
+ * has no count, a plan whose blob could not be read has no titles, and a
+ * registry that could not be read holds no claims.
+ */
+export function briefsRead(
+  blobs: readonly TreeBlob[],
+  text: (sha: string) => string | null,
+  running: readonly string[],
+  queued: readonly string[],
+): BriefsRead {
+  const files = briefFiles(blobs)
+  const briefs = files.map(f => ({ path: f.path, header: briefHeader(text(f.sha) ?? '') }))
+  const byKey = cycleBlobMap(blobs)
+  const cycles: Record<string, number> = {}
+  for (const k of cycleKeys(files, running)) {
+    const texts = (byKey.get(k) ?? []).map(text)
+    if (texts.length > 0 && texts.every(t => t !== null)) cycles[k] = cycleCount(texts.join('\n'))
+  }
+  const epics: Record<string, string> = {}
+  for (const b of briefs) if (b.header.epic !== '') epics[briefKey(b.path)] = b.header.epic
+  const planTitles: Record<string, Record<string, string>> = {}
+  for (const p of planBlobs(blobs)) {
+    const plan = text(p.sha)
+    if (plan !== null) planTitles[p.plan] = planHeadings(plan)
+  }
+  const registry = sittingsBlob(blobs)
+  const claims = sittingsClaims((registry === null ? null : text(registry)) ?? '')
+  return {
+    onDeck: onDeckOf(briefs, [...running, ...queued]),
+    cycles,
+    afters: Object.fromEntries(briefs.map(b => [briefKey(b.path), afterSittings(b.header.after)])),
+    splits: splitCounts(briefs, claims),
+    epics,
+    recordedEpics: recordedEpics(claims),
+    planTitles,
+  }
 }
 
 /** The sittings an `After:` line names, such as `S390, S393`, in capitals. */
@@ -1790,7 +1893,7 @@ const blockKind = (k: string): BlockKind => (k === 'decision' || k === 'split' |
 export function stripOf(text: string, kind: BlockKind, deployStage = ''): StripCell[] {
   const lines = text.split('\n')
   const savorAt = lines.findIndex(l => /^skill: sittings:savor launch\b/.test(l))
-  const commitsAfter = lines.slice(savorAt + 1).filter(l => /^skill: commit-skill:commit\b/.test(l)).length
+  const commitsAfter = lines.slice(savorAt + 1).filter(l => COMMIT_LINE.test(l)).length
   const pushed = lines.some(l => l.startsWith('bash: ') && l.includes('push:checked'))
   const broke: Stage =
     kind === 'deploy-red'
@@ -2276,22 +2379,7 @@ export function ledgerChunk(partial: string, chunk: string): { spends: Spend[]; 
   return { spends: ledgerSpends(text.slice(0, end)), partial: text.slice(end + 1) }
 }
 
-/** Spend by window: the last 24 hours, 7 days and 30 days before `now`, and every record. */
-export type SpendTotals = { day: number; week: number; month: number; all: number }
-
 const DAY_MS = 86400000
-
-/** What the spends came to over the last day, week and month before `now`, and in all. */
-export function spendTotals(spends: readonly Spend[], now: number): SpendTotals {
-  const sum = (sinceMs: number): number =>
-    Math.round(spends.filter(s => s.endMs > sinceMs && s.endMs <= now).reduce((t, s) => t + s.usd, 0) * 100) / 100
-  return {
-    day: sum(now - DAY_MS),
-    week: sum(now - 7 * DAY_MS),
-    month: sum(now - 30 * DAY_MS),
-    all: sum(Number.NEGATIVE_INFINITY),
-  }
-}
 
 // How many local days the header's sparkline sums.
 export const SPARK_DAYS = 14
@@ -2387,16 +2475,22 @@ export type RecentTotals = {
   slowOver: number | null
 }
 
+/** The median of `xs`: an even count's is the unrounded mean of the two middle values. Null when `xs` is empty. */
+function medianOf(xs: readonly number[]): number | null {
+  const sorted = [...xs].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  if (sorted.length === 0) return null
+  return sorted.length % 2 === 1 ? (sorted[mid] ?? 0) : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
+}
+
 /**
  * The median of the listed runs' minutes, among runs with minutes: an even
  * count's is the mean of the two middle times, rounded. Null when no run has
  * minutes.
  */
 function medianMinutes(recent: readonly Ended[]): number | null {
-  const timed = recent.flatMap(d => (d.minutes === null ? [] : [d.minutes])).sort((a, b) => a - b)
-  const mid = Math.floor(timed.length / 2)
-  if (timed.length === 0) return null
-  return timed.length % 2 === 1 ? (timed[mid] ?? 0) : Math.round(((timed[mid - 1] ?? 0) + (timed[mid] ?? 0)) / 2)
+  const m = medianOf(recent.flatMap(d => (d.minutes === null ? [] : [d.minutes])))
+  return m === null ? null : Math.round(m)
 }
 
 /**
@@ -2404,12 +2498,8 @@ function medianMinutes(recent: readonly Ended[]): number | null {
  * count, among runs with a cost and a count above 0. An even count's median is
  * the unrounded mean of the two middle values. Null when no run has both.
  */
-function costPerCycle(recent: readonly Ended[]): number | null {
-  const per = recent.flatMap(d => (d.usd === null || d.cycles <= 0 ? [] : [d.usd / d.cycles])).sort((a, b) => a - b)
-  const mid = Math.floor(per.length / 2)
-  if (per.length === 0) return null
-  return per.length % 2 === 1 ? (per[mid] ?? 0) : ((per[mid - 1] ?? 0) + (per[mid] ?? 0)) / 2
-}
+const costPerCycle = (recent: readonly Ended[]): number | null =>
+  medianOf(recent.flatMap(d => (d.usd === null || d.cycles <= 0 ? [] : [d.usd / d.cycles])))
 
 /**
  * RECENT's totals. The count takes every listed run; the median, the time and
@@ -2509,7 +2599,7 @@ export function foldSummary(card: FoldCard, b: Board): string {
       .filter(p => p !== '')
       .join(' · ')
   }
-  if (card === 'epics') return b.epics.map(e => `${e.label} ${e.shipped}/${e.cells.length}`).join(' · ')
+  if (card === 'epics') return b.epics.map(e => `${e.label} ${shippedCount(e)}/${e.cells.length}`).join(' · ')
   if (card === 'deck')
     return DECK_GROUPS.map(g => [g.label, b.onDeck.filter(d => d.mode === g.mode).length] as const)
       .filter(([, n]) => n > 0)
