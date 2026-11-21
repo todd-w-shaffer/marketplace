@@ -45,21 +45,21 @@ function sandbox(t) {
     },
 
     // A run with its status and stderr kept, which `ledger` drops.
-    run(cwd, session, args, { env: extra = {}, input } = {}) {
+    ledgerRun(cwd, session, args, { env: extra = {}, input } = {}) {
       return run(process.execPath, [BIN, ...args], {
         cwd, env: envWith({ CLAUDE_CODE_SESSION_ID: session, ...extra }), input,
       });
     },
 
     ledger(cwd, session, ...args) {
-      const r = sb.run(cwd, session, args);
+      const r = sb.ledgerRun(cwd, session, args);
       if (r.status !== 0) throw new Error(`token-ledger ${args.join(' ')} failed:\n${r.stderr}`);
       return r.stdout;
     },
 
     // The hook's run, which waits for the detached recorder it starts.
     sessionEnd(session, input) {
-      return sb.run(sb.root, session, ['session-end'], { input, env: { TOKEN_LEDGER_SESSION_END_WAIT: '1' } });
+      return sb.ledgerRun(sb.root, session, ['session-end'], { input, env: { TOKEN_LEDGER_SESSION_END_WAIT: '1' } });
     },
 
     // Writes one API call to a session's transcript, timestamped now, with the
@@ -303,7 +303,7 @@ test('ship with no marker and nothing pushed refuses rather than guessing', (t) 
   const sb = sandbox(t);
   const dir = sb.repo();
   sb.tracked(dir, 's1', 'a.txt');
-  const r = sb.run(dir, 's1', ['ship']);
+  const r = sb.ledgerRun(dir, 's1', ['ship']);
   assert.equal(r.status, 1);
   assert.equal(r.stdout, '');
   assert.match(r.stderr, /no ship base/);
@@ -348,7 +348,7 @@ test('with no rules file an entry carries neither field', (t) => {
   const sb = sandbox(t);
   const dir = sb.repo();
   sb.spend('s1', { input_tokens: 1e6 });
-  const r = sb.run(dir, 's1', ['commit', '--sha', sb.commit(dir, 'a.txt', 'a\n', 'docs(briefs): savor S581')]);
+  const r = sb.ledgerRun(dir, 's1', ['commit', '--sha', sb.commit(dir, 'a.txt', 'a\n', 'docs(briefs): savor S581')]);
   assert.equal(r.status, 0);
   assert.equal(r.stderr, '');
   const row = last(sb.rows(), 'commit');
@@ -368,7 +368,7 @@ for (const [name, body] of [
     const dir = sb.repo();
     writeRules(dir, body);
     sb.spend('s1', { input_tokens: 1e6 });
-    const r = sb.run(dir, 's1', ['commit', '--sha', sb.commit(dir, 'a.txt', 'a\n', 'docs(briefs): savor S581')]);
+    const r = sb.ledgerRun(dir, 's1', ['commit', '--sha', sb.commit(dir, 'a.txt', 'a\n', 'docs(briefs): savor S581')]);
     assert.equal(r.status, 0);
     assert.match(r.stdout, /^\*\*Cost:\*\* \$1\.00 · /);
     assert.equal(r.stderr.split('\n').filter(Boolean).length, 1, r.stderr);
@@ -417,7 +417,7 @@ test('record-session prices the tail past the last window and records it once', 
   const commitEnd = last(sb.rows(), 'commit').window.end;
 
   // Run from outside the repo: repo and branch come from the transcript.
-  assert.equal(sb.run(sb.root, 'other', ['record-session', S1]).status, 0);
+  assert.equal(sb.ledgerRun(sb.root, 'other', ['record-session', S1]).status, 0);
   const [row] = sessions(sb);
   assert.ok(row, 'one session entry');
   assert.equal(row.via, 'session-end');
@@ -434,7 +434,7 @@ test('record-session prices the tail past the last window and records it once', 
   assert.equal(row.cost.sub_usd, 0.5);
   assert.ok(!('phase' in row));
 
-  assert.equal(sb.run(sb.root, 'other', ['record-session', S1]).status, 0);
+  assert.equal(sb.ledgerRun(sb.root, 'other', ['record-session', S1]).status, 0);
   assert.equal(sessions(sb).length, 1, 'a second run records nothing');
 });
 
@@ -546,7 +546,7 @@ async function liveChild(t) {
 function noWaitCommit(sb, dir) {
   sb.spend(S1, { input_tokens: 1e6 });
   const sha = sb.commit(dir, 'a.txt');
-  return sb.run(dir, S1, ['commit', '--sha', sha], { env: { TOKEN_LEDGER_LOCK_NOWAIT: '1', TZ: 'Pacific/Honolulu' } });
+  return sb.ledgerRun(dir, S1, ['commit', '--sha', sha], { env: { TOKEN_LEDGER_LOCK_NOWAIT: '1', TZ: 'Pacific/Honolulu' } });
 }
 
 test('a lock whose holder has exited does not stop a commit', (t) => {
@@ -614,7 +614,7 @@ function fourSessions(sb) {
   return { dir, gone, ids };
 }
 
-const sweep = (sb, ...args) => sb.run(sb.root, 'dddd-0004', ['sweep', ...args]);
+const sweep = (sb, ...args) => sb.ledgerRun(sb.root, 'dddd-0004', ['sweep', ...args]);
 
 test('sweep records every session past its last window, skipping its own', (t) => {
   const sb = sandbox(t);
@@ -864,8 +864,8 @@ test('patch ids survive color.ui=always in the user\'s git config', (t) => {
   const dir = sb.repo();
 
   const sha = sb.tracked(dir, 's1', 'a.txt');
-  const plain = spawnSync('sh', ['-c', `git -c color.ui=never show ${sha} | git patch-id --stable`],
-    { cwd: dir, env: sb.env, encoding: 'utf8' }).stdout.split(' ')[0];
+  const plain = run('sh', ['-c', `git -c color.ui=never show ${sha} | git patch-id --stable`],
+    { cwd: dir, env: sb.env }).stdout.split(' ')[0];
   assert.match(plain, /^[0-9a-f]{40}$/);
   assert.equal(last(sb.rows(), 'commit').patch_id, plain);
 });

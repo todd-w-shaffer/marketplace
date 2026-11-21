@@ -616,7 +616,7 @@ function sessionEntry(id, via, tail) {
 // scan but stamped before the end would fall outside every window. A sweep
 // passes the session it found and the ledger it read once for every session.
 async function recordSession(id, { via, sess = findSession(id), rows = readLedger(), sweep = false, dryRun = false } = {}) {
-  transcriptOf(id, sess);
+  sess = transcriptOf(id, sess);
   const before = sweep ? sizesOf(sess) : null;
   const startMs = await startFor(sess, rows, id);
   const scanned = await tailOf(sess, startMs);
@@ -642,15 +642,21 @@ function transcriptOf(id, sess = findSession(id)) {
   return sess;
 }
 
+// This process's worktree and project; outside a work tree it throws.
+function hereRoots() {
+  const roots = gitRoots();
+  if (!roots) throw new Error('not inside a git work tree');
+  return roots;
+}
+
 // The session a commit or a ship tallies against, and this process's worktree,
-// project and branch. Outside a work tree it throws.
+// project and branch.
 function currentSession() {
   const id = sessionId();
   const sess = transcriptOf(id);
-  const roots = gitRoots();
-  if (!roots) throw new Error('not inside a git work tree');
+  const { repo, project } = hereRoots();
   const branch = gitSafe(['rev-parse', '--abbrev-ref', 'HEAD']);
-  return { id, sess, repo: roots.repo, project: roots.project, branch };
+  return { id, sess, repo, project, branch };
 }
 
 async function cmdCommit(args) {
@@ -706,7 +712,7 @@ function shipRef() {
 
 function cmdShipBegin() {
   const id = sessionId();
-  const repo = git(['rev-parse', '--show-toplevel']);
+  const { repo } = hereRoots();
   const markers = readMarkers();
   const ref = shipRef();
   markers[repo] = {
