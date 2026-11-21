@@ -603,32 +603,32 @@ test('the queue draws as a tree: each entry under what it needs, and one that ne
   ]
   // S404 and S395 are neither running nor queued: they shipped, so they draw no edge.
   // S403 runs but nothing names it on an After line, so it draws no root, whatever the lanes say.
-  expect(drawn(queueTree(RUNNING, queued))).toEqual([
+  expect(drawn(queueTree(RUNNING, queued, []))).toEqual([
     'S396',
-    '├─S397 after S396',
-    '│ └─S398 after S397',
-    '└─S402 after S396',
+    '├─S397',
+    '│ └─S398',
+    '└─S402',
     'S405 a free slot',
-    '└─S406 after S405',
+    '└─S406',
     'S407 a free slot',
   ])
-  expect(queueTree(RUNNING, queued).map(r => r.kind)).toEqual(['run', 'after', 'after', 'after', 'free', 'after', 'free'])
+  expect(queueTree(RUNNING, queued, []).map(r => r.kind)).toEqual(['run', 'after', 'after', 'after', 'free', 'after', 'free'])
 })
 
 test('an entry with no After line hangs under no run, even one whose lane matches', async () => {
-  const rows = queueTree([{ sitting: 'S524', slug: 'challenge-read-once', lane: '' }], [waits(145, 'S522', '', [], 'a free slot')])
+  const rows = queueTree([{ sitting: 'S524', slug: 'challenge-read-once', lane: '' }], [waits(145, 'S522', '', [], 'a free slot')], [])
   expect(drawn(rows)).toEqual(['S522 a free slot'])
 })
 
-test('an entry that needs two hangs under the one deeper in the tree, and names both', async () => {
+test('an entry that needs two hangs under the one deeper in the tree, and names only the other', async () => {
   const queued = [waits(7, 'S397', 'fix', ['S396']), waits(8, 'S398', 'fix', ['S397']), waits(12, 'S402', 'fix', ['S396', 'S398'])]
-  expect(drawn(queueTree(RUNNING, queued))).toEqual(['S396', '└─S397 after S396', '  └─S398 after S397', '    └─S402 after S396, S398'])
+  expect(drawn(queueTree(RUNNING, queued, []))).toEqual(['S396', '└─S397', '  └─S398', '    └─S402 after S396'])
 })
 
 test('an entry with nothing in the tree to wait on is its own root, with the dispatcher\'s reason', async () => {
   const queued = [waits(9, 'S500', 'epic', ['S404'], 'S404, which is not queued')]
   // No epic run holds the lane, so S500 hangs under nothing; S396 has no waiters and stays out.
-  const rows = queueTree(RUNNING.slice(1), queued)
+  const rows = queueTree(RUNNING.slice(1), queued, [])
   expect(drawn(rows)).toEqual(['S500 S404, which is not queued'])
   expect(rows.map(r => r.kind)).toEqual(['free'])
 })
@@ -638,7 +638,7 @@ test('an entry held off a run that shares its paths is a root tagged held, not a
     waits(10, 'S522', 'epic', [], 'kickoff-sitting-s518-device-lab-webkit in slot 1: both touch CLAUDE.md'),
     waits(11, 'S523', 'epic', [], 'kickoff-sitting-s519-device-lab-simulator (pid 4242): both touch package.json, docs/e2e-testing.md'),
   ]
-  const rows = queueTree([], queued)
+  const rows = queueTree([], queued, [])
   expect(drawn(rows)).toEqual(['S522 held · S518 shares CLAUDE.md', 'S523 held · S519 shares package.json, docs/e2e-testing.md'])
   expect(rows.map(r => r.kind)).toEqual(['held', 'held'])
 })
@@ -751,12 +751,12 @@ test("S625's decision stop is one block that holds S626 and S627, which leave on
   expect(`${KIND_TAG[k.kind]} ${k.headline}`).toBe(
     '? you S625 asks: how long does an empty panel the photographer added last, and what may the sort do to it?',
   )
-  expect(k.why).toBe('step 0 savor · stop 6 · nothing pushed · 12m · $9.56')
+  expect(k.why).toBe('savor found a failed premise · nothing pushed · 12m · $9.56')
   expect(k.strip.map(c => `${c.stage}:${c.state}`)).toEqual(['savor:broke', 'cycles:todo', 'push:todo', 'staging:todo', 'prod:todo'])
   // The refused S626 is a hold, never a root of its own.
   expect(k.holds).toEqual([
-    { sitting: 'S626', slug: 'gallery-arrange-page', why: 'after S625' },
-    { sitting: 'S627', slug: 'gallery-arrange-options', why: 'after S626' },
+    { sitting: 'S626', slug: 'gallery-arrange-page', parent: 'S625', after: ['S625'] },
+    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'] },
   ])
   expect(k.next).toBe('answer in the handoff, then relaunch S625')
   expect(b.onDeck.map(d => d.sitting)).toEqual(['S640'])
@@ -795,9 +795,9 @@ test("the dispatcher's cause holds a queued entry, and a null cause holds none",
     { base: 'kickoff-sitting-s623-gallery-pins', text: 'bash: npm run push:checked\nkind: deploy-red\nfinished: shipped; deploy failed (run 77). ($80.79, 140 min)', mtimeMs: 30 },
   ]
   const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: S625_AFTERS, deployStages: { '77': 'staging' } })
-  expect(b.blocked.map(k => `${k.kind} ${k.sitting} holds ${k.holds.map(h => `${h.sitting}(${h.why})`).join(',')}`)).toEqual([
-    'decision S625 holds S626(after S625),S627(after S626)',
-    'deploy-red S623 holds S641(waits for a green deploy)',
+  expect(b.blocked.map(k => `${k.kind} ${k.sitting} holds ${k.holds.map(h => `${h.sitting}<${h.parent}`).join(',')}`)).toEqual([
+    'decision S625 holds S626<S625,S627<S626',
+    'deploy-red S623 holds S641<S623',
   ])
   const red = b.blocked[1]
   expect(red?.headline).toBe('Deploy red: S623 never went live')
@@ -843,33 +843,15 @@ test("the pane draws S625's block above a folded recent, and a header press keep
     handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': S625_HANDOFF },
     recent: recentOf(endings.map(x => ({ name: `${x.base}.progress`, mtimeMs: x.mtimeMs, text: x.text })), []),
   })
-  const sets: unknown[] = []
-  on('state.get', (_, e) => ({
-    value: {
-      value: (e as { key: string }).key === 'board' ? { shape: 'board-10', value: b } : { shape: 'folds-1', value: {} },
-      version: 1,
-    },
-  }))
-  on('state.set', (_, e) => {
-    sets.push(((e as { value: { value: unknown } }).value ?? {}).value)
-    return { value: { isSet: true, version: 2 } }
-  })
-  on('store.set', (_, e) => {
-    sets.push((e as { value: unknown }).value)
-    return { value: undefined }
-  })
-  const ui = await $.ui.mount({
-    plugin: 'run-board',
-    component: 'Pane',
-    requestId: 'run-board',
-    surface: 'terminal',
-    props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
-  })
+  const { ui, sets } = await mountBoard($, on, b)
   expect((await ui.find({ type: 'Text', text: /^ \? you $/ })) === undefined).toBe(false)
-  expect((await ui.find({ type: 'Text', text: /⏸ S626/ })) === undefined).toBe(false)
+  // The blocked card names the chain once, and the queue card draws it.
+  expect(await has(ui, 'holds 2 ‖ S626 → S627, drawn in the queue ↓')).toBe(true)
+  expect(await has(ui, '└─‖ S626 gallery-arrange-page')).toBe(true)
+  expect(await has(ui, '⏸')).toBe(false)
   // Recent folds itself while BLOCKED shows, and keeps its one line.
   expect((await ui.find({ type: 'Text', text: /2 live · last S624/ })) === undefined).toBe(false)
-  expect((await ui.findAll({ type: 'Button' })).length).toBe(2)
+  expect((await ui.findAll({ type: 'Button' })).length).toBe(3)
   await ui.press({ key: 'fold-recent' })
   expect(sets).toEqual([{ recent: false }, { recent: false }])
   await ui.unmount()
@@ -881,4 +863,182 @@ test('a handoff question reads both the bare and the addressed label', () => {
     handoffQuestion("**Question for Todd:** How should the home page's viewer behave when more than one gallery shows all photos?\n\nRule on it."),
   ).toBe("How should the home page's viewer behave when more than one gallery shows all photos?")
   expect(handoffQuestion('**Stop:** 6. No question here.')).toBe('')
+})
+
+// The shape the pane's board atom is stored under; it moves with the Board type.
+const BOARD_SHAPE = 'board-11'
+
+type Ui = { find: (q: { type: string; text?: RegExp }) => Promise<unknown>; findAll: (q: { type: string }) => Promise<{ text?: string }[]> }
+
+/** Mounts the pane over `b`, with `folds` as the folds set by hand, and records each write. */
+async function mountBoard($: any, on: any, b: unknown, folds: Record<string, boolean> = {}) {
+  const sets: unknown[] = []
+  on('state.get', (_: unknown, e: { key: string }) => ({
+    value: { value: e.key === 'board' ? { shape: BOARD_SHAPE, value: b } : { shape: 'folds-1', value: folds }, version: 1 },
+  }))
+  on('state.set', (_: unknown, e: { value?: { value: unknown } }) => {
+    sets.push((e.value ?? { value: undefined }).value)
+    return { value: { isSet: true, version: 2 } }
+  })
+  on('store.set', (_: unknown, e: { value: unknown }) => {
+    sets.push(e.value)
+    return { value: undefined }
+  })
+  const ui = await $.ui.mount({
+    plugin: 'run-board',
+    component: 'Pane',
+    requestId: 'run-board',
+    surface: 'terminal',
+    props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+  })
+  // A shape the pane declines draws the empty state, and every other assertion would read nothing.
+  expect(await has(ui, 'no autopilot status yet')).toBe(false)
+  return { ui, sets }
+}
+
+/** Whether a drawn Text holds `text`, its nested spans joined. */
+const has = async (ui: Ui, text: string): Promise<boolean> => (await ui.findAll({ type: 'Text' })).some(t => (t.text ?? '').includes(text))
+
+/** The index of the first drawn Text that holds `text`, in document order, or -1. */
+const firstAt = async (ui: Ui, text: string): Promise<number> => (await ui.findAll({ type: 'Text' })).findIndex(t => (t.text ?? '').includes(text))
+
+// S684's stop as the Paper "Now" pane drew it: S684 stopped at step 0's savor
+// and holds the nav chain; S692 runs with two queued under it; S650 waits on
+// nothing; S695 to S697 wait on deck.
+const S684_BRIEFS: Record<string, string[]> = {
+  's684-home-gallery-sections': [],
+  's685-layout-gallery-rows': ['S684'],
+  's686-dashboard-rail': ['S685'],
+  's698-dashboard-frame': ['S686'],
+  's687-admin-in-frame': ['S698'],
+  's688-account-signed-in': ['S698'],
+  's689-nav-addresses': ['S698'],
+  's690-nav-overlays': ['S698'],
+  's691-nav-words': ['S686', 'S688'],
+  's692-design-tokens': [],
+  's693-token-export': ['S692'],
+  's694-system-catalogue': ['S693'],
+  's695-admin-scale': ['S693'],
+  's696-state-layers': ['S694', 'S695'],
+  's697-admin-tables': ['S694', 'S695'],
+  's650-stray-check': [],
+}
+const S684_AFTERS = Object.fromEntries(Object.entries(S684_BRIEFS).map(([k, v]) => [`${BRIEFS}${k}.md`, v]))
+const S684_STATUS = {
+  dispatcher: 1,
+  running: [{ entry: 300, brief: `${BRIEFS}s692-design-tokens.md`, lane: '1', pid: 11, started: '2026-10-31T16:34:00Z', cost: 10.63 }],
+  queued: [
+    { entry: 301, brief: `${BRIEFS}s693-token-export.md`, lane: '', reason: 'S692' },
+    { entry: 302, brief: `${BRIEFS}s694-system-catalogue.md`, lane: '', reason: 'S693' },
+    { entry: 303, brief: `${BRIEFS}s650-stray-check.md`, lane: '', reason: 'a free slot' },
+  ],
+  finished: [{ entry: 299, brief: `${BRIEFS}s684-home-gallery-sections.md`, lane: '', status: 1, outcome: 'autopilot: stopped', kind: null }],
+}
+const S684_PROGRESS = [
+  'skill: sittings:savor launch /w/docs/briefs/kickoff-sitting-s684-home-gallery-sections.md',
+  'skill: commit-skill:commit Stop 6 handoff for S684 (autopilot session 0)',
+  "commit: docs(handoff): hand off S684 at step 0's failed premise",
+  'pushes:',
+  'kind: decision',
+  'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($13.12, 19 min, peak 150k context)',
+].join('\n')
+const S684_HANDOFF = [
+  '# S684 handoff: stop 6',
+  '',
+  '**Stop:** 6. The step 0 savor at launch classified one finding as `premise fails`.',
+  '',
+  "**Question for Todd:** How should the home page's viewer behave when more than one gallery shows all photos?",
+].join('\n')
+const S684_DECK: Deck[] = [
+  ...Object.keys(S684_BRIEFS)
+    .filter(k => /s6(8[4-9]|9[01]|98)-/.test(k))
+    .map(k => deckOf(`S${k.slice(1, 4)}`, 'ready', S684_BRIEFS[k]?.join(', ') ?? '')),
+  deckOf('S695', 'ready', 'S693'),
+  deckOf('S696', 'ready', 'S694, S695'),
+  deckOf('S697', 'ready', 'S694, S695'),
+]
+const s684Board = (extra: Parameters<typeof buildBoard>[4] = {}) =>
+  buildBoard(S684_STATUS, {}, new Set([1, 11]), NOW, {
+    endings: [{ base: 'kickoff-sitting-s684-home-gallery-sections', text: S684_PROGRESS, mtimeMs: 20 }],
+    afters: S684_AFTERS,
+    handoffs: { 'kickoff-sitting-s684-home-gallery-sections': S684_HANDOFF },
+    onDeck: S684_DECK,
+    cycles: { [`${BRIEFS}s692-design-tokens.md`]: 3 },
+    ...extra,
+  })
+
+test("S684's held chain draws once, in the queue, under its block and after the free roots", async () => {
+  const b = s684Board()
+  const rows = queueTree(b.running, b.queued, b.blocked)
+  expect(drawn(rows)).toEqual([
+    'S692',
+    '└─S693',
+    '  └─S694',
+    'S650 a free slot',
+    'S684 blocked ↑ · holds 8',
+    '└─S685',
+    '  └─S686',
+    '    └─S698',
+    '      ├─S687',
+    '      ├─S688',
+    '      │ └─S691 after S686',
+    '      ├─S689',
+    '      └─S690',
+  ])
+  expect(rows.slice(4).every(r => r.kind !== 'after')).toBe(true)
+  // The blocked card's holds are the queue's order, each under the same parent.
+  expect(b.blocked[0]?.holds.map(h => `${h.sitting}<${h.parent}`)).toEqual([
+    'S685<S684', 'S686<S685', 'S698<S686', 'S687<S698', 'S688<S698', 'S691<S688', 'S689<S698', 'S690<S698',
+  ])
+  expect(b.blocked[0]?.why).toBe('savor found a failed premise · nothing pushed · 19m · $13.12')
+})
+
+test('the pane draws the blocked card first, its chain on one line, and no hold list', async ($, on) => {
+  const { ui } = await mountBoard($, on, s684Board())
+  expect(await has(ui, 'holds 8 ‖ S685 → S686 → S698 +5, drawn in the queue ↓')).toBe(true)
+  expect(await has(ui, '⏸')).toBe(false)
+  const you = await firstAt(ui, ' ? you ')
+  expect(you >= 0 && you < (await firstAt(ui, 'S692'))).toBe(true)
+  await ui.unmount()
+})
+
+test('a stop reads in words from the table, a number off it reads stop N, and two numbers join', async () => {
+  const whyWith = (stop: string): string =>
+    buildBoard(S625_STATUS, {}, new Set(), NOW, {
+      endings: S625_ENDINGS,
+      afters: S625_AFTERS,
+      handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': `# x\n\n${stop}\n` },
+    }).blocked[0]?.why ?? ''
+  expect(whyWith('No stop line here.')).toBe('step 0 savor · nothing pushed · 12m · $9.56')
+  expect(whyWith('**Stop:** 9. Not a stop the rules list.')).toBe('step 0 savor · stop 9 · nothing pushed · 12m · $9.56')
+  expect(whyWith('**Stop:** 5 and 6.')).toBe('a come-up-for-air finding and savor found a failed premise · nothing pushed · 12m · $9.56')
+})
+
+test('a ring of After lines inside a block draws each hold once', async () => {
+  const raw = {
+    dispatcher: 1,
+    running: [],
+    queued: [
+      { entry: 1, brief: `${BRIEFS}s626-gallery-arrange-page.md`, lane: '', reason: 'S625', cause: { kind: 'decision', sitting: 'S625' } },
+      { entry: 2, brief: `${BRIEFS}s627-gallery-arrange-options.md`, lane: '', reason: 'S625', cause: { kind: 'decision', sitting: 'S625' } },
+    ],
+    finished: [],
+  }
+  const afters = { ...S625_AFTERS, [`${BRIEFS}s626-gallery-arrange-page.md`]: ['S627'], [`${BRIEFS}s627-gallery-arrange-options.md`]: ['S626'] }
+  const b = buildBoard(raw, {}, new Set(), NOW, { endings: S625_ENDINGS, afters })
+  expect(b.blocked[0]?.holds.map(h => h.sitting).sort()).toEqual(['S626', 'S627'])
+  const rows = queueTree(b.running, b.queued, b.blocked).map(r => r.sitting)
+  expect(rows.filter(s => s === 'S626').length).toBe(1)
+  expect(rows.filter(s => s === 'S627').length).toBe(1)
+})
+
+test('a red deploy that holds nothing draws no queue root and no chain line', async ($, on) => {
+  const endings = [{ base: 'kickoff-sitting-s658-dispatch-holds-on-held-gate', text: 'finished: shipped; deploy failed (run 77). ($8.00, 14 min)', mtimeMs: 30 }]
+  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { endings, deployStages: { '77': 'staging' } })
+  expect(b.blocked.map(k => k.sitting)).toEqual(['S658'])
+  expect(queueTree(b.running, b.queued, b.blocked)).toEqual([])
+  const { ui } = await mountBoard($, on, b)
+  expect(await has(ui, 'blocked ↑')).toBe(false)
+  expect(await has(ui, 'drawn in the queue')).toBe(false)
+  await ui.unmount()
 })

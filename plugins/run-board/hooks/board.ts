@@ -627,12 +627,16 @@ export type TreeRow = {
    * `free`: a root that waits on neither.
    * `held`: a root that waits for a run to leave paths both briefs touch. The
    * hold orders nothing, so it draws as a tag, not an edge.
+   * `block`: a stuck sitting that holds a chain. `hold`: a brief in that chain.
    */
-  kind: 'run' | 'after' | 'free' | 'held'
+  kind: 'run' | 'after' | 'free' | 'held' | 'block' | 'hold'
   sitting: string
   slug: string
   lane: string
-  /** `after S396, S401`, the dispatcher's reason at a free root, the held tag at a held root, or empty at a running root. */
+  /**
+   * At an `after` or `hold` row, `after S396`: the waits the tree does not draw. At a free root, the
+   * dispatcher's reason; at a held root, the held tag; at a block, `blocked ↑ · holds N`; at a running root, empty.
+   */
   note: string
 }
 
@@ -640,18 +644,34 @@ export type TreeRow = {
  * The queue as a tree of who waits on whom. Each running run is a root, drawn
  * only when something waits on it. An entry hangs under the running or queued
  * sitting on its `After:` line that sits deepest in the tree, which is the one
- * to ship last, and its note names every such sitting; a sitting that is
- * neither running nor queued has shipped and draws no edge. An entry that
- * needs nothing in the tree is a root of its own under the dispatcher's reason;
- * a running run it does not name is not its parent, since slots order nothing. Siblings
- * go in queue order.
+ * to ship last; a sitting that is neither running, queued nor held has shipped
+ * and draws no edge. An entry that needs nothing in the tree is a root of its
+ * own under the dispatcher's reason; a running run it does not name is not its
+ * parent, since slots order nothing. Siblings go in queue order.
+ *
+ * Each block that holds something follows, its root first and its chain under
+ * it in the order `Block.holds` gives, so a held entry is never a root of its
+ * own as well. Roots go running first, then free and path-held, then the
+ * blocks, so what can launch next leads the card.
+ *
+ * A row's note names only its waits that the tree does not draw: each
+ * running, queued or held sitting on its `After:` line other than its parent.
  */
-export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane'>[], queued: readonly Waiting[]): TreeRow[] {
+export function queueTree(
+  running: readonly Pick<Run, 'sitting' | 'slug' | 'lane'>[],
+  queued: readonly Waiting[],
+  blocks: readonly Pick<Block, 'sitting' | 'slug' | 'holds'>[],
+): TreeRow[] {
   const runs = new Set(running.map(r => r.sitting))
-  const byEntry = [...queued].sort((a, b) => a.entry - b.entry)
+  const held = new Set(blocks.flatMap(k => k.holds.map(h => h.sitting)))
+  const byEntry = [...queued].sort((a, b) => a.entry - b.entry).filter(q => !held.has(q.sitting))
   const waiting = new Map(byEntry.map(q => [q.sitting, q]))
   // A board stored by an older version of the mod has no `after`.
   const needs = (q: Waiting): string[] => (q.after ?? []).filter(s => s !== q.sitting && (runs.has(s) || waiting.has(s)))
+  const others = (after: readonly string[], self: string, parent: string | null): string => {
+    const w = after.filter(s => s !== self && s !== parent && (runs.has(s) || waiting.has(s) || held.has(s)))
+    return w.length === 0 ? '' : `after ${w.join(', ')}`
+  }
 
   const parent = new Map<string, string | null>()
   const depth = new Map<string, number>()
@@ -684,7 +704,6 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
   const walk = (q: Waiting, rails: string, isLast: boolean) => {
     if (drawn.has(q.sitting)) return
     drawn.add(q.sitting)
-    const after = needs(q)
     rows.push({
       rails,
       joint: `${isLast ? '└' : '├'}─`,
@@ -692,7 +711,7 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
       sitting: q.sitting,
       slug: q.slug,
       lane: q.lane,
-      note: `after ${after.join(', ')}`,
+      note: others(q.after ?? [], q.sitting, parent.get(q.sitting) ?? null),
     })
     branch(q.sitting, rails + (isLast ? '  ' : '│ '))
   }
@@ -707,9 +726,22 @@ export function queueTree(running: readonly Pick<Run, 'sitting' | 'slug' | 'lane
   for (const q of byEntry) {
     if (drawn.has(q.sitting)) continue
     drawn.add(q.sitting)
-    const held = heldNote(q.reason)
-    rows.push({ rails: '', joint: '', kind: held === null ? 'free' : 'held', sitting: q.sitting, slug: q.slug, lane: q.lane, note: held ?? q.reason })
+    const tag = heldNote(q.reason)
+    rows.push({ rails: '', joint: '', kind: tag === null ? 'free' : 'held', sitting: q.sitting, slug: q.slug, lane: q.lane, note: tag ?? q.reason })
     branch(q.sitting, '')
+  }
+  for (const k of blocks) {
+    if (k.holds.length === 0) continue
+    rows.push({ rails: '', joint: '', kind: 'block', sitting: k.sitting, slug: k.slug, lane: '', note: `blocked ↑ · holds ${k.holds.length}` })
+    const holdBranch = (p: string, rails: string) => {
+      const ks = k.holds.filter(h => h.parent === p)
+      ks.forEach((h, i) => {
+        const isLast = i === ks.length - 1
+        rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', note: others(h.after, h.sitting, h.parent) })
+        holdBranch(h.sitting, rails + (isLast ? '  ' : '│ '))
+      })
+    }
+    holdBranch(k.sitting, '')
   }
   return rows
 }
@@ -978,8 +1010,11 @@ export const handoffQuestion = (handoff: string): string => {
   return text.trim()
 }
 
-/** The stop a handoff names on its last `**Stop:**` line, or empty. */
-export const handoffStop = (handoff: string): string => [...handoff.matchAll(/\*\*Stop:\*\* (\d+)/g)].pop()?.[1] ?? ''
+/** Every stop number a handoff's last `**Stop:**` line names before its first period: `**Stop:** 5 and 6.` gives 5 and 6. */
+export const handoffStops = (handoff: string): string[] => {
+  const line = [...handoff.matchAll(/\*\*Stop:\*\* ([^.\n]*)/g)].pop()?.[1] ?? ''
+  return [...line.matchAll(/\d+/g)].map(m => m[0])
+}
 
 /**
  * The BLOCKED card: one block per root cause, most held first, and every
@@ -991,8 +1026,8 @@ export const handoffStop = (handoff: string): string => [...handoff.matchAll(/\*
  * dispatcher names; a record without the `cause` key, from a dispatcher older
  * than the field, is held when an `After:` sitting is stuck or held. A brief
  * on main that nothing runs or queues is held the same way. A stuck sitting
- * that is held is a hold under its cause, never a root of its own. Each hold
- * names the nearest sitting it waits on, and the holds go in chain order.
+ * that is held is a hold under its cause, never a root of its own. The holds
+ * are `heldChain`'s tree, which the queue card draws.
  */
 export function blockedOf(input: {
   raw: RawStatus
@@ -1078,30 +1113,93 @@ export function blockedOf(input: {
 
   const blocks: Block[] = []
   for (const [root, members] of roots) {
-    const group = new Set([root, ...members])
-    const parentOf = (s: string): string => afterOf(s).find(a => a !== s && group.has(a)) ?? ''
-    const depthOf = (s: string, seen: Set<string>): number => {
-      const p = parentOf(s)
-      if (p === '' || p === root || seen.has(p)) return 1
-      seen.add(s)
-      return depthOf(p, seen) + 1
-    }
     const info = stuck.get(root)
     const kind: BlockKind = info?.kind ?? 'deploy-red'
-    const holds: Held[] = members
-      .map(s => {
-        const p = parentOf(s)
-        const why = p !== '' ? `after ${p}` : kind === 'deploy-red' ? 'waits for a green deploy' : `after ${root}`
-        return { sitting: s, slug: slugOf.get(s) ?? stuck.get(s)?.slug ?? '', why, depth: depthOf(s, new Set()) }
-      })
-      .sort((a, b) => a.depth - b.depth || sittingNumber(a.sitting) - sittingNumber(b.sitting))
-      .map(h => ({ sitting: h.sitting, slug: h.slug, why: h.why }))
+    const holds: Held[] = heldChain(root, members, afterOf).map(h => ({
+      ...h,
+      slug: slugOf.get(h.sitting) ?? stuck.get(h.sitting)?.slug ?? '',
+      after: afterOf(h.sitting),
+    }))
     blocks.push(blockFace(root, info, kind, holds, handoffs, deployStages))
   }
   blocks.sort((a, b) => b.holds.length - a.holds.length || b.endedMs - a.endedMs)
   const drawn = new Set<string>()
   for (const b of blocks) for (const s of [b.sitting, ...b.holds.map(h => h.sitting)]) drawn.add(s)
   return { blocks, drawn }
+}
+
+/**
+ * The chain a block holds as a tree under its root, in preorder, siblings by
+ * sitting. A hold hangs under the sitting on its `After:` line that sits
+ * deepest in the block, the root at depth 0, which is the one to ship last;
+ * a hold that names none of the block hangs under the root. A hold its own
+ * ring reaches again is not a candidate, so every hold lands once.
+ */
+export function heldChain(root: string, members: readonly string[], afterOf: (s: string) => readonly string[]): { sitting: string; parent: string }[] {
+  const group = new Set(members)
+  const parent = new Map<string, string>()
+  const depth = new Map<string, number>([[root, 0]])
+  const depthOf = (s: string, seen: Set<string>): number | null => {
+    const known = depth.get(s)
+    if (known !== undefined) return known
+    if (seen.has(s)) return null
+    seen.add(s)
+    let best = root
+    let d = 0
+    for (const a of afterOf(s)) {
+      if (a === s || !(a === root || group.has(a))) continue
+      const ad = depthOf(a, seen)
+      if (ad !== null && ad > d) [best, d] = [a, ad]
+    }
+    seen.delete(s)
+    parent.set(s, best)
+    depth.set(s, d + 1)
+    return d + 1
+  }
+  for (const s of members) depthOf(s, new Set())
+  const out: { sitting: string; parent: string }[] = []
+  const walk = (p: string) => {
+    for (const s of members.filter(m => parent.get(m) === p).sort((a, b) => sittingNumber(a) - sittingNumber(b))) {
+      out.push({ sitting: s, parent: p })
+      walk(s)
+    }
+  }
+  walk(root)
+  return out
+}
+
+// What each stop of `docs/briefs/rules/autopilot.md` § "Stop only for these"
+// means, by its number there. If that list changes, change this table.
+const STOP_WORDS: Record<string, string> = {
+  '1': 'the pre-push hook stayed red',
+  '2': 'a facts set grew',
+  '3': 'a rebase conflict in a held path',
+  '4': 'a test that cannot fail',
+  '5': 'a come-up-for-air finding',
+  '6': 'savor found a failed premise',
+  '7': 'the brief is over its size ceiling',
+}
+
+/**
+ * The stop in words for a block's why-line: each number on the handoff's
+ * stop line that the table knows, as its phrase, joined by `and`. With no
+ * known number the broke stage leads; a number off the table reads `stop N`.
+ */
+function stopWords(stops: readonly string[], broke: string): string[] {
+  const known = stops.filter(n => Object.hasOwn(STOP_WORDS, n))
+  const unknown = stops.filter(n => !Object.hasOwn(STOP_WORDS, n))
+  return [known.length > 0 ? known.map(n => STOP_WORDS[n]).join(' and ') : broke, unknown.length > 0 ? `stop ${unknown.join(' and ')}` : '']
+}
+
+/** The chain line a block draws in place of its holds: the count, the first three in order, and how many more. */
+export function chainLine(k: Pick<Block, 'holds'>): { count: string; chain: string; more: string } | null {
+  if (k.holds.length === 0) return null
+  const more = k.holds.length - 3
+  return {
+    count: `holds ${k.holds.length} `,
+    chain: `‖ ${k.holds.slice(0, 3).map(h => h.sitting).join(' → ')}`,
+    more: `${more > 0 ? ` +${more}` : ''}, drawn in the queue ↓`,
+  }
 }
 
 /** A block's words by kind: its headline, the line of why, the strip and the next line. */
@@ -1134,8 +1232,7 @@ function blockFace(
       next: `re-run it if it is a flake, else fix main; the next green deploy clears it${releases}`,
     }
   }
-  const stop = handoffStop(handoff)
-  const why = [broke === 'savor' ? 'step 0 savor' : (broke ?? ''), stop === '' ? '' : `stop ${stop}`, pushed ? 'pushed' : 'nothing pushed', ...spent]
+  const why = [...stopWords(handoffStops(handoff), broke === 'savor' ? 'step 0 savor' : (broke ?? '')), pushed ? 'pushed' : 'nothing pushed', ...spent]
     .filter(p => p !== '')
     .join(' · ')
   if (kind === 'decision') {
@@ -1420,7 +1517,10 @@ export function foldSummary(card: FoldCard, b: Board): string {
       .filter(p => p !== '')
       .join(' · ')
   }
-  if (card === 'queued') return plural(b.queued.length, 'waiting', 'waiting')
+  if (card === 'queued') {
+    const held = b.blocked.reduce((n, k) => n + k.holds.length, 0)
+    return [plural(b.queued.length, 'waiting', 'waiting'), held > 0 ? `holds ${held}` : ''].filter(p => p !== '').join(' · ')
+  }
   if (card === 'deck')
     return DECK_GROUPS.map(g => [g.label, b.onDeck.filter(d => d.mode === g.mode).length] as const)
       .filter(([, n]) => n > 0)

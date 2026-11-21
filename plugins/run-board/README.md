@@ -31,10 +31,15 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **`/board`** opens a pane with a rounded card per slot that holds a run: its progress bar, phase line,
   time, cost and last sentence. A free slot has no card. Below them comes the queue as a tree of who waits on whom: each
   running run that something waits on is a root, and each entry hangs under the running or queued sitting
-  on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`), with every such
-  sitting named on the right (`after S396, S401`). An entry that needs nothing running or queued is a root of
+  on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`). Its note names only
+  the waits the tree does not draw: each running, queued or held sitting on its `After:` line other than its
+  parent (`after S396`), so a row with no other wait has no note. An entry that needs nothing running or queued is a root of
   its own under the dispatcher's reason (`a free slot`); one held only because a run touches the same
-  paths reads `held · S518 shares CLAUDE.md` in yellow, with no joint, since a hold orders nothing. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
+  paths reads `held · S518 shares CLAUDE.md` in yellow, with no joint, since a hold orders nothing. After the free
+  roots comes each block that holds a chain, in BLOCKED's order: the stuck sitting in yellow, `‖ S684
+  home-gallery-sections  blocked ↑ · holds 8`, and under it every brief it holds on a yellow `‖`, queued or not,
+  each under the sitting on its `After:` line that sits deepest in the block. A held entry draws only there. The
+  card draws when something is queued or a block holds something. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
   Then RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
   the sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
   the cost, and how long ago it ended (`14m`, `5h`, `3d`). A stop and a `shipped; deploy failed` run are left
@@ -48,13 +53,18 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   gives the lane and epic, `after` and each named sitting still on deck, queued or running, and for `needs you`
   the text after the marker, which says why: `└╌◇ S436 retire-held-path  fix · after S434 · Removes a wrangler.toml line.`
   `/board` again closes it.
-- **BLOCKED.** A red-bordered card above the queue, drawn only when something is stuck: one block per root cause,
+- **BLOCKED.** A red-bordered card above the running cards, drawn only when something is stuck: one block per root cause,
   the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or
   queues it, and its brief is still on `origin/main`, or it is a red deploy (`shipped; deploy failed`) with no live
   run after it, whose run's latest attempt did not pass. Each block shows a kind tag by who acts (`? you` a decision, `÷ plan` a split, `✗ code` a red
   deploy, `! run` anything else), a headline (a decision quotes the handoff's `**Question:**` or `**Question for Todd:**` line, read from
   `handoff/<name>.md` in the run's worktree), one line of why, a pipeline strip (savor, cycles, push, staging,
-  prod) marking where it broke, the chain it holds in order with why each waits, and one `next` line. The kind is
+  prod) marking where it broke, one line naming the chain it holds (`holds 8 ‖ S685 → S686 → S698 +5, drawn in
+  the queue ↓`: the first three in the queue's order), and one `next` line. The why-line states the handoff's
+  `**Stop:**` number in words from the stop table in `hooks/board.ts`, which copies `docs/briefs/rules/autopilot.md`
+  § "Stop only for these" (`savor found a failed premise · nothing pushed · 19m · $13.12`); two numbers join with
+  `and`, a number off the table reads `stop N` after the stage where it broke, and a handoff with no stop line keeps
+  that stage. The kind is
   status.json's `finished[].kind`, else the `kind:` line above the progress file's last `finished:` line. A queued
   entry is held by status.json's `queued[].cause`; a dispatcher that writes no `cause` key is read through the
   `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never
@@ -65,7 +75,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   otherwise recent and on deck fold themselves while BLOCKED shows.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
   on base, each section in a card on mantle (the lanes, the queue, on deck, recent), green done, peach in flight, surface grey to come, lavender headings,
-  blue queued, mauve on deck, and on deck's groups in green, yellow and red. The colours are fixed hex values and do not follow the terminal theme; the
+  blue queued, mauve on deck, yellow for a block's chain in the queue, and on deck's groups in green, yellow and red. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint
   line is plain text and takes none.
 - **Toast.** A run that finishes while the session is open raises a toast with its outcome.

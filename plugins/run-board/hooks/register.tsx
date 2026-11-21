@@ -17,6 +17,7 @@ import {
   costMeter,
   baseName,
   buildBoard,
+  chainLine,
   briefFiles,
   buildLoop,
   afterSittings,
@@ -111,7 +112,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-10' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-11' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -598,6 +599,57 @@ export const register: Register = on => {
           {spendTiles.length > 0 && tileRow(spendTiles)}
         </Box>
 
+        {hasBlocked && (
+          <Box {...CARD} borderColor={F.red}>
+            {cardHead('blocked', 'blocked', F.red)}
+            {!folded('blocked') &&
+              b.blocked.map((k, i) => {
+                const chain = chainLine(k)
+                return (
+                <Box flexDirection="column" marginTop={1}>
+                  {i > 0 && <Text color={F.surface1}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>}
+                  <Text wrap="wrap">
+                    <Text backgroundColor={KIND_COLOR[k.kind]} color={F.mantle} bold>
+                      {` ${KIND_TAG[k.kind]} `}
+                    </Text>
+                    <Text bold color={F.text}>{`  ${k.headline}`}</Text>
+                  </Text>
+                  {k.why !== '' && (
+                    <Text color={F.subtext0} wrap="wrap">
+                      {k.why}
+                    </Text>
+                  )}
+                  {k.strip.length > 0 && (
+                    <Text wrap="truncate-end">
+                      <Text color={F.overlay2}>{`${k.sitting} ${k.slug}  `}</Text>
+                      {k.strip.map(c => (
+                        <Text>
+                          {stripCell(c)}
+                          {' '}
+                        </Text>
+                      ))}
+                    </Text>
+                  )}
+                  {chain !== null && (
+                    // The chain once, by its first holds; the queue card draws the tree.
+                    <Text wrap="truncate-end" color={F.overlay2}>
+                      {chain.count}
+                      <Text color={F.yellow}>{chain.chain}</Text>
+                      {chain.more}
+                    </Text>
+                  )}
+                  <Text wrap="wrap">
+                    <Text bold color={F.red}>
+                      next{'  '}
+                    </Text>
+                    <Text color={F.text}>{k.next}</Text>
+                  </Text>
+                </Box>
+                )
+              })}
+          </Box>
+        )}
+
         {lanesOf(b).map(({ lane, runs }) => (
           <Box {...CARD}>
             {lane === LOOP_LANE && b.loop !== null && (
@@ -658,71 +710,20 @@ export const register: Register = on => {
           </Box>
         ))}
 
-        {hasBlocked && (
-          <Box {...CARD} borderColor={F.red}>
-            {cardHead('blocked', 'blocked', F.red)}
-            {!folded('blocked') &&
-              b.blocked.map((k, i) => (
-                <Box flexDirection="column" marginTop={1}>
-                  {i > 0 && <Text color={F.surface1}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>}
-                  <Text wrap="wrap">
-                    <Text backgroundColor={KIND_COLOR[k.kind]} color={F.mantle} bold>
-                      {` ${KIND_TAG[k.kind]} `}
-                    </Text>
-                    <Text bold color={F.text}>{`  ${k.headline}`}</Text>
-                  </Text>
-                  {k.why !== '' && (
-                    <Text color={F.subtext0} wrap="wrap">
-                      {k.why}
-                    </Text>
-                  )}
-                  {k.strip.length > 0 && (
-                    <Text wrap="truncate-end">
-                      <Text color={F.overlay2}>{`${k.sitting} ${k.slug}  `}</Text>
-                      {k.strip.map(c => (
-                        <Text>
-                          {stripCell(c)}
-                          {' '}
-                        </Text>
-                      ))}
-                    </Text>
-                  )}
-                  {k.holds.length > 0 && <Text color={F.overlay2}>{`holds ${k.holds.length}, in order`}</Text>}
-                  {k.holds.map(w => (
-                    <Box justifyContent="space-between" columnGap={2}>
-                      <Text wrap="truncate-end">
-                        <Text color={F.yellow}>{'  ⏸ '}</Text>
-                        <Text bold color={F.text}>{w.sitting}</Text>
-                        <Text color={F.subtext0}> {w.slug}</Text>
-                      </Text>
-                      <Text wrap="truncate-end" color={w.why.startsWith('after ') ? F.overlay0 : F.yellow}>
-                        {w.why}
-                      </Text>
-                    </Box>
-                  ))}
-                  <Text wrap="wrap">
-                    <Text bold color={F.red}>
-                      next{'  '}
-                    </Text>
-                    <Text color={F.text}>{k.next}</Text>
-                  </Text>
-                </Box>
-              ))}
-          </Box>
-        )}
-
-        {b.queued.length > 0 && (
+        {(b.queued.length > 0 || b.blocked.some(k => k.holds.length > 0)) && (
           <Box {...CARD}>
             {cardHead('queued', 'queued', F.lavender)}
-            {!folded('queued') && queueTree(b.running, b.queued).map(r => (
-              // A joint means the entry needs its parent shipped.
-              <Box justifyContent="space-between" columnGap={2}>
+            {!folded('queued') && queueTree(b.running, b.queued, b.blocked).map((r, i) => (
+              // A joint means the entry needs its parent shipped; a yellow `‖` that a block holds it.
+              <Box justifyContent="space-between" columnGap={2} marginTop={r.kind === 'block' && i > 0 ? 1 : 0}>
                 <Text wrap="truncate-end">
-                  <Text color={F.overlay0}>{r.rails}</Text>
-                  <Text color={r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
-                  <Text color={r.kind === 'run' ? F.peach : F.blue}>{r.kind === 'run' ? '●' : '○'} </Text>
-                  <Text bold color={F.text}>{r.sitting}</Text>
-                  <Text color={F.subtext0}> {r.slug}</Text>
+                  <Text color={r.kind === 'hold' ? F.yellow : F.overlay0}>{r.rails}</Text>
+                  <Text color={r.kind === 'hold' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
+                  <Text color={r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
+                    {r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
+                  </Text>
+                  <Text bold color={r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
+                  {r.slug !== '' && <Text color={r.kind === 'block' ? F.yellow : F.subtext0}> {r.slug}</Text>}
                 </Text>
                 {r.kind === 'run' ? (
                   <Text>
@@ -730,7 +731,7 @@ export const register: Register = on => {
                     <Text color={F.overlay2}> · running</Text>
                   </Text>
                 ) : (
-                  <Text wrap="truncate-end" color={r.kind === 'held' ? F.yellow : F.overlay2}>
+                  <Text wrap="truncate-end" color={r.kind === 'held' || r.kind === 'block' ? F.yellow : F.overlay2}>
                     {r.note}
                   </Text>
                 )}

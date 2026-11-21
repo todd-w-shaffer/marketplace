@@ -68,8 +68,11 @@ export type Stage = 'savor' | 'cycles' | 'push' | 'staging' | 'prod'
 /** A stage on a block's pipeline strip: done, where the run broke, still to come, or skipped (no step 0). */
 export type StripCell = { stage: Stage; state: 'done' | 'broke' | 'todo' | 'skip' }
 
-/** A brief a root cause holds, and why it waits: `after S625`, `waits for a green deploy`. */
-export type Held = { sitting: string; slug: string; why: string }
+/**
+ * A brief a root cause holds. `parent` is the sitting it hangs under: the root, or another hold.
+ * `after` is every sitting on its `After:` line.
+ */
+export type Held = { sitting: string; slug: string; parent: string; after: string[] }
 
 /** One root cause on the BLOCKED card. */
 export type Block = {
@@ -81,7 +84,7 @@ export type Block = {
   why: string
   /** Empty when no progress file names the root. */
   strip: StripCell[]
-  /** The chain it holds, in order. */
+  /** The chain it holds as a tree in preorder, siblings by sitting. */
   holds: Held[]
   next: string
   endedMs: number
