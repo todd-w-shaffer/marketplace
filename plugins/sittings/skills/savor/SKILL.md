@@ -88,7 +88,7 @@ for goes to a reviewer as a raw hit.
 
 ## Phase 2: Structural Review
 
-Launch the structural agents **in parallel**: systems and integration always, and testing strategy whenever the spec proposes tests (see Agent 3's trigger). Each gets the spec path and a brief of what files to read. No agent sees another's findings — independent perspectives are the point.
+Pick the contextual personas and check the historical reviewer's trigger first (§ Phase 2b), then launch every reviewer **in one message**: systems and integration always, testing strategy whenever the spec proposes tests (see Agent 3's trigger), and the Phase 2b picks. Each gets the spec path and a brief of what files to read. No agent sees another's findings — independent perspectives are the point.
 
 Every reviewer brief in this skill ends with the **reviewer footer**: "Report as a numbered list. Do not suggest scope changes. Keep it under 400 words."
 
@@ -142,12 +142,12 @@ Instruct the agent: "For each finding: which proposed test, what it cannot prove
 
 ## Phase 2b: Contextual Personas
 
-After launching the structural reviewers, read the spec one more time and ask:
+Before Phase 2 launches anything, read the spec one more time and ask:
 **what risk surfaces does this spec expose that the structural reviewers
 are blind to?**
 
-Pick 1–2 contextual personas whose expertise covers those surfaces. Launch them
-in parallel (they can overlap with the Phase 2 agents if timing allows).
+Pick 1–2 contextual personas whose expertise covers those surfaces. They launch
+in the same message as the Phase 2 agents.
 
 **Announce your picks before launching.** Example:
 
@@ -584,7 +584,7 @@ left it. The caller supplies both; the skill reads neither from the spec.
    `spec-delta.diff` and `code-delta.diff`.
 4. **Both deltas empty: no reviewer runs.** Write the findings file with the header and no rows, set the status
    line as launch mode does, and print the summary. No Phase 3 agent runs.
-5. **Otherwise, launch the reviewers the deltas call for.** Systems and integration always run. Testing strategy
+5. **Otherwise, launch the reviewers the deltas call for, in one message.** Systems and integration always run. Testing strategy
    runs when either delta touches the spec's test plan or a test file. The historical reviewer runs only when the
    code delta is not empty. Pick personas from § Phase 2b's guide by what the deltas touch, not by the whole spec.
    Each prompt carries both delta paths and this line: `Judge what these deltas change, and what they break in the
