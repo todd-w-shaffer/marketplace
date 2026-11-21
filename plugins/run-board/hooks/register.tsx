@@ -55,8 +55,12 @@ import {
   recentTotals,
   statusLine,
   tileFace,
+  axisCells,
+  heldCells,
+  laneCells,
+  nowCell,
 } from './board'
-import type { Ending, LoopFile, RawStatus, Spend } from './board'
+import type { CellTone, Ending, LoopFile, RawStatus, Spend, TimelineCell } from './board'
 
 // Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
 // paints comes from here, the pane's own ground included, so the pane reads
@@ -99,6 +103,24 @@ const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 // Each on-deck group's colour: green can queue now, yellow needs a pass to
 // reach autopilot, red needs a person in the session.
 const DECK_COLOR: Record<DeckMode, string> = { ready: F.green, enrich: F.yellow, interactive: F.red }
+// Each timeline cell's colour: green for a run live or in flight, peach for
+// its projection and the now-line, red for a stop, blue queued, mauve on
+// deck, yellow held, and the idle track faint.
+const TONE_COLOR: Record<CellTone, string> = {
+  live: F.green,
+  running: F.green,
+  ahead: F.peach,
+  stopped: F.red,
+  queued: F.blue,
+  deck: F.mauve,
+  idle: F.surface1,
+  now: F.peach,
+  held: F.yellow,
+  blank: F.surface1,
+}
+// The timeline's lane labels take this many cells, `slot 1 `; the card's
+// border and padding take 4 more, and the track the rest.
+const TIMELINE_LABEL_CELLS = 7
 // The least widths of a recent row's time, cost and age columns, the cost and
 // age with a leading gap: `14h52m`, ` $1,238`, ` 12h`. A wider figure widens its column.
 const RECENT_TIME_CELLS = 6
@@ -635,6 +657,45 @@ export const register: Register = on => {
       )
     }
 
+    // The timeline's track, and one lane drawn as runs of cells that share a
+    // tone: a name on its bar is mantle on the bar's colour, every other cell
+    // its tone's colour.
+    const track = Math.max(1, e.props.bodyColumns - 4 - TIMELINE_LABEL_CELLS)
+    const laneRow = (name: string, cells: readonly TimelineCell[]) => {
+      const runs: { text: string; tone: CellTone; isLabel: boolean }[] = []
+      for (const c of cells) {
+        const last = runs[runs.length - 1]
+        if (last !== undefined && last.tone === c.tone && last.isLabel === c.isLabel) last.text += c.ch
+        else runs.push({ text: c.ch, tone: c.tone, isLabel: c.isLabel })
+      }
+      return (
+        <Text wrap="truncate-end">
+          <Text color={F.overlay2}>{name.padEnd(TIMELINE_LABEL_CELLS).slice(0, TIMELINE_LABEL_CELLS)}</Text>
+          {runs.map(r =>
+            r.isLabel ? (
+              <Text color={F.mantle} backgroundColor={TONE_COLOR[r.tone]}>
+                {r.text}
+              </Text>
+            ) : (
+              <Text color={TONE_COLOR[r.tone]}>{r.text}</Text>
+            ),
+          )}
+        </Text>
+      )
+    }
+    const timelineRows = () => {
+      const t = b.timeline
+      const now = nowCell(t, track)
+      const you = t.you === null ? [] : [{ sitting: t.you.label, tone: 'stopped' as const, startMs: t.you.sinceMs, endMs: t.nowMs, liveEndMs: t.nowMs, isOverMedian: false }]
+      return [
+        <Text color={F.overlay0}>{`${' '.repeat(TIMELINE_LABEL_CELLS)}${axisCells(t, track)}`}</Text>,
+        ...t.slots.map(l => laneRow(`slot ${l.slot}`, laneCells(t, l.bars, track, true))),
+        laneRow('you', laneCells(t, you, track, false)),
+        laneRow('held', heldCells(t, track)),
+        <Text color={F.peach}>{`${' '.repeat(TIMELINE_LABEL_CELLS + Math.max(0, Math.min(now - 1, track - 3)))}now`}</Text>,
+      ]
+    }
+
     // A block's pipeline strip: green done, red where it broke, grey to come.
     const stripCell = (c: StripCell) => (
       <Text
@@ -880,6 +941,11 @@ export const register: Register = on => {
             )}
           </Box>
         )}
+
+        <Box {...CARD}>
+          {cardHead('timeline', 'timeline', F.lavender)}
+          {!folded('timeline') && <Box flexDirection="column">{timelineRows()}</Box>}
+        </Box>
 
         {b.recent.length > 0 && (
           <Box {...CARD}>

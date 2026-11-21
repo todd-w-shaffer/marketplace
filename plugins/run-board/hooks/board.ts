@@ -1,12 +1,33 @@
-import type { Block, BlockKind, Board, Deck, DeckMode, Done, Ended, FoldCard, Folds, Held, Loop, Phase, PhaseSplit, PhaseState, PlanCost, Run, Stage, StripCell, Waiting } from '../types'
+import type { BarTone, Block, BlockKind, Board, Deck, DeckMode, Done, Ended, FoldCard, Folds, Held, Loop, Phase, PhaseSplit, PhaseState, PlanCost, Run, Stage, StripCell, Timeline, TimelineBar, Waiting } from '../types'
 
 // The shape `scripts/dispatch.sh` writes to status.json. Every field is
 // checked on read, since the file is another program's output.
 export type RawStatus = {
   dispatcher: number | null
-  running: { entry: number; brief: string; lane: string; pid: number | null; started: string; cost: number }[]
+  running: ({ entry: number; brief: string; lane: string; pid: number | null; started: string; cost: number } & SlotFields)[]
   queued: { entry: number; brief: string; lane: string; reason: string; cause?: Cause | null }[]
-  finished: { entry: number; brief: string; lane: string; status: number; outcome: string; kind: string | null }[]
+  finished: ({ entry: number; brief: string; lane: string; status: number; outcome: string; kind: string | null } & SlotFields)[]
+}
+
+/**
+ * The slot a running or finished record held: its number, and when the run
+ * took and released it in milliseconds. Each is absent from a record an older
+ * dispatcher wrote, and null when the record says none.
+ */
+export type SlotFields = { slot?: number | null; slotTakenMs?: number | null; slotReleasedMs?: number | null }
+
+/** A record's slot fields, each checked: a slot is a whole number from 1, a time parses. */
+function parseSlot(r: Record<string, unknown>): SlotFields {
+  const at = (v: unknown): number | null => {
+    const ms = typeof v === 'string' ? Date.parse(v) : NaN
+    return Number.isFinite(ms) ? ms : null
+  }
+  const slot = num(r.slot)
+  return {
+    slot: slot !== null && Number.isInteger(slot) && slot >= 1 ? slot : null,
+    slotTakenMs: at(r.slot_taken),
+    slotReleasedMs: at(r.slot_released),
+  }
 }
 
 /**
@@ -55,6 +76,7 @@ export function parseStatus(text: string): RawStatus | null {
       pid: num(r.pid),
       started: str(r.started),
       cost: num(r.session_cost) ?? 0,
+      ...parseSlot(r),
     })),
     queued: list(d.queued).map(q => ({
       entry: num(q.entry) ?? 0,
@@ -70,6 +92,7 @@ export function parseStatus(text: string): RawStatus | null {
       status: num(f.status) ?? 1,
       outcome: str(f.outcome),
       kind: typeof f.kind === 'string' && f.kind !== '' ? f.kind : null,
+      ...parseSlot(f),
     })),
   }
 }
@@ -613,8 +636,406 @@ export function buildBoard(
     onDeck,
     blocked: blocks,
     splits: { ...extra.splits },
+    timeline: timelineOf({
+      raw,
+      progress,
+      endings: extra.endings ?? [],
+      blocks,
+      onDeck,
+      afters,
+      median: medianMinutes(recent),
+      now,
+      utcOffset,
+    }),
   }
 }
+
+const HOUR_MS = 3600000
+const MINUTE_MS = 60000
+
+// The timeline's window: this far before now, and this far after.
+export const TIMELINE_BACK_MS = 8 * HOUR_MS
+export const TIMELINE_AHEAD_MS = 6 * HOUR_MS
+
+// How far a record's `slot_taken` may sit from the stamp above its run's
+// `slot:` line and still be the same launch: the launcher stamps the line a
+// few seconds after the dispatcher takes the slot.
+const SLOT_MATCH_MS = 5 * MINUTE_MS
+
+/** One launch in a progress file: its slot, or null for `slot: none`, and its span. */
+export type SlotSpan = { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }
+
+/**
+ * Each launch a progress file records: a stamped `slot: <k>` line, to the
+ * stamp of the launch's first `landed:` or `finished:` line, or to nothing
+ * while the launch has neither. A launch is live unless its `finished:` line
+ * says the run never went live. A `slot:` line with no stamp above it opens
+ * no launch.
+ */
+export function slotSpans(progress: string): SlotSpan[] {
+  const times = lineTimes(progress)
+  const out: SlotSpan[] = []
+  let open: SlotSpan | null = null
+  progress.split('\n').forEach((line, i) => {
+    const at = times[i] ?? null
+    const slot = /^slot: (\S+)/.exec(line)
+    if (slot) {
+      if (open !== null) out.push(open)
+      const k = Number(slot[1])
+      open = at === null ? null : { slot: Number.isInteger(k) && k >= 1 ? k : null, startMs: at, endMs: null, isLive: true }
+      return
+    }
+    if (open === null) return
+    const isFinished = line.startsWith('finished: ')
+    if (!isFinished && !line.startsWith('landed: ')) return
+    if (open.endMs === null) open.endMs = at
+    if (isFinished) open.isLive = LIVE.test(line.slice('finished: '.length))
+  })
+  if (open !== null) out.push(open)
+  return out
+}
+
+/** The stamp of a progress file's last `finished:` line, or null when it has none or no stamp. */
+function finishedAt(progress: string): number | null {
+  const lines = progress.split('\n')
+  const times = lineTimes(progress)
+  for (let i = lines.length - 1; i >= 0; i--) if ((lines[i] ?? '').startsWith('finished: ')) return times[i] ?? null
+  return null
+}
+
+/**
+ * The span of a finished run that names no slot: its first stamp to its last
+ * `finished:` line's, or, in a file with no stamps, its outcome's minutes
+ * back from the file's mtime. Null when neither gives a span.
+ */
+function unslottedSpan(progress: string, mtimeMs: number): { startMs: number; endMs: number; isLive: boolean } | null {
+  const end = lastEnd(progress)
+  if (end === null) return null
+  const stamps = lineTimes(progress).filter((t): t is number => t !== null)
+  const first = stamps[0]
+  if (first !== undefined) {
+    const last = finishedAt(progress) ?? stamps[stamps.length - 1] ?? first
+    return last > first ? { startMs: first, endMs: last, isLive: end.isLive } : null
+  }
+  const totals = TOTALS.exec(end.outcome)
+  if (totals === null) return null
+  return { startMs: mtimeMs - Number(totals[2]) * MINUTE_MS, endMs: mtimeMs, isLive: end.isLive }
+}
+
+const overlaps = (a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }): boolean =>
+  a.startMs < b.endMs && b.startMs < a.endMs
+
+/** `12a`, `2p`: an instant's local hour on a 12-hour face, in the offset `date +%z` prints. */
+function hourLabel(localMs: number): string {
+  const h = new Date(localMs).getUTCHours()
+  return `${h % 12 === 0 ? 12 : h % 12}${h < 12 ? 'a' : 'p'}`
+}
+
+/** The offset `date +%z` prints, in minutes; 0 when it does not parse. */
+function offsetMinutes(utcOffset: string): number {
+  const m = /^([+-])(\d{2})(\d{2})$/.exec(utcOffset.trim())
+  return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0
+}
+
+/**
+ * The timeline card: a lane per slot from 1 to the highest slot the board
+ * sees, then `you` and `held`, from TIMELINE_BACK_MS before now to
+ * TIMELINE_AHEAD_MS after.
+ *
+ * A running or finished record with slot fields spans `slot_taken` to
+ * `slot_released`, or to now while a running record holds its slot. A run's
+ * progress file adds a span for each stamped `slot: <k>` line that no record's
+ * `slot_taken` matches, so a run the finished list dropped keeps its slot. A
+ * finished run that names no slot anywhere goes on the lowest slot free over
+ * its span, and is not drawn when none is free.
+ *
+ * With a median, the running run is projected to its start plus the median,
+ * or to now once it is over. Then each queued entry that nothing holds, in
+ * entry order, and each ready brief on deck, by sitting, takes the slot where
+ * it can start soonest, the lower slot on a tie, no earlier than the
+ * projected end of each `After:` sitting. An `After:` sitting that is not
+ * running, queued or on `origin/main` waits on nothing; one that is but has
+ * no bar leaves the brief undrawn. Every queued entry whose `cause` names a
+ * hold, and every brief BLOCKED holds, counts once toward `held`.
+ */
+export function timelineOf(input: {
+  raw: RawStatus
+  progress: Readonly<Record<string, string>>
+  endings: readonly Ending[]
+  blocks: readonly Block[]
+  onDeck: readonly Deck[]
+  afters: Readonly<Record<string, string[]>>
+  /** RECENT's median run time in minutes, or null when no run is timed. */
+  median: number | null
+  now: number
+  utcOffset: string
+}): Timeline {
+  const { raw, progress, endings, blocks, onDeck, afters, median, now } = input
+  const startMs = now - TIMELINE_BACK_MS
+  const endMs = now + TIMELINE_AHEAD_MS
+  const medianMs = median === null ? null : median * MINUTE_MS
+  const placed: { slot: number; bar: TimelineBar }[] = []
+  const bar = (sitting: string, tone: BarTone, from: number, to: number, liveEndMs = to, isOverMedian = false): TimelineBar => ({
+    sitting,
+    tone,
+    startMs: from,
+    endMs: to,
+    liveEndMs,
+    isOverMedian,
+  })
+  type Unslotted = { sitting: string; tone: BarTone; startMs: number; endMs: number }
+  const unslotted: Unslotted[] = []
+  const ends = new Map<string, number>()
+  let highest = 1
+
+  // The launch stamps each record's slot fields account for, by run name.
+  const recorded = new Map<string, number[]>()
+  for (const r of [...raw.running, ...raw.finished]) {
+    if (r.slot == null || r.slotTakenMs == null) continue
+    const base = baseName(r.brief)
+    recorded.set(base, [...(recorded.get(base) ?? []), r.slotTakenMs])
+    highest = Math.max(highest, r.slot)
+  }
+
+  for (const r of raw.running) {
+    const { sitting } = sittingOf(r.brief)
+    const spans = slotSpans(progress[r.brief] ?? '').filter(s => s.slot !== null)
+    const last = spans[spans.length - 1]
+    const slot = r.slot ?? last?.slot ?? null
+    const from = r.slot != null ? (r.slotTakenMs ?? null) : (last?.startMs ?? null)
+    if (slot === null || from === null) {
+      const started = Date.parse(r.started)
+      if (Number.isFinite(started) && started < now) unslotted.push({ sitting, tone: 'running', startMs: started, endMs: now })
+      continue
+    }
+    highest = Math.max(highest, slot)
+    const released = r.slot != null ? (r.slotReleasedMs ?? null) : null
+    const liveEnd = Math.max(from, released ?? now)
+    const projected = medianMs === null || released !== null ? liveEnd : from + medianMs
+    const isOver = projected <= now && medianMs !== null && released === null
+    const end = isOver ? now : Math.max(liveEnd, projected)
+    placed.push({ slot, bar: bar(sitting, 'running', from, end, liveEnd, isOver) })
+    ends.set(sitting, end)
+  }
+  for (const f of raw.finished) {
+    if (f.slot == null || f.slotTakenMs == null || f.slotReleasedMs == null) continue
+    const outcome = f.outcome.replace(/^autopilot: /, '').replace(`${baseName(f.brief)} `, '')
+    const to = Math.max(f.slotTakenMs, f.slotReleasedMs)
+    placed.push({ slot: f.slot, bar: bar(sittingOf(f.brief).sitting, LIVE.test(outcome) ? 'live' : 'stopped', f.slotTakenMs, to) })
+  }
+  for (const e of endings) {
+    const { sitting } = sittingOf(e.base)
+    const spans = slotSpans(e.text).filter(s => s.slot !== null)
+    for (const s of spans) highest = Math.max(highest, s.slot ?? 1)
+    const taken = recorded.get(e.base) ?? []
+    for (const s of spans) {
+      if (s.slot === null || s.endMs === null || s.endMs <= s.startMs) continue
+      if (taken.some(t => Math.abs(t - s.startMs) <= SLOT_MATCH_MS)) continue
+      placed.push({ slot: s.slot, bar: bar(sitting, s.isLive ? 'live' : 'stopped', s.startMs, s.endMs) })
+    }
+    if (spans.length > 0 || recorded.has(e.base)) continue
+    const span = unslottedSpan(e.text, e.mtimeMs)
+    if (span !== null) unslotted.push({ sitting, tone: span.isLive ? 'live' : 'stopped', startMs: span.startMs, endMs: span.endMs })
+  }
+  const slots = Array.from({ length: highest }, (_, i) => i + 1)
+  for (const u of [...unslotted].sort((a, b) => a.startMs - b.startMs)) {
+    const slot = slots.find(k => !placed.some(p => p.slot === k && overlaps(p.bar, u)))
+    if (slot === undefined) continue
+    placed.push({ slot, bar: bar(u.sitting, u.tone, u.startMs, u.endMs) })
+    if (u.tone === 'running') ends.set(u.sitting, u.endMs)
+  }
+
+  // What BLOCKED holds and what a cause holds, each once.
+  const held = new Set<string>(blocks.flatMap(k => k.holds.map(h => h.sitting)))
+  for (const q of raw.queued) if (q.cause != null) held.add(sittingOf(q.brief).sitting)
+
+  if (medianMs !== null) {
+    const free = new Map(slots.map(k => [k, now]))
+    for (const p of placed) if (p.bar.tone === 'running') free.set(p.slot, Math.max(free.get(p.slot) ?? now, p.bar.endMs))
+    const live = new Set([
+      ...raw.running.map(r => sittingOf(r.brief).sitting),
+      ...raw.queued.map(q => sittingOf(q.brief).sitting),
+      ...Object.keys(afters).map(k => sittingOf(k).sitting),
+      ...onDeck.map(d => d.sitting),
+    ])
+    const project = (sitting: string, after: readonly string[], tone: BarTone) => {
+      let ready = now
+      for (const a of after) {
+        if (a === sitting) continue
+        const end = ends.get(a)
+        if (end !== undefined) ready = Math.max(ready, end)
+        else if (live.has(a)) return
+      }
+      let best: { slot: number; at: number } | null = null
+      for (const k of slots) {
+        const at = Math.max(free.get(k) ?? now, ready)
+        if (best === null || at < best.at) best = { slot: k, at }
+      }
+      if (best === null) return
+      const end = best.at + medianMs
+      placed.push({ slot: best.slot, bar: bar(sitting, tone, best.at, end) })
+      free.set(best.slot, end)
+      ends.set(sitting, end)
+    }
+    for (const q of [...raw.queued].sort((a, b) => a.entry - b.entry)) {
+      const { sitting } = sittingOf(q.brief)
+      if (!held.has(sitting)) project(sitting, afters[briefKey(q.brief)] ?? [], 'queued')
+    }
+    for (const d of onDeck) if (d.mode === 'ready') project(d.sitting, afterSittings(d.after), 'deck')
+  }
+
+  // The oldest decision stop, from its finish to now.
+  const stops = blocks
+    .filter(k => k.kind === 'decision')
+    .map(k => {
+      const e = endings.find(x => sittingOf(x.base).sitting === k.sitting)
+      return { sitting: k.sitting, sinceMs: (e === undefined ? null : finishedAt(e.text)) ?? k.endedMs }
+    })
+    .sort((a, b) => a.sinceMs - b.sinceMs)
+  const oldest = stops[0]
+  const you =
+    oldest === undefined
+      ? null
+      : { label: `${oldest.sitting} ? ${elapsed(oldest.sinceMs, now)}${stops.length > 1 ? ` +${stops.length - 1}` : ''}`, sinceMs: oldest.sinceMs }
+
+  const heldMs = medianMs === null ? null : held.size * medianMs
+  const heldLabel = held.size === 0 ? '' : `${held.size} held${heldMs === null ? '' : ` · ~${hoursMinutes(heldMs / MINUTE_MS)}`}`
+
+  const shift = offsetMinutes(input.utcOffset) * MINUTE_MS
+  const hours: Timeline['hours'] = []
+  for (let local = Math.ceil((startMs + shift) / (2 * HOUR_MS)) * 2 * HOUR_MS; local - shift <= endMs; local += 2 * HOUR_MS) {
+    hours.push({ ms: local - shift, label: hourLabel(local) })
+  }
+
+  const inWindow = (b: TimelineBar): boolean => b.endMs > startMs && b.startMs < endMs
+  return {
+    startMs,
+    endMs,
+    nowMs: now,
+    hours,
+    slots: slots.map(slot => ({
+      slot,
+      bars: placed
+        .filter(p => p.slot === slot && inWindow(p.bar))
+        .map(p => p.bar)
+        .sort((a, b) => a.startMs - b.startMs),
+    })),
+    you,
+    held: { label: heldLabel, count: held.size, ms: heldMs },
+  }
+}
+
+/** One cell of a drawn timeline row: its glyph, what it stands for, and whether it is a name drawn on its bar. */
+export type TimelineCell = { ch: string; tone: CellTone; isLabel: boolean }
+
+/** A bar's tone, `ahead` for a running bar's projection, then the idle track, the now-line, `held` and an empty cell. */
+export type CellTone = BarTone | 'ahead' | 'idle' | 'now' | 'held' | 'blank'
+
+// The braille bits of a cell's left and right dot columns, all four dots
+// each: DOT_BIT's columns added up.
+const LEFT_DOTS = 0x47
+const RIGHT_DOTS = 0xb8
+
+/** The cell an instant falls in on a track `cells` wide, unclamped. */
+const cellOf = (t: Timeline, ms: number, cells: number): number => Math.floor(((ms - t.startMs) / (t.endMs - t.startMs)) * cells)
+
+/**
+ * A lane's bars as `cells` braille cells, 2 dots each. A bar fills its dots
+ * with `⣿` but its last, so neighbours stay apart; a running bar past the
+ * median ends one cell past now. A name replaces a bar's cells where it fits,
+ * else follows the bar, else leads it, each with a cell between; a bar
+ * clipped at the window start reads `◂ S677`. A slot's empty cells are the
+ * idle track; the now-line takes the empty cell at now.
+ */
+export function laneCells(t: Timeline, bars: readonly TimelineBar[], cells: number, isSlot: boolean): TimelineCell[] {
+  const width = Math.max(0, Math.floor(cells))
+  const dots = width * 2
+  const span = Math.max(1, t.endMs - t.startMs)
+  const dotOf = (ms: number): number => Math.floor(((ms - t.startMs) / span) * dots)
+  const owner = new Array<number>(dots).fill(-1)
+  const toneOf = new Array<CellTone>(dots).fill('blank')
+  bars.forEach((b, i) => {
+    const first = dotOf(b.startMs)
+    const end = Math.max(first + 2, b.isOverMedian ? dotOf(t.nowMs) + 2 : dotOf(b.endMs))
+    const liveEnd = dotOf(b.liveEndMs)
+    for (let d = Math.max(0, first); d < Math.min(dots, end - 1); d++) {
+      if (owner[d] !== -1) continue
+      owner[d] = i
+      toneOf[d] = b.tone === 'running' && d >= liveEnd ? 'ahead' : b.tone
+    }
+  })
+  const cellOwner = new Array<number>(width).fill(-1)
+  const out: TimelineCell[] = Array.from({ length: width }, (_, c) => {
+    const left = owner[2 * c] ?? -1
+    const right = owner[2 * c + 1] ?? -1
+    const o = left !== -1 ? left : right
+    if (o === -1) return isSlot ? { ch: '⣀', tone: 'idle', isLabel: false } : { ch: ' ', tone: 'blank', isLabel: false }
+    cellOwner[c] = o
+    const bits = (left === o ? LEFT_DOTS : 0) | (right === o ? RIGHT_DOTS : 0)
+    return { ch: String.fromCodePoint(0x2800 | bits), tone: toneOf[left === o ? 2 * c : 2 * c + 1] ?? 'blank', isLabel: false }
+  })
+  const isFree = (c: number): boolean => c >= 0 && c < width && cellOwner[c] === -1 && !(out[c]?.isLabel ?? true) && out[c]?.tone !== 'now'
+  const written = new Set<number>()
+  bars.forEach((b, i) => {
+    const mine = cellOwner.flatMap((o, c) => (o === i ? [c] : []))
+    const first = mine[0]
+    const last = mine[mine.length - 1]
+    if (first === undefined || last === undefined) return
+    const label = `${b.startMs < t.startMs ? '◂ ' : ''}${b.sitting}`
+    const room = last - first + 1
+    if (label.length <= room) {
+      const at = first + Math.floor((room - label.length) / 2)
+      const tone = out[at]?.tone ?? b.tone
+      for (let j = 0; j < label.length; j++) out[at + j] = { ch: label[j] ?? ' ', tone, isLabel: true }
+      return
+    }
+    const tone = out[first]?.tone ?? b.tone
+    const fits = (at: number): boolean => Array.from({ length: label.length }, (_, j) => at + j).every(c => isFree(c) && !written.has(c))
+    const at = fits(last + 2) ? last + 2 : fits(first - 1 - label.length) ? first - 1 - label.length : null
+    if (at === null) return
+    for (let j = 0; j < label.length; j++) {
+      out[at + j] = { ch: label[j] ?? ' ', tone, isLabel: false }
+      written.add(at + j)
+    }
+  })
+  const now = cellOf(t, t.nowMs, width)
+  const cell = out[now]
+  if (cell !== undefined && cellOwner[now] === -1 && !written.has(now)) out[now] = { ch: '│', tone: 'now', isLabel: false }
+  return out
+}
+
+/** The `held` lane: its label from now, then a dashed strip as long as the held work. */
+export function heldCells(t: Timeline, cells: number): TimelineCell[] {
+  const width = Math.max(0, Math.floor(cells))
+  const out: TimelineCell[] = Array.from({ length: width }, () => ({ ch: ' ', tone: 'blank', isLabel: false }))
+  const now = Math.max(0, cellOf(t, t.nowMs, width))
+  const { label, ms } = t.held
+  if (label === '') {
+    if (now < width) out[now] = { ch: '│', tone: 'now', isLabel: false }
+    return out
+  }
+  const end = ms === null ? now : cellOf(t, t.nowMs + ms, width)
+  for (let c = now; c < width && c <= end; c++) out[c] = { ch: '⠤', tone: 'held', isLabel: false }
+  for (let j = 0; j < label.length && now + j < width; j++) out[now + j] = { ch: label[j] ?? ' ', tone: 'held', isLabel: false }
+  return out
+}
+
+/** The axis: each hour's label from its cell, where it fits whole after the label before it. */
+export function axisCells(t: Timeline, cells: number): string {
+  const width = Math.max(0, Math.floor(cells))
+  const out = new Array<string>(width).fill(' ')
+  let next = 0
+  for (const h of t.hours) {
+    const at = cellOf(t, h.ms, width)
+    if (at < next || at + h.label.length > width) continue
+    for (let j = 0; j < h.label.length; j++) out[at + j] = h.label[j] ?? ' '
+    next = at + h.label.length + 1
+  }
+  return out.join('')
+}
+
+/** Where the now-line falls on a track `cells` wide, clamped to the track. */
+export const nowCell = (t: Timeline, cells: number): number => Math.min(Math.max(0, cellOf(t, t.nowMs, cells)), Math.max(0, cells - 1))
 
 /** A sitting's plan cost from `plans`: `unread` when the ledger could not be read, `none` when it holds none. */
 const planOf = (plans: Readonly<Record<string, number>> | null, sitting: string): PlanCost =>
@@ -1696,16 +2117,26 @@ export type RecentTotals = {
 }
 
 /**
+ * The median of the listed runs' minutes, among runs with minutes: an even
+ * count's is the mean of the two middle times, rounded. Null when no run has
+ * minutes.
+ */
+export function medianMinutes(recent: readonly Ended[]): number | null {
+  const timed = recent.flatMap(d => (d.minutes === null ? [] : [d.minutes])).sort((a, b) => a - b)
+  const mid = Math.floor(timed.length / 2)
+  if (timed.length === 0) return null
+  return timed.length % 2 === 1 ? (timed[mid] ?? 0) : Math.round(((timed[mid - 1] ?? 0) + (timed[mid] ?? 0)) / 2)
+}
+
+/**
  * RECENT's totals. The count takes every listed run; the median, the time and
  * the slow line read only runs with minutes, and the spend only runs with a
  * cost. An even count's median is the mean of the two middle times, rounded.
  */
 export function recentTotals(recent: readonly Ended[], now: number): RecentTotals {
-  const timed = recent.flatMap(d => (d.minutes === null ? [] : [d.minutes])).sort((a, b) => a - b)
+  const timed = recent.flatMap(d => (d.minutes === null ? [] : [d.minutes]))
   const costs = recent.flatMap(d => (d.usd === null ? [] : [d.usd]))
-  const mid = Math.floor(timed.length / 2)
-  const median =
-    timed.length === 0 ? null : timed.length % 2 === 1 ? (timed[mid] ?? 0) : Math.round(((timed[mid - 1] ?? 0) + (timed[mid] ?? 0)) / 2)
+  const median = medianMinutes(recent)
   const span = agoShort(Math.min(...recent.map(d => d.endedMs)), now)
   const sum = (xs: number[]): number | null => (xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0))
   return {
@@ -1761,7 +2192,7 @@ export function statusLine(b: Board): string | undefined {
 }
 
 /** Each foldable card's header hotkey. */
-export const FOLD_KEY: Record<FoldCard, string> = { recent: 'r', deck: 'd', queued: 'q', blocked: 'b' }
+export const FOLD_KEY: Record<FoldCard, string> = { recent: 'r', deck: 'd', queued: 'q', blocked: 'b', timeline: 't' }
 
 /**
  * Whether a card is folded: as set by hand, else folded for recent and on
@@ -1783,6 +2214,15 @@ export function foldSummary(card: FoldCard, b: Board): string {
   if (card === 'queued') {
     const held = b.blocked.reduce((n, k) => n + k.holds.length, 0)
     return [b.queued.length > 0 ? `${b.queued.length} waiting` : '', held > 0 ? `holds ${held}` : ''].filter(p => p !== '').join(' · ')
+  }
+  if (card === 'timeline') {
+    // What holds each slot at now: a run, or idle.
+    const now = b.timeline.nowMs
+    const atNow = (bars: readonly TimelineBar[]): string =>
+      bars.find(x => (x.tone === 'running' || x.tone === 'live' || x.tone === 'stopped') && x.startMs <= now && now < x.endMs)?.sitting ?? 'idle'
+    return [...b.timeline.slots.map(l => `slot ${l.slot} ${atNow(l.bars)}`), b.timeline.held.count > 0 ? `${b.timeline.held.count} held` : '']
+      .filter(p => p !== '')
+      .join(' · ')
   }
   if (card === 'deck')
     return DECK_GROUPS.map(g => [g.label, b.onDeck.filter(d => d.mode === g.mode).length] as const)

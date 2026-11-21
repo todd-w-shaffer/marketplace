@@ -43,15 +43,36 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   home-gallery-sections  blocked ↑ · holds 8`, and under it every brief it holds on a yellow `‖`, queued or not,
   each under the sitting on its `After:` line that sits deepest in the block. A held entry draws only there. The
   card draws when something is queued or a block holds something. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
+  A queue row whose brief was split reads `split ×2`: the briefs on `origin/main` whose `Split from:` line names it,
+  and the archived claims in `docs/briefs/sittings.json` whose `split_from` list does, each child once.
+  Then the TIMELINE: a lane per dispatcher slot (`slot 1` to the highest slot the board sees), then `you` and
+  `held`, over a window from 8h before now to 6h after, under even-hour labels (`2p`, `12a`) and with a peach
+  now-line. It draws in braille, 2 dots a cell. A bar is `⣿` cells in its colour with its last dot column blank:
+  green for a run that went live, red for one that stopped, and the run in flight green to now and peach to its
+  start plus RECENT's median. Queued entries (blue) and ready briefs on deck (mauve) follow as projected bars:
+  each takes the slot where it can start soonest, no earlier than the projected end of each `After:` sitting.
+  Idle slot time is a faint `⣀` track. A sitting number sits inside its bar, mantle on the bar's colour, where
+  it fits, else beside it; a bar clipped at the window start reads `◂ S677`. A run's slot comes from status.json's
+  `slot`, `slot_taken` and `slot_released`, else from the stamped `slot: <k>` line in its progress file to the next
+  `landed:` or `finished:` stamp, so a run the finished list dropped keeps its slot; a run that names no slot goes
+  on the lowest slot free over its span. `you` is a red bar from the oldest decision stop's finish to now,
+  `S684 ? 19m`, with `+N` for each other one. `held` is a dashed yellow strip from now, `3 held · ~3h12m`: every
+  brief BLOCKED holds and every queued entry a `cause` holds, at the median each. With no median there are no
+  projected bars and `held` reads its count alone.
   Then RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
-  the sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
-  the cost in whole dollars, and how long ago it ended (`14m`, `5h`, `3d`). A run over twice the median draws its time
-  in peach. Under a rule, a totals row reads `10 live in 12h · median 1h04m`: the count of every listed run and the
-  oldest one's age, then the median time, the total time under the time column and the total cost, bold, under the
-  cost column. The median and the time read only runs with minutes; the cost sums the unrounded costs, then rounds,
+  the sitting and its whole name where the pane is wide enough, then its time, a six-cell phase split (savor
+  lavender, cycles green with simplify and the xhigh review, ship blue, with a legend in the card head), the cost in
+  whole dollars, the plan cost, and how long ago it ended (`14m`, `5h`, `3d`). The split divides the time between
+  the progress file's `at:` stamps by phase, so a relaunch's wait counts nowhere; a file with no stamps draws the
+  grey `⣀` baseline. The plan cost is dim, `+$6`, from the ledger's `phase: "plan"` commit records that carry the
+  sitting, `+—` when it holds none, bright when it passes the build's cost, and absent when the ledger cannot be
+  read. A run over twice the median draws its time in peach. Under a rule, a totals row reads `10 live in 12h ·
+  median 1h04m`: the count of every listed run and the oldest one's age, then the median time, the total time under
+  the time column, the total cost, bold, under the cost column, and `+ $81 plan`. The median and the time read only
+  runs with minutes; the cost sums the unrounded costs, then rounds,
   so it can differ from the rows' sum. A stop and a `shipped; deploy failed` run are left
   out: they belong to BLOCKED. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
-  outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
+  outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and the timeline, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
   group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow
   `enrich` (no Mode line yet: it needs a pass before autopilot), and red `needs you` (marked
@@ -73,18 +94,20 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `**Stop:**` number in words from the stop table in `hooks/board.ts`, which copies `docs/briefs/rules/autopilot.md`
   § "Stop only for these" (`savor found a failed premise · nothing pushed · 19m · $13.12`); two numbers join with
   `and`, a number off the table reads `stop N` after the stop words, or after the stage where it broke when the line
-  names no known number, and a handoff with no stop line keeps that stage. A split leaves out stop 7, which its
+  names no known number, and a handoff with no stop line keeps that stage. After the cost come the plan cost and
+  which launch stopped, where each exists: `$13.12 +$11.36 plan · 1st launch`, the launch counted from the
+  `launch:` lines of the run's `.launches` file, which no launch empties. A split leaves out stop 7, which its
   headline says; a broken run with no stop line reads the launcher's outcome sentence. The kind is
   status.json's `finished[].kind`, else the `kind:` line above the progress file's last `finished:` line. A queued
   entry is held by status.json's `queued[].cause`; a dispatcher that writes no `cause` key is read through the
   `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never
   appears on deck. A red deploy's strip reads its latest attempt with `gh run view`: once for a run older than the
   newest live run, and again each minute for one that still blocks, so a re-run that passes clears its block.
-- **Folding.** The headers of blocked, queued, on deck and recent are Buttons on `b`, `q`, `d` and `r` (with the
-  pane focused). A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
+- **Folding.** The headers of blocked, queued, on deck, timeline and recent are Buttons on `b`, `q`, `d`, `t` and `r`
+  (with the pane focused). The timeline starts open and never folds itself. A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
   otherwise recent and on deck fold themselves while BLOCKED shows.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
-  on base, each section in a card on mantle (the lanes, the queue, on deck, recent), green done, peach in flight, surface grey to come, lavender headings,
+  on base, each section in a card on mantle (the lanes, the queue, on deck, the timeline, recent), green done, peach in flight, surface grey to come, lavender headings,
   blue queued (an on-deck wait that is queued included), mauve on deck, yellow for a block's chain in the queue, on deck's groups in green, yellow and red, and peach
   for a recent run over twice the median. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint

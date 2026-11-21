@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import {
   afterSittings,
@@ -56,6 +56,8 @@ import {
   phaseSplit,
   planCosts,
   splitCounts,
+  TIMELINE_AHEAD_MS,
+  TIMELINE_BACK_MS,
 } from '../hooks/board'
 import type { Deck, Ended, Run } from '../types'
 
@@ -853,7 +855,7 @@ test("the pane draws S625's block above a folded recent, and a header press keep
   expect(await has(ui, '⏸')).toBe(false)
   // Recent folds itself while BLOCKED shows, and keeps its one line.
   expect((await ui.find({ type: 'Text', text: /2 live · last S624/ })) === undefined).toBe(false)
-  expect((await ui.findAll({ type: 'Button' })).length).toBe(3)
+  expect((await ui.findAll({ type: 'Button' })).length).toBe(4)
   await ui.press({ key: 'fold-recent' })
   expect(sets).toEqual([{ recent: false }, { recent: false }])
   await ui.unmount()
@@ -872,7 +874,7 @@ const BOARD_SHAPE = 'board-12'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>
-  findAll: (q: { type: string }) => Promise<{ text?: string; props?: { color?: string } }[]>
+  findAll: (q: { type: string }) => Promise<{ text?: string; props?: { color?: string; backgroundColor?: string } }[]>
 }
 
 /** Mounts the pane over `b`, `bodyColumns` wide, with `folds` as the folds set by hand, and records each write. */
@@ -1350,5 +1352,243 @@ test("a split parent's queue row reads how many briefs were split from it", asyn
   const raw = { dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] }
   const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([1]), NOW, { splits }))
   expect(await has(ui, 'S686 dashboard-rail split ×2')).toBe(true)
+  await ui.unmount()
+})
+
+// The timeline at NOW: slot 1 ran S677 from 9h back to 7h back and runs S692
+// since 30m back; slot 2 sat idle 3h, then ran S683, then S684, which stopped
+// for a decision 19m back. S693 waits on S692, S695 on nothing, and S700 on a
+// red deploy; S684 holds S685 and S686.
+const MIN = 60000
+const iso = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
+const stampedAt = (rows: readonly [number, string][]): string => rows.flatMap(([ms, line]) => [`at: ${iso(ms)}`, line]).join('\n')
+const LIVE_OUTCOME = 'shipped; production is live (run 1). ($20.00, 60 min)'
+const TL_STATUS = JSON.stringify({
+  dispatcher: 1,
+  running: [
+    { entry: 300, brief: `${BRIEFS}s692-design-tokens.md`, lane: '1', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 5, slot: 1, slot_taken: iso(NOW - 30 * MIN), slot_released: null },
+  ],
+  queued: [
+    { entry: 301, brief: `${BRIEFS}s693-token-export.md`, lane: '', reason: 'S692', cause: null },
+    { entry: 302, brief: `${BRIEFS}s695-admin-scale.md`, lane: '', reason: 'a free slot', cause: null },
+    { entry: 303, brief: `${BRIEFS}s700-board-round-one.md`, lane: '', reason: 'run 77', cause: { kind: 'deploy-red', run: 77 } },
+  ],
+  finished: [
+    { entry: 290, brief: `${BRIEFS}s677-drafts.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 1, slot_taken: iso(NOW - 9 * HOUR), slot_released: iso(NOW - 7 * HOUR) },
+    { entry: 295, brief: `${BRIEFS}s683-doc-tests.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 2, slot_taken: iso(NOW - 5 * HOUR), slot_released: iso(NOW - 3 * HOUR) },
+  ],
+})
+const TL_AFTERS: Record<string, string[]> = {
+  [`${BRIEFS}s684-home-gallery-sections.md`]: [],
+  [`${BRIEFS}s685-layout-gallery-rows.md`]: ['S684'],
+  [`${BRIEFS}s686-dashboard-rail.md`]: ['S685'],
+  [`${BRIEFS}s692-design-tokens.md`]: [],
+  [`${BRIEFS}s693-token-export.md`]: ['S692'],
+  [`${BRIEFS}s695-admin-scale.md`]: [],
+  [`${BRIEFS}s700-board-round-one.md`]: [],
+}
+// `kind:` and `finished:` share one stamp.
+const S684_STOP = [
+  stampedAt([
+    [NOW - 40 * MIN, 'slot: 2'],
+    [NOW - 40 * MIN, 'skill: sittings:savor launch /w/docs/briefs/kickoff-sitting-s684-home-gallery-sections.md'],
+    [NOW - 19 * MIN, 'kind: decision'],
+  ]),
+  'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($13.12, 19 min)',
+].join('\n')
+const tlBoard = (recent: Ended[] = endedOf(PROPOSED_RECENT)) => {
+  const raw = parseStatus(TL_STATUS)
+  if (raw === null) throw new Error('status did not parse')
+  return buildBoard(raw, {}, new Set([1, 11]), NOW, {
+    recent,
+    afters: TL_AFTERS,
+    endings: [{ base: S684_RUN, text: S684_STOP, mtimeMs: NOW - 19 * MIN }],
+    utcOffset: '-0500',
+  })
+}
+const barsOf = (b: ReturnType<typeof buildBoard>, slot: number): string[] =>
+  (b.timeline.slots.find(l => l.slot === slot)?.bars ?? []).map(
+    x => `${x.sitting} ${x.tone} ${(x.startMs - NOW) / MIN}..${(x.endMs - NOW) / MIN}${x.liveEndMs === x.endMs ? '' : ` live to ${(x.liveEndMs - NOW) / MIN}`}`,
+  )
+
+test('the timeline spans each slot from 8h back to 6h ahead: past runs, the run in flight, then the queue by its waits', () => {
+  const b = tlBoard()
+  expect([b.timeline.startMs, b.timeline.endMs]).toEqual([NOW - TIMELINE_BACK_MS, NOW + TIMELINE_AHEAD_MS])
+  expect(b.timeline.slots.map(l => l.slot)).toEqual([1, 2])
+  // S692 runs green to now and peach to its median end; S693 waits for that end on slot 1.
+  expect(barsOf(b, 1)).toEqual(['S677 live -540..-420', 'S692 running -30..34 live to 0', 'S693 queued 34..98'])
+  // S695 waits on nothing, so it takes the slot free at now.
+  expect(barsOf(b, 2)).toEqual(['S683 live -300..-180', 'S684 stopped -40..-19', 'S695 queued 0..64'])
+  expect(b.timeline.you).toEqual({ label: 'S684 ? 19m', sinceMs: NOW - 19 * MIN })
+  // S685 and S686 under BLOCKED, and S700 held by its cause, at the 1h04m median.
+  expect(b.timeline.held).toEqual({ label: '3 held · ~3h12m', count: 3, ms: 192 * MIN })
+  expect(b.timeline.hours.map(h => h.label)).toEqual(['4a', '6a', '8a', '10a', '12p', '2p', '4p'])
+})
+
+test('with RECENT empty there is no median: no projected bar, and held reads its count alone', () => {
+  const b = tlBoard([])
+  expect(barsOf(b, 1)).toEqual(['S677 live -540..-420', 'S692 running -30..0'])
+  expect(barsOf(b, 2)).toEqual(['S683 live -300..-180', 'S684 stopped -40..-19'])
+  expect(b.timeline.held).toEqual({ label: '3 held', count: 3, ms: null })
+})
+
+test('a run reads its slot from its record, else its stamped slot line, else the lowest slot free over its span', () => {
+  const raw = parseStatus(
+    JSON.stringify({
+      dispatcher: null,
+      running: [],
+      queued: [],
+      finished: [
+        { entry: 1, brief: `${BRIEFS}s677-drafts.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 1, slot_taken: iso(NOW - 9 * HOUR), slot_released: iso(NOW - 7 * HOUR) },
+        // The lane is not the slot.
+        { entry: 2, brief: `${BRIEFS}s688-account.md`, lane: '2', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 1, slot_taken: iso(NOW - 2 * HOUR), slot_released: iso(NOW - HOUR) },
+        // A record whose slot fields are null draws nothing of its own.
+        { entry: 3, brief: `${BRIEFS}s679-null-slot.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: null, slot_taken: null, slot_released: null },
+      ],
+    }),
+  )
+  if (raw === null) throw new Error('status did not parse')
+  const done = 'finished: shipped; production is live (run 1). ($9.00, 40 min)'
+  const endings = [
+    // The record takes the span its stamp matches, so S677 draws once.
+    { base: 'kickoff-sitting-s677-drafts', text: stampedAt([[NOW - 9 * HOUR + 3000, 'slot: 1'], [NOW - 7 * HOUR, done]]), mtimeMs: NOW - 7 * HOUR },
+    // The finished list no longer holds S681: its stamped slot line places it.
+    { base: 'kickoff-sitting-s681-dropped', text: stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 5 * HOUR, 'landed: a..b'], [NOW - 290 * MIN, done]]), mtimeMs: NOW - 290 * MIN },
+    // Neither: slot 1 holds S677 then, so slot 2 takes it.
+    { base: 'kickoff-sitting-s679-null-slot', text: stampedAt([[NOW - 470 * MIN, 'slot: none'], [NOW - 430 * MIN, done]]), mtimeMs: NOW - 430 * MIN },
+    // Neither, and no slot is free over its span: not drawn.
+    { base: 'kickoff-sitting-s678-no-room', text: stampedAt([[NOW - 460 * MIN, 'skill: simplify x'], [NOW - 440 * MIN, done]]), mtimeMs: NOW - 440 * MIN },
+  ]
+  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: {} })
+  expect(barsOf(b, 1)).toEqual(['S677 live -540..-420', 'S688 live -120..-60'])
+  expect(barsOf(b, 2)).toEqual(['S679 live -470..-430', 'S681 live -360..-300'])
+})
+
+const MANTLE = '#1e2030'
+const GREEN = '#a6da95'
+const IDLE = '#494d64'
+/** The drawn rows of the timeline: the axis, then each slot, `you` and `held`, by their first word, past the label's own span. */
+const rowsOf = async (ui: Ui): Promise<string[]> =>
+  (await ui.findAll({ type: 'Text' }))
+    .map(t => t.text ?? '')
+    .filter(t => t.length > 7 && (/^(slot \d+|you|held) /.test(t) || /^ {7}[ \d]*\d+[ap]( |$)/.test(t)))
+
+test('the timeline card draws each lane in braille under the hour labels, with names inside their bars', async ($, on) => {
+  const { ui } = await mountBoard($, on, tlBoard())
+  const rows = await rowsOf(ui)
+  const row = (name: string): string => rows.find(r => r.startsWith(`${name} `)) ?? ''
+  expect(row('slot 1')).toContain('◂ S677')
+  expect(row('slot 1')).toContain('S692')
+  expect(row('slot 1')).toContain('S693')
+  // Slot 2 sits idle for 3h, a faint track, before S683.
+  expect(row('slot 2')).toMatch(/^slot 2 ⣀{15,}⣿/)
+  expect(row('slot 2')).toContain('S683')
+  expect(row('you')).toContain('S684 ? 19m')
+  expect(row('held')).toContain('3 held · ~3h12m')
+  // A name inside its bar is mantle on the bar's colour.
+  const texts = await (ui as Ui).findAll({ type: 'Text' })
+  expect(texts.filter(t => t.text === 'S692' && t.props?.backgroundColor !== undefined).map(t => [t.props?.color, t.props?.backgroundColor])).toEqual([[MANTLE, GREEN]])
+  // Slot 2's idle span, longer than any phase block or RECENT's baseline.
+  const idle = texts.filter(t => /^⣀{15,}$/.test(t.text ?? ''))
+  expect(idle.length > 0 && idle.every(t => t.props?.color === IDLE)).toBe(true)
+  await ui.unmount()
+})
+
+test('at a narrow pane every timeline row is as long as the axis row', async ($, on) => {
+  const { ui } = await mountBoard($, on, tlBoard(), {}, 61)
+  const rows = await rowsOf(ui)
+  expect(rows.length).toBe(5)
+  expect(rows.map(r => r.length)).toEqual(rows.map(() => 61 - 4))
+  await ui.unmount()
+})
+
+test('the timeline card sits directly above RECENT, reads t: ▾ timeline, and t folds it', async ($, on) => {
+  const b = tlBoard()
+  const { ui, sets } = await mountBoard($, on, b, { recent: false })
+  const head = await firstAt(ui, '▾ timeline')
+  const recent = await firstAt(ui, '▾ recent')
+  expect(head >= 0 && head < recent).toBe(true)
+  // Nothing but the timeline's own rows sits between its head and RECENT's.
+  const between = (await (ui as Ui).findAll({ type: 'Text' })).slice(head + 1, recent).map(t => t.text ?? '')
+  expect(between.some(t => /[▾▸] /.test(t))).toBe(false)
+  // A plain Button draws its hotkey, a colon, then its label: `t: ▾ timeline`.
+  const buttons: { text?: string; props?: { hotkey?: string; plain?: boolean } }[] = await ui.findAll({ type: 'Button' })
+  expect(buttons.filter(x => x.text === '▾ timeline').map(x => [x.props?.hotkey, x.props?.plain])).toEqual([['t', true]])
+  await ui.press({ key: 'fold-timeline' })
+  expect(sets[0]).toEqual({ recent: false, timeline: true })
+  await ui.unmount()
+})
+
+test('a folded timeline keeps one line: what holds each slot now, and the held count', async ($, on) => {
+  const b = tlBoard()
+  expect(foldSummary('timeline', b)).toBe('slot 1 S692 · slot 2 idle · 3 held')
+  const { ui } = await mountBoard($, on, b, { timeline: true })
+  expect(await has(ui, 'S684 ? 19m')).toBe(false)
+  expect(await has(ui, '▸ timeline')).toBe(true)
+  expect(await has(ui, 'slot 1 S692 · slot 2 idle · 3 held')).toBe(true)
+  await ui.unmount()
+})
+
+test('the timeline does not fold itself while BLOCKED shows', () => {
+  expect(isFolded('timeline', {}, true)).toBe(false)
+})
+
+// One poll over a home whose files and commands the test answers by path and argv.
+const HOME = '/h'
+const LOGS = `${HOME}/Library/Logs/shootsfilm-autopilot`
+const POLL_FILES: Record<string, string> = {
+  [`${LOGS}/status.json`]: JSON.stringify({ dispatcher: 1, running: [], queued: [], finished: [] }),
+  [`${LOGS}/kickoff-sitting-s682-dom-wait-quiet.progress`]: stampedAt([[NOW - 3 * HOUR, 'slot: 1'], [NOW - 2 * HOUR, 'finished: shipped; production is live (run 1). ($22.40, 60 min)']]),
+  [`${LOGS}/kickoff-sitting-s681-dropped.progress`]: stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 5 * HOUR, 'finished: shipped; production is live (run 2). ($9.00, 60 min)']]),
+  [`${LOGS}/${S684_RUN}.progress`]: S684_STOP,
+  [`${LOGS}/${S684_RUN}.launches`]: 'launch: 1 fresh slot 2 at 2026-10-31T16:09:25Z\n',
+}
+const POLL_MTIMES: Record<string, number> = {
+  'kickoff-sitting-s682-dom-wait-quiet.progress': NOW - 2 * HOUR,
+  'kickoff-sitting-s681-dropped.progress': NOW - 5 * HOUR,
+  [`${S684_RUN}.progress`]: NOW - 19 * MIN,
+  [`${S684_RUN}.launches`]: NOW - 40 * MIN,
+  'status.json': NOW,
+}
+
+test('one poll reads the files and the ledger, and writes a board with plan costs, launch tags and a dropped run on its slot', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { HOME })
+  mock.store(on, { folds: { recent: false } })
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'board' } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.read', (_: unknown, e: { path: string }) => (e.path in POLL_FILES ? { value: POLL_FILES[e.path] } : { deny: 'no such file' }))
+  on('fs.list', (_: unknown, e: { path: string }) =>
+    e.path === LOGS
+      ? { value: Object.entries(POLL_MTIMES).map(([name, mtimeMs]) => ({ name, kind: 'file', size: 1, mtimeMs })) }
+      : { deny: 'no such directory' },
+  )
+  const ledger = `${PLAN_LEDGER}\n`
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+    const [cmd = '', ...args] = e.argv
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (cmd === 'git' && args[0] === 'ls-tree') return out(`100644 blob aaaa\tdocs/briefs/${S684_RUN}.md\n`)
+    if (cmd === 'git' && args[0] === 'cat-file') return out('# S684\n\n**Mode: autopilot.**\n\n## x\n')
+    if (cmd === 'stat') return out(String(ledger.length))
+    if (cmd === 'sh') return out(ledger.slice(Number(args[3]) - 1, Number(args[3]) - 1 + Number(args[5])))
+    if (cmd === 'date') return out('-0500')
+    if (cmd === 'ps') return out('1\n')
+    return out('', 1)
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(0)
+  const ui = await $.ui.mount({
+    plugin: 'run-board',
+    component: 'Pane',
+    requestId: 'run-board',
+    surface: 'terminal',
+    props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+  })
+  expect(await has(ui, '+$6')).toBe(true)
+  expect(await has(ui, '1st launch')).toBe(true)
+  const rows = await rowsOf(ui)
+  expect(rows.find(r => r.startsWith('slot 2 '))?.includes('S681')).toBe(true)
+  expect(rows.find(r => r.startsWith('slot 1 '))?.includes('S682')).toBe(true)
   await ui.unmount()
 })

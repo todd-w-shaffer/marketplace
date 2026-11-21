@@ -105,7 +105,7 @@ export type Block = {
 }
 
 /** Each foldable card, by the hotkey its header answers. */
-export type FoldCard = 'recent' | 'deck' | 'queued' | 'blocked'
+export type FoldCard = 'recent' | 'deck' | 'queued' | 'blocked' | 'timeline'
 
 /** The folds set by hand: true folded, false unfolded. A card absent follows its default. */
 export type Folds = Partial<Record<FoldCard, boolean>>
@@ -136,6 +136,39 @@ export type Deck = {
 
 export type DeckMode = 'ready' | 'enrich' | 'interactive'
 
+/**
+ * What a timeline bar stands for: a past run that went live or stopped, the
+ * run in flight, a queued entry, or a ready brief on deck.
+ */
+export type BarTone = 'live' | 'stopped' | 'running' | 'queued' | 'deck'
+
+/** One bar on a timeline lane, its times in milliseconds. */
+export type TimelineBar = {
+  sitting: string
+  tone: BarTone
+  startMs: number
+  endMs: number
+  /** Where a running bar turns from green to peach: now, or its slot's release. `endMs` for any other bar. */
+  liveEndMs: number
+  /** A running run past the median: its projection ends one cell past now. */
+  isOverMedian: boolean
+}
+
+/** The timeline card: every slot's runs over a window from TIMELINE_BACK_MS before now to TIMELINE_AHEAD_MS after. */
+export type Timeline = {
+  startMs: number
+  endMs: number
+  nowMs: number
+  /** Each even local hour in the window, labelled `2p`, `12a`. */
+  hours: { ms: number; label: string }[]
+  /** Slot 1 to the highest slot the board sees, at least one. */
+  slots: { slot: number; bars: TimelineBar[] }[]
+  /** The oldest decision stop, from its finish to now, or null when none waits. */
+  you: { label: string; sinceMs: number } | null
+  /** The held work from now: `count` briefs, `ms` long at the median, or null without one. */
+  held: { label: string; count: number; ms: number | null }
+}
+
 export type Board = {
   checkedAt: number
   /** `checkedAt` on a 12-hour clock in the machine's offset, `7:41 PM`. */
@@ -153,6 +186,7 @@ export type Board = {
   blocked: Block[]
   /** How many briefs were split from each sitting, by sitting; a sitting split from none is absent. */
   splits: Record<string, number>
+  timeline: Timeline
 }
 
 declare module 'claude-code' {
