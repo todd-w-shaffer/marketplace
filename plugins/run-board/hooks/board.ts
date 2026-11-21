@@ -606,11 +606,6 @@ export function onDeckOf(briefs: readonly (BriefFile & { text: string })[], held
     .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
 }
 
-/** A brief's lane and epic as one detail line: `epic · minisite/E4`. */
-export function deckDetail(d: Deck): string {
-  return d.epic === '' ? d.lane : `${d.lane} · ${d.epic}`
-}
-
 /** The sittings an `After:` line names, such as `S390, S393`, in capitals. */
 export const afterSittings = (after: string): string[] => [...after.matchAll(/\bs(\d+)\b/gi)].map(m => `S${m[1] ?? ''}`)
 
@@ -755,6 +750,19 @@ export function queueTree(
   return rows
 }
 
+/**
+ * How deep each running and queued sitting sits in the queue tree: a running
+ * sitting is 0, and a queued one is its row's depth in `queueTree`.
+ */
+export function liveDepths(b: Pick<Board, 'running' | 'queued' | 'blocked'>): Map<string, number> {
+  const queued = new Set(b.queued.map(q => q.sitting))
+  const depths = new Map(b.running.map(r => [r.sitting, 0]))
+  for (const r of queueTree(b.running, b.queued, b.blocked)) {
+    if (queued.has(r.sitting)) depths.set(r.sitting, r.rails.length / 2 + (r.joint === '' ? 0 : 1))
+  }
+  return depths
+}
+
 /** On deck's three groups, in the order the pane draws them, and each one's heading. */
 export const DECK_GROUPS: readonly { mode: DeckMode; label: string }[] = [
   { mode: 'ready', label: 'ready' },
@@ -775,10 +783,11 @@ export type DeckRow = {
   sitting: string
   /** The brief's slug, or the group's heading. */
   slug: string
-  /**
-   * At a group, how many briefs it holds. At a brief, its lane and epic, then
-   * `after` and the sittings it still waits on, then why it needs a person.
-   */
+  /** The one sitting the brief's note names after `after`, or empty. */
+  wait: string
+  /** Whether `wait` is queued. */
+  isWaitQueued: boolean
+  /** At a group, how many briefs it holds. At a brief, its epic, then why it needs a person. */
   note: string
 }
 
@@ -790,17 +799,37 @@ export type DeckRow = {
  * hangs under the brief it waits on that sits deepest in the group, the one to
  * ship last, and otherwise dashed under the group. A wait that crosses groups
  * shows in the note only. Siblings go by sitting.
+ *
+ * A brief's note names one wait, the nearest: the waited sitting that sits
+ * deepest across the queue and on deck, and so ships last. A running or
+ * queued sitting's depth comes from `live`; an on-deck brief sits one deeper
+ * than its own nearest wait, and at 0 with none. A tie goes to the brief's
+ * tree parent. The note never names the parent, since the tree draws it.
  */
-export function deckTree(deck: readonly Deck[], live: readonly string[]): DeckRow[] {
-  const waitable = new Set([...deck.map(d => d.sitting), ...live])
-  const waits = (d: Deck): string[] => afterSittings(d.after).filter(s => s !== d.sitting && waitable.has(s))
-  const note = (d: Deck): string => {
-    const parts = [deckDetail(d)]
-    const w = waits(d)
-    if (w.length > 0) parts.push(`after ${w.join(', ')}`)
-    if (d.why !== '') parts.push(d.why)
-    return parts.join(' · ')
+export function deckTree(deck: readonly Deck[], live: ReadonlyMap<string, number>, queued: ReadonlySet<string>): DeckRow[] {
+  const onDeck = new Map(deck.map(d => [d.sitting, d]))
+  const waits = (d: Deck): string[] => afterSittings(d.after).filter(s => s !== d.sitting && (live.has(s) || onDeck.has(s)))
+  const reach = new Map<string, number>()
+  const reachOf = (s: string, seen: Set<string>): number => {
+    const known = live.get(s) ?? reach.get(s)
+    if (known !== undefined) return known
+    const d = onDeck.get(s)
+    if (d === undefined || seen.has(s)) return 0
+    seen.add(s)
+    const n = Math.max(-1, ...waits(d).map(w => reachOf(w, seen))) + 1
+    reach.set(s, n)
+    return n
   }
+  const nearest = (d: Deck, parent: string | null): string => {
+    let best: string | null = null
+    let depth = -1
+    for (const w of waits(d)) {
+      const wd = reachOf(w, new Set([d.sitting]))
+      if (wd > depth || (wd === depth && w === parent)) [best, depth] = [w, wd]
+    }
+    return best === null || best === parent ? '' : best
+  }
+  const note = (d: Deck): string => [d.epic, d.why].filter(x => x !== '').join(' · ')
 
   const rows: DeckRow[] = []
   for (const g of DECK_GROUPS) {
@@ -839,9 +868,10 @@ export function deckTree(deck: readonly Deck[], live: readonly string[]): DeckRo
       if (p !== null) parent.set(d.sitting, null)
     }
 
-    rows.push({ rails: '', joint: '', kind: 'group', mode: g.mode, sitting: '', slug: g.label, note: String(members.length) })
+    rows.push({ rails: '', joint: '', kind: 'group', mode: g.mode, sitting: '', slug: g.label, wait: '', isWaitQueued: false, note: String(members.length) })
     const walk = (d: Deck, rails: string, isLast: boolean) => {
       const isAfter = parent.get(d.sitting) != null
+      const wait = nearest(d, parent.get(d.sitting) ?? null)
       rows.push({
         rails,
         joint: `${isLast ? '└' : '├'}${isAfter ? '─' : '╌'}`,
@@ -849,6 +879,8 @@ export function deckTree(deck: readonly Deck[], live: readonly string[]): DeckRo
         mode: g.mode,
         sitting: d.sitting,
         slug: d.slug,
+        wait,
+        isWaitQueued: queued.has(wait),
         note: note(d),
       })
       branch(d.sitting, rails + (isLast ? '  ' : '│ '))
@@ -1461,6 +1493,39 @@ export const elapsed = (fromMs: number, toMs: number): string =>
   hoursMinutes(Math.max(0, Math.floor((toMs - fromMs) / 60000)))
 
 export const money = (n: number): string => `$${n.toFixed(2)}`
+
+/** RECENT's totals row: what it says, and the figures under the time and cost columns. */
+export type RecentTotals = {
+  /** `10 live in 12h · median 1h04m`: every listed run, and the oldest one's age. */
+  words: string
+  /** The listed runs' minutes added up, or null when none has minutes. */
+  minutes: number | null
+  /** The listed runs' costs added up unrounded, or null when none has a cost. */
+  usd: number | null
+  /** A run over this many minutes draws its time in peach; null under two timed runs. */
+  slowOver: number | null
+}
+
+/**
+ * RECENT's totals. The count takes every listed run; the median, the time and
+ * the slow line read only runs with minutes, and the spend only runs with a
+ * cost. An even count's median is the mean of the two middle times, rounded.
+ */
+export function recentTotals(recent: readonly Ended[], now: number): RecentTotals {
+  const timed = recent.flatMap(d => (d.minutes === null ? [] : [d.minutes])).sort((a, b) => a - b)
+  const costs = recent.flatMap(d => (d.usd === null ? [] : [d.usd]))
+  const mid = Math.floor(timed.length / 2)
+  const median =
+    timed.length === 0 ? null : timed.length % 2 === 1 ? (timed[mid] ?? 0) : Math.round(((timed[mid - 1] ?? 0) + (timed[mid] ?? 0)) / 2)
+  const span = agoShort(Math.min(...recent.map(d => d.endedMs)), now)
+  const sum = (xs: number[]): number | null => (xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0))
+  return {
+    words: `${recent.length} live in ${span}${median === null ? '' : ` · median ${hoursMinutes(median)}`}`,
+    minutes: sum(timed),
+    usd: sum(costs),
+    slowOver: median === null || timed.length < 2 ? null : 2 * median,
+  }
+}
 
 /**
  * Each slot that holds a run, in slot order, with its runs, then the loop's

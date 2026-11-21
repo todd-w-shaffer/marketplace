@@ -14,7 +14,6 @@ import {
   handoffQuestion,
   buildBoard,
   buildLoop,
-  deckDetail,
   deckTree,
   finishedToast,
   laneTag,
@@ -50,8 +49,9 @@ import {
   foldSummary,
   isFolded,
   lastEnd,
+  liveDepths,
 } from '../hooks/board'
-import type { Deck, Run } from '../types'
+import type { Deck, Ended, Run } from '../types'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -648,7 +648,7 @@ test('on deck lists unheld briefs by sitting, epic lane from the Epic line', asy
   const texts: Record<string, string> = { bbb222: S342, ccc333: '**Mode: autopilot.**\nEpic: account-basics/E8\n## a', fff666: '**Mode: autopilot.**\n## a', '222999': '# issue\n## a' }
   const briefs = briefFiles(LS_TREE).map(f => ({ ...f, text: texts[f.sha] ?? '' }))
   const deck = onDeckOf(briefs, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
-  expect(deck.map(d => `${d.sitting} ${d.slug} ${deckDetail(d)}`)).toEqual([
+  expect(deck.map(d => `${d.sitting} ${d.slug} ${d.lane}${d.epic === '' ? '' : ` · ${d.epic}`}`)).toEqual([
     'S342 gallery-pass-keeps-stars epic · minisite/E4',
     'S350 split-work fix',
     '#527 gallery-race fix',
@@ -658,7 +658,8 @@ test('on deck lists unheld briefs by sitting, epic lane from the Epic line', asy
 })
 
 const deckOf = (sitting: string, mode: Deck['mode'], after = '', why = ''): Deck => ({ sitting, slug: sitting.toLowerCase(), lane: 'fix', epic: '', after, mode, why })
-const deckDrawn = (rows: ReturnType<typeof deckTree>) => rows.map(r => `${r.rails}${r.joint}${r.kind === 'group' ? r.slug : r.sitting} ${r.note}`.trimEnd())
+const deckDrawn = (rows: ReturnType<typeof deckTree>) =>
+  rows.map(r => `${r.rails}${r.joint}${r.kind === 'group' ? r.slug : r.sitting} ${[r.wait === '' ? '' : `after ${r.wait}`, r.note].filter(x => x !== '').join(' · ')}`.trimEnd())
 
 test('on deck draws as a tree under ready, enrich and needs you, each brief under the one it waits on', async () => {
   const deck = [
@@ -671,26 +672,28 @@ test('on deck draws as a tree under ready, enrich and needs you, each brief unde
     deckOf('S435', 'interactive', 'S470', 'Todd records the probe answers.'),
     deckOf('S436', 'interactive', 'S429, S434', 'Removes a wrangler.toml line.'),
   ]
-  // S475 is queued, S434 is running, S429 has shipped: only the first two are still waited on.
-  expect(deckDrawn(deckTree(deck, ['S475', 'S434']))).toEqual([
+  // S434 is running, S475 is queued one deep, S429 has shipped. Each row names
+  // only its nearest wait, and none under the parent the tree draws.
+  const live = new Map([['S434', 0], ['S475', 1]])
+  expect(deckDrawn(deckTree(deck, live, new Set(['S475'])))).toEqual([
     'ready 4',
-    '├╌S467 fix',
-    '└╌S470 fix · after S434',
-    '  └─S471 fix · after S470',
-    '    └─S473 fix · after S470, S471',
+    '├╌S467',
+    '└╌S470 after S434',
+    '  └─S471',
+    '    └─S473',
     'enrich 2',
-    '├╌S472 fix · after S470, S471, S475',
-    '└╌S474 fix',
+    '├╌S472 after S471',
+    '└╌S474',
     'needs you 2',
-    '├╌S435 fix · after S470 · Todd records the probe answers.',
-    '└╌S436 fix · after S434 · Removes a wrangler.toml line.',
+    '├╌S435 after S470 · Todd records the probe answers.',
+    '└╌S436 after S434 · Removes a wrangler.toml line.',
   ])
-  expect(deckTree(deck, []).filter(r => r.kind === 'group').map(r => r.mode)).toEqual(['ready', 'enrich', 'interactive'])
+  expect(deckTree(deck, new Map(), new Set()).filter(r => r.kind === 'group').map(r => r.mode)).toEqual(['ready', 'enrich', 'interactive'])
 })
 
 test('an empty group draws nothing, and a ring of waits still draws every brief', async () => {
   const deck = [deckOf('S500', 'enrich', 'S501'), deckOf('S501', 'enrich', 'S500')]
-  const rows = deckDrawn(deckTree(deck, []))
+  const rows = deckDrawn(deckTree(deck, new Map(), new Set()))
   expect(rows[0]).toBe('enrich 2')
   expect(rows.length).toBe(3)
   expect(rows.some(r => r.includes('S500')) && rows.some(r => r.includes('S501'))).toBe(true)
@@ -869,7 +872,10 @@ test('a handoff question reads both the bare and the addressed label', () => {
 // The shape the pane's board atom is stored under; it moves with the Board type.
 const BOARD_SHAPE = 'board-11'
 
-type Ui = { find: (q: { type: string; text?: RegExp }) => Promise<unknown>; findAll: (q: { type: string }) => Promise<{ text?: string }[]> }
+type Ui = {
+  find: (q: { type: string; text?: RegExp }) => Promise<unknown>
+  findAll: (q: { type: string }) => Promise<{ text?: string; props?: { color?: string } }[]>
+}
 
 /** Mounts the pane over `b`, with `folds` as the folds set by hand, and records each write. */
 async function mountBoard($: any, on: any, b: unknown, folds: Record<string, boolean> = {}) {
@@ -1063,5 +1069,85 @@ test('spend that could not be read draws no spend line', async ($, on) => {
   const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([5147]), NOW, { spend: null }))
   expect(await has(ui, 'spend ')).toBe(false)
   expect(await has(ui, 'queued')).toBe(true)
+  await ui.unmount()
+})
+
+/** The colours of every drawn Text whose own text is exactly `text`. */
+const coloursOf = async (ui: Ui, text: string): Promise<string[]> =>
+  (await ui.findAll({ type: 'Text' })).filter(t => t.text === text).map(t => t.props?.color ?? '')
+
+test('on deck names only the nearest wait, and writes a queued one in blue', async ($, on) => {
+  const b = s684Board()
+  expect(deckDrawn(deckTree(b.onDeck, liveDepths(b), new Set(b.queued.map(q => q.sitting))))).toEqual([
+    'ready 3',
+    '└╌S695 after S693',
+    '  ├─S696',
+    '  └─S697',
+  ])
+  const { ui } = await mountBoard($, on, b, { deck: false })
+  expect(await has(ui, 'after S693')).toBe(true)
+  expect(await has(ui, 'after S694')).toBe(false)
+  expect(await coloursOf(ui, 'S693')).toContain('#8aadf4')
+  await ui.unmount()
+})
+
+test('a deck wait that has shipped draws no wait', async () => {
+  const rows = deckDrawn(deckTree([deckOf('S800', 'ready', 'S429, S430')], new Map(), new Set()))
+  expect(rows).toEqual(['ready 1', '└╌S800'])
+})
+
+// The Proposed pane's ten recent runs, newest first: minutes and cost.
+const PROPOSED_RECENT: [string, number, number][] = [
+  ['S682', 73, 22.4],
+  ['S683', 99, 34.4],
+  ['S680', 107, 38.4],
+  ['S677', 297, 22.4],
+  ['S678', 55, 29.4],
+  ['S676', 117, 24.4],
+  ['S679', 39, 19.4],
+  ['S681', 32, 14.4],
+  ['S675', 34, 17.4],
+  ['S674', 39, 15.4],
+]
+const HOUR = 3600000
+const endedOf = (rows: [string, number | null, number | null][]): Ended[] =>
+  rows.map(([sitting, minutes, usd], i) => ({
+    sitting,
+    slug: sitting.toLowerCase(),
+    lane: '',
+    detail: '',
+    minutes,
+    usd,
+    endedMs: NOW - ((i + 1) * 12 * HOUR) / rows.length,
+  }))
+const recentBoard = (recent: Ended[]) => buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { recent })
+
+test('recent ends in a totals row: count, span, median, total time and the unrounded spend', async ($, on) => {
+  const { ui } = await mountBoard($, on, recentBoard(endedOf(PROPOSED_RECENT)))
+  expect(await has(ui, '10 live in 12h · median 1h04m')).toBe(true)
+  expect(await has(ui, '14h52m')).toBe(true)
+  // The rows round to $234; the total sums the unrounded costs, then rounds.
+  expect(await coloursOf(ui, '$238')).toEqual(['#cad3f5'])
+  expect(await has(ui, '$22.40')).toBe(false)
+  expect(await has(ui, '$22')).toBe(true)
+  // Over twice the median draws peach; S676's 1h57m is under it.
+  expect(await coloursOf(ui, '4h57m')).toEqual(['#f5a97f'])
+  expect(await coloursOf(ui, '1h57m')).toEqual(['#a5adcb'])
+  await ui.unmount()
+})
+
+test('a run with no totals counts, and moves no median or sum', async ($, on) => {
+  const eleven = endedOf([...PROPOSED_RECENT, ['S673', null, null]])
+  const { ui } = await mountBoard($, on, recentBoard(eleven))
+  expect(await has(ui, '11 live in 12h · median 1h04m')).toBe(true)
+  expect(await has(ui, '14h52m')).toBe(true)
+  expect(await has(ui, '$238')).toBe(true)
+  await ui.unmount()
+})
+
+test('one timed run draws no peach', async ($, on) => {
+  const { ui } = await mountBoard($, on, recentBoard(endedOf([['S682', 297, 22.4]])))
+  expect(await coloursOf(ui, '4h57m')).toContain('#a5adcb')
+  expect(await coloursOf(ui, '4h57m')).not.toContain('#f5a97f')
   await ui.unmount()
 })

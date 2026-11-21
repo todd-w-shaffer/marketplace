@@ -32,6 +32,7 @@ import {
   isLoopLanding,
   lastToolOf,
   ledgerChunk,
+  liveDepths,
   livePhase,
   miniBar,
   phaseGlyphs,
@@ -48,6 +49,7 @@ import {
   lanesOf,
   recentCandidates,
   recentOf,
+  recentTotals,
   statusLine,
   tileFace,
 } from './board'
@@ -97,6 +99,11 @@ const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 const DECK_COLOR: Record<DeckMode, string> = { ready: F.green, enrich: F.yellow, interactive: F.red }
 // How many braille cells a recent row's cost meter takes.
 const RECENT_METER_CELLS = 6
+// The widths of a recent row's time, cost and age columns, each with its
+// leading gap: `14h52m`, ` $1,238`, ` 12h`.
+const RECENT_TIME_CELLS = 6
+const RECENT_COST_CELLS = 7
+const RECENT_AGE_CELLS = 4
 
 const PANE = 'run-board'
 // A name Claude Code does not reserve: `claude plugin validate` warns on one it does.
@@ -518,6 +525,14 @@ export const register: Register = on => {
       { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
       { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },    ]
     const recentMax = Math.max(0, ...b.recent.map(d => d.usd ?? 0))
+    const totals = recentTotals(b.recent, b.checkedAt)
+    // A figure right-aligned in a column `width` cells wide: the pad, then the figure in its own span.
+    const cell = (value: string, width: number, color: string, bold = false) => (
+      <Text>
+        {' '.repeat(Math.max(0, width - value.length))}
+        <Text bold={bold} color={color}>{value}</Text>
+      </Text>
+    )
 
     // A foldable card's header: a Button on the card's hotkey that flips its
     // fold and keeps the choice, with the one-line summary while folded.
@@ -752,7 +767,7 @@ export const register: Register = on => {
         {b.onDeck.length > 0 && (
           <Box {...CARD}>
             {cardHead('deck', 'on deck', F.lavender)}
-            {!folded('deck') && deckTree(b.onDeck, [...b.running, ...b.queued].map(r => r.sitting)).map(r =>
+            {!folded('deck') && deckTree(b.onDeck, liveDepths(b), new Set(b.queued.map(q => q.sitting))).map(r =>
               r.kind === 'group' ? (
                 <Text>
                   <Text bold color={DECK_COLOR[r.mode]}>{r.slug}</Text>
@@ -769,6 +784,13 @@ export const register: Register = on => {
                     <Text color={F.subtext0}> {r.slug}</Text>
                   </Text>
                   <Text wrap="truncate-end" color={F.overlay2}>
+                    {r.wait !== '' && (
+                      // The nearest wait, its sitting blue when it is queued.
+                      <Text color={F.overlay1}>
+                        after <Text color={r.isWaitQueued ? F.blue : F.overlay1}>{r.wait}</Text>
+                      </Text>
+                    )}
+                    {r.wait !== '' && r.note !== '' ? ' · ' : ''}
                     {r.note}
                   </Text>
                 </Box>
@@ -782,32 +804,55 @@ export const register: Register = on => {
             {cardHead('recent', 'recent', F.lavender)}
             {!folded('recent') && b.recent.map(d => {
               // One row per run: outcome, sitting, then time, a cost meter
-              // scaled to the costliest run listed, the cost and the age.
+              // scaled to the costliest run listed, the cost and the age. A
+              // run over twice the median draws its time in peach.
               const meter = costMeter(d.usd ?? 0, recentMax, RECENT_METER_CELLS)
+              const isSlow = d.minutes !== null && totals.slowOver !== null && d.minutes > totals.slowOver
               return (
-                <Box flexDirection="column">
-                  <Box columnGap={2}>
-                    {/* The slug gives way first, so the figures keep one line and one column. */}
-                    <Box flexGrow={1} flexShrink={1} minWidth={0}>
-                      <Text wrap="truncate-end">
-                        <Text color={F.green}>● </Text>
-                        <Text bold color={F.text}>{d.sitting}</Text>
-                        <Text color={F.subtext0}> {d.slug}</Text>
-                      </Text>
-                    </Box>
-                    <Box flexShrink={0}>
-                      <Text wrap="truncate-end">
-                        <Text color={F.overlay2}>{(d.minutes === null ? '—' : hoursMinutes(d.minutes)).padStart(5)}  </Text>
-                        <Text color={F.peach}>{meter.fill}</Text>
-                        <Text color={F.surface1}>{meter.rest}</Text>
-                        <Text color={F.text}> {(d.usd === null ? '—' : money(d.usd)).padStart(7)}</Text>
-                        <Text color={F.overlay0}> {agoShort(d.endedMs, b.checkedAt).padStart(3)}</Text>
-                      </Text>
-                    </Box>
+                <Box columnGap={2}>
+                  {/* The slug gives way first, so the figures keep one line and one column. */}
+                  <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                    <Text wrap="truncate-end">
+                      <Text color={F.green}>● </Text>
+                      <Text bold color={F.text}>{d.sitting}</Text>
+                      <Text color={F.subtext0}> {d.slug}</Text>
+                    </Text>
+                  </Box>
+                  <Box flexShrink={0}>
+                    <Text wrap="truncate-end">
+                      {cell(d.minutes === null ? '—' : hoursMinutes(d.minutes), RECENT_TIME_CELLS, isSlow ? F.peach : F.subtext0)}
+                      {'  '}
+                      <Text color={F.peach}>{meter.fill}</Text>
+                      <Text color={F.surface1}>{meter.rest}</Text>
+                      {cell(d.usd === null ? '—' : dollars(d.usd), RECENT_COST_CELLS, F.text)}
+                      {cell(agoShort(d.endedMs, b.checkedAt), RECENT_AGE_CELLS, F.overlay1)}
+                    </Text>
                   </Box>
                 </Box>
               )
             })}
+            {!folded('recent') && (
+              // The totals under a rule, each figure under its column; the
+              // meter and age cells stay blank so the figures line up.
+              <Box flexDirection="column">
+                <Text color={F.surface0}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>
+                <Box columnGap={2}>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                    <Text wrap="truncate-end" color={F.overlay2}>
+                      {totals.words}
+                    </Text>
+                  </Box>
+                  <Box flexShrink={0}>
+                    <Text wrap="truncate-end">
+                      {cell(totals.minutes === null ? '' : hoursMinutes(totals.minutes), RECENT_TIME_CELLS, F.subtext0)}
+                      {' '.repeat(2 + RECENT_METER_CELLS)}
+                      {cell(totals.usd === null ? '' : dollars(totals.usd), RECENT_COST_CELLS, F.text, true)}
+                      {' '.repeat(RECENT_AGE_CELLS)}
+                    </Text>
+                  </Box>
+                </Box>
+              </Box>
+            )}
           </Box>
         )}
       </Box>

@@ -45,7 +45,11 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   card draws when something is queued or a block holds something. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
   Then RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
   the sitting and its name, then its time, a six-cell braille meter of its cost scaled to the costliest run listed,
-  the cost, and how long ago it ended (`14m`, `5h`, `3d`). A stop and a `shipped; deploy failed` run are left
+  the cost in whole dollars, and how long ago it ended (`14m`, `5h`, `3d`). A run over twice the median draws its time
+  in peach. Under a rule, a totals row reads `10 live in 12h · median 1h04m`: the count of every listed run and the
+  oldest one's age, then the median time, the total time under the time column and the total cost, bold, under the
+  cost column. The median and the time read only runs with minutes; the cost sums the unrounded costs, then rounds,
+  so it can differ from the rows' sum. A stop and a `shipped; deploy failed` run are left
   out: they belong to BLOCKED. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
   outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
@@ -53,8 +57,10 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `enrich` (no Mode line yet: it needs a pass before autopilot), and red `needs you` (marked
   `**Mode: interactive.**`, a run with Todd in the session). Inside its group a brief hangs on a solid joint under
   the brief its `After:` line names that sits deepest in the group, and otherwise dashed under the heading. Its note
-  gives the lane and epic, `after` and each named sitting still on deck, queued or running, and for `needs you`
-  the text after the marker, which says why: `└╌◇ S436 retire-held-path  fix · after S434 · Removes a wrangler.toml line.`
+  names one wait, the nearest: of the named sittings still on deck, queued or running, the one that sits deepest
+  across the queue and on deck, a tie going to the brief's tree parent. A brief under that parent names no wait, and
+  a queued wait's sitting reads in blue. Then the epic, and for `needs you` the text after the marker, which says
+  why: `└╌◇ S436 retire-held-path  after S434 · Removes a wrangler.toml line.`
   `/board` again closes it.
 - **BLOCKED.** A red-bordered card above the running cards, drawn only when something is stuck: one block per root cause,
   the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or
@@ -78,7 +84,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   otherwise recent and on deck fold themselves while BLOCKED shows.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
   on base, each section in a card on mantle (the lanes, the queue, on deck, recent), green done, peach in flight, surface grey to come, lavender headings,
-  blue queued, mauve on deck, yellow for a block's chain in the queue, and on deck's groups in green, yellow and red. The colours are fixed hex values and do not follow the terminal theme; the
+  blue queued (an on-deck wait that is queued included), mauve on deck, yellow for a block's chain in the queue, on deck's groups in green, yellow and red, and peach
+  for a recent run over twice the median. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint
   line is plain text and takes none.
 - **Toast.** A run that finishes while the session is open raises a toast with its outcome.
