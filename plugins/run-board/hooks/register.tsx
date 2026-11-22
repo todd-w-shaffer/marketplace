@@ -1087,8 +1087,8 @@ export const register: Register = on => {
                         <Text color={F.overlay0}> · </Text>
                       </Text>
                     )}
-                    {elapsed(r.startedMs, b.checkedAt)}
-                    <Text color={F.overlay0}> │ </Text>
+                    <Text color={F.text}>{elapsed(r.startedMs, b.checkedAt)}</Text>
+                    <Text color={F.overlay0}> · </Text>
                     <Text color={F.text}>{money(r.cost)}</Text>
                   </Text>
                 </Box>

@@ -1379,10 +1379,13 @@ const recentWithCycles = (minutes: number[]): Ended[] =>
 const phaseClockBoard = (recent: Ended[]) =>
   buildBoard(S684_STATUS, S692_IN_CYCLE_ONE, new Set([1, 11]), NOW, { cycles: { [`${BRIEFS}s692-design-tokens.md`]: 3 }, recent })
 
-test("the running card's header shows time in phase before the total, peach under the phase's median", async ($, on) => {
+test("the running card's header reads phase time · total · cost, the phase time peach under its median", async ($, on) => {
   const { ui } = await mountBoard($, on, phaseClockBoard(recentWithCycles([12, 20, 30])))
   expect(await coloursOf(ui, '9m')).toEqual(['#f5a97f'])
-  expect(await has(ui, '9m · 15m │ $10.63')).toBe(true)
+  expect(await has(ui, '9m · 15m · $10.63')).toBe(true)
+  // The total and the cost draw alike; only the phase time carries a tint.
+  expect(await coloursOf(ui, '15m')).toEqual(['#cad3f5'])
+  expect(await coloursOf(ui, '$10.63')).toEqual(['#cad3f5'])
   await ui.unmount()
 })
 
