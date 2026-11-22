@@ -198,95 +198,59 @@ as executable prompt code and trigger the reviewer normally.
 **Announce the pick:** *"This spec touches files with deep history, so I'm
 adding a **historical reviewer**."*
 
-**Brief (pass to the agent verbatim, then append the reviewer footer):**
+**Brief (pass to the agent verbatim, with `<history script>` replaced by the absolute path of this skill's
+`scripts/history.sh`, then append the reviewer footer):**
 
 > You are a regression auditor reviewing a spec against the git history of
 > touched files. Flag four specific patterns. You are not writing provenance
 > narrative — that's a separate command. Your job is bounded findings that
 > change Phase 3's classification.
 >
-> **Setup (run once, before any per-file mining):**
+> **Mining: one call.** Run `bash <history script> <each touchlist file>`
+> from the repository, as its own Bash call, with no `cd`, pipe or loop
+> around it. Do not run the git commands it runs yourself: a worktree's
+> isolation guard refuses a chained or looping git call. Its header states
+> its output. It does, in order:
 >
-> 1. **Resolve `<repo>`.** `git rev-parse --show-toplevel` from the spec's
->    directory. Use that path for every `git -C <repo>` call below. If the
->    command errors (not in a git repo), abort the reviewer and write a
->    single `investigation_notes` line.
-> 2. **Shallow-clone check.** Run `git -C <repo> rev-parse
->    --is-shallow-repository`. If `true`, the >10-commit trigger, origin,
->    and dormancy results are all structurally misleading. Note in
->    `investigation_notes`, prefix every finding with `(shallow clone —
->    provenance is approximate)`, and continue — shallow data sometimes
->    catches re-litigation against recent commits.
-> 3. **Per-file trigger gate.** For each touchlist entry, run
->    `git -C <repo> rev-list --count HEAD -- <file>`. Mine only files with
->    count >10. Skip `Create:` entries, missing files (count is 0), and
->    files with ≤10 commits; note each skip with reason in
->    `investigation_notes`.
-> 4. **File cap.** Mine at most 5 files. If more pass the gate, mine the
->    5 with the highest commit counts; list overflow in
->    `investigation_notes`.
-> 5. **Empty-result discipline.** Any *Mining* step (origin, inflection,
->    recent-activity, dormancy) that returns empty gets a one-line entry
->    in `investigation_notes` under `empty mining steps`. Do not fabricate
->    findings from missing data.
+> - **Setup.** It prints the repo and whether the clone is shallow. If
+>   `shallow: true`, the >10-commit trigger, origin, and dormancy results
+>   are all structurally misleading: note it in `investigation_notes`,
+>   prefix every finding with `(shallow clone — provenance is
+>   approximate)`, and continue. If it exits 2 (not in a git repo), abort
+>   the reviewer and write a single `investigation_notes` line.
+> - **The per-file gate and the cap.** It mines only files with more than
+>   10 commits, at most 5, the 5 with the most commits; each other file
+>   prints `skipped:` with its reason, and `overflow:` lists the files past
+>   the cap. Copy each skip and the overflow into `investigation_notes`.
+>   Skip `Create:` entries before you run it.
+> - **Origin**, the first commit, followed through renames, with its body.
+>   Read the rationale. If the body is terse ("initial commit", "add
+>   file"), note that: eroded-rationale findings need a quotable stated
+>   reason to land. If the origin's subject looks like a rename, note
+>   "origin uncertain (likely rename)" in `investigation_notes` and treat
+>   eroded-rationale findings for that file as low-confidence.
+> - **Inflection**, up to 3 commits whose subject names a refactor,
+>   migrate, rewrite, rip out, flip, introduce, deprecate, split or merge,
+>   or whose body is over 5 lines.
+> - **Recent**, the last 10 commits, whatever timeframe they span. Use it
+>   to judge whether the spec's premise matches what people have actually
+>   been doing in the file lately, and as the cross-reference set for
+>   re-introduction-pattern findings.
+> - **Dormant**, `yes` when no commit touched the file in 90 days. Merges
+>   count here: on merge-heavy branches a file with only merge commits in
+>   the last 90 days is still "being paid attention to."
 >
-> **Mining (per file that passed the per-file trigger gate above):**
+> **Empty-result discipline.** A section that prints nothing gets a
+> one-line entry in `investigation_notes` under `empty mining steps`. Do
+> not fabricate findings from missing data.
 >
-> 1. **Origin commit + body.**
->    ```bash
->    git -C <repo> log --follow --reverse --no-merges \
->      --pretty=tformat:'%h%x1f%ad%x1f%an%x1f%s%n%b%n---END---' \
->      --date=short -- <file> | sed -n '1,/---END---/p'
->    ```
->    Read the rationale. If the body is terse ("initial commit", "add
->    file"), note that — eroded-rationale findings need a quotable stated
->    reason to land. Don't add `-1`: it cuts the output before `--follow`
->    resolves renames. The `sed` already keeps one record.
->
->    If the origin's subject looks like a rename, note "origin uncertain
->    (likely rename)" in `investigation_notes` and treat eroded-rationale
->    findings for that file as low-confidence.
->
-> 2. **Inflection candidates (top 3 per file).**
->    ```bash
->    git -C <repo> log --follow --no-merges \
->      --pretty=tformat:'%h%x1f%ad%x1f%s%n%b%n---END---' \
->      --date=short -- <file>
->    ```
->    Select commits whose subject contains
->    `refactor|migrate|rewrite|rip out|flip|introduce|deprecate|split|merge`
->    OR whose body is >5 lines. Cap at 3 per file.
->
-> 3. **Recent-activity sample (count-based, cadence-adaptive).**
->    ```bash
->    git -C <repo> log --max-count=10 --follow --no-merges \
->      --pretty=tformat:'%h%x1f%ad%x1f%s' --date=short -- <file>
->    ```
->    The last 10 commits, whatever timeframe they span. Use this to judge
->    whether the spec's premise matches what people have actually been
->    doing in the file lately, and as the cross-reference set for
->    re-introduction-pattern findings.
->
-> 4. **Dormancy check (time-absolute).**
->    ```bash
->    git -C <repo> log -1 --since=90.days.ago -- <file>
->    ```
->    Empty result → file is dormant. `--no-merges` is deliberately omitted
->    here: on merge-heavy branches a file with only merge commits in the
->    last 90 days is still "being paid attention to."
->
-> 5. **Symbol resolution (opportunistic).** If the spec names symbols
->    rather than paths, try LSP to map symbol → file:line. If LSP is
->    unavailable, fall back to grep across the touchlist files.
->    **Mandatory `investigation_notes` line:** record which resolution
->    path was taken — `lsp`, `grep`, or `direct` (spec named paths). Without
->    this line, synthesis can't tell whether file references are precise
->    or fuzzy, and the easiest way to lose this step is to silently skip it.
->
-> **Conventions across all mining commands:** `tformat:` (not `format:`)
-> for trailing newlines; `%x1f` field delimiter so pipes in commit messages
-> don't corrupt parsing; `--no-merges` for signal *except* the dormancy
-> check, where any commit counts as activity; `--follow` to track renames.
+> **Symbol resolution (opportunistic).** If the spec names symbols rather
+> than paths, try LSP to map symbol → file:line. If LSP is unavailable,
+> fall back to grep across the touchlist files. **Mandatory
+> `investigation_notes` line:** record which resolution path was taken —
+> `lsp`, `grep`, or `direct` (spec named paths). Without this line,
+> synthesis can't tell whether file references are precise or fuzzy, and
+> the easiest way to lose this step is to silently skip it.
 >
 > **Findings categories (each finding gets exactly one tag):**
 >
@@ -501,7 +465,8 @@ an old table can never pass for this run's.
 Make a new, empty scratch directory for this run (under the session's scratchpad if it has one, else a new
 temporary directory), so no file from an earlier run is read as this run's. Write `lead.md` there before the
 reviewers launch. Each Phase 2 and 2b reviewer's prompt ends with: `Write your full answer to
-<directory>/<name>.md, then reply with that path only.` The names are `systems`, `integration`,
+<directory>/<name>.md with the Write tool, never a heredoc or another Bash command, then reply with that
+path only.` The names are `systems`, `integration`,
 `testing-strategy`, `historical`, and each persona's name in lowercase with every run of other characters as one
 hyphen (`reliability-failure-modes-reviewer`). When every reviewer returns, create an empty file for any reviewer
 whose file does not exist. Do not summarise, merge or filter an answer.
@@ -573,15 +538,16 @@ Launch mode given `<since sha>` and `<spec sha>` reviews only what changed since
 spec, a full savor at planning or a launch savor. `<since sha>` is the base that savor ran at. `<spec sha>` is the commit that holds the spec as that savor
 left it. The caller supplies both; the skill reads neither from the spec.
 
-1. **Check the pair.** If `<since sha>` is not an ancestor of `HEAD`
-   (`git merge-base --is-ancestor <since sha> HEAD` fails), or `<spec sha>`'s tree holds no file at the spec's
-   path, run the full launch pass instead, and the summary's `Delta:` line says which check failed.
-2. **Run Phase 1 whole**: the staleness check and the repo checks, as launch mode does.
-3. **Build two deltas.** The spec delta is `git diff <spec sha> HEAD -- <spec>`, with the hunk that changes only
-   the status line left out, because the caller rewrites that line on every relaunch. The code delta is
-   `git diff <since sha> HEAD` over the paths the repo checks report names, or over every path the spec names in
-   backticks when there is no report, with the spec itself left out. Write both to the scratch directory, as
-   `spec-delta.diff` and `code-delta.diff`.
+1. **Run Phase 1 whole**: the staleness check and the repo checks, as launch mode does.
+2. **Check the pair and build two deltas in one call:** `bash <this skill's directory>/scripts/delta.sh <since sha>
+   <spec sha> <spec> <scratch directory> <path>...`, as its own Bash call, from the repository. The paths are the
+   ones the repo checks report names, or every path the spec names in backticks when there is no report. The
+   script's header states the checks and the two files. It writes `spec-delta.diff`, the spec's diff since
+   `<spec sha>` with each hunk that changes only the status line left out, because the caller rewrites that line
+   on every relaunch, and `code-delta.diff`, the paths' diff since `<since sha>` with the spec left out. It prints
+   each file's changed-line count. When it prints `full pass: <check>` and exits 3, run the full launch pass
+   instead, and the summary's `Delta:` line says which check failed.
+3. **Read the deltas** at those two paths.
 4. **Both deltas empty: no reviewer runs.** Write the findings file with the header and no rows, set the status
    line as launch mode does, and print the summary. No Phase 3 agent runs.
 5. **Otherwise, launch the reviewers the deltas call for, in one message.** Systems and integration always run. Testing strategy
