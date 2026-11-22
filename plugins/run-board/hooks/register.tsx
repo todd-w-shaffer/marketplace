@@ -1116,11 +1116,11 @@ export const register: Register = on => {
               queueRows.map((r, i) => {
                 const isHeld = r.kind === 'held' || r.kind === 'block' || r.kind === 'hold'
                 const lit = r.kind === 'run' ? (b.costs[r.sitting]?.lit ?? 0) : null
-                // A joint means the entry needs its parent shipped; a yellow `‖` that a block holds it.
+                // A solid joint means the entry needs its parent shipped, a yellow dashed one that the run holds its paths, and a yellow `‖` that a block holds it.
                 return boxedRow(
                   <Text wrap="truncate-end">
                     <Text color={r.kind === 'hold' ? F.yellow : F.overlay0}>{r.rails}</Text>
-                    <Text color={r.kind === 'hold' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
+                    <Text color={r.kind === 'hold' || r.kind === 'held' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
                     <Text color={r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
                       {r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
                     </Text>

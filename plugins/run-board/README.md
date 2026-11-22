@@ -51,8 +51,10 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`). Its note names only
   the waits the tree does not draw: each running, queued or held sitting on its `After:` line other than its
   parent (`after S396`), so a row with no other wait has no note. An entry that needs nothing running or queued is a root of
-  its own under the dispatcher's reason (`a free slot`); one held only because a run touches the same
-  paths reads `held · S518` in yellow, with no joint, since a hold orders nothing. After the free
+  its own under the dispatcher's reason (`a free slot`). One held only because a running run touches the same
+  paths hangs under that run on a dashed yellow joint (`└┄`): the hold lifts when that run lands, and orders
+  nothing after. When the board does not show that run running, the entry is a root that reads `held · S518`
+  in yellow. After the free
   roots comes each block that holds a chain, in BLOCKED's order: the stuck sitting in yellow, `‖ S684
   home-gallery-sections  blocked ↑ · holds 8`, and under it every brief it holds on a yellow `‖`, queued or not,
   each under the sitting on its `After:` line that sits deepest in the block. A held entry draws only there. The

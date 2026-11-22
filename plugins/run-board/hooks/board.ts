@@ -1522,27 +1522,33 @@ export function briefsRead(
 export const afterSittings = (after: string): string[] => [...after.matchAll(/\bs(\d+)\b/gi)].map(m => `S${m[1] ?? ''}`)
 
 /**
- * `held · S518` for a dispatcher reason that holds an entry
- * off a run touching the same paths, or null for any other reason. If
- * dispatch.sh changes its `<brief> <where>: both touch <paths>` reason, update
- * this pattern.
+ * `S518` for a dispatcher reason that holds an entry off a run touching the
+ * same paths, or null for any other reason. If dispatch.sh changes its
+ * `<brief> <where>: both touch <paths>` reason, update this pattern.
  */
-export function heldNote(reason: string): string | null {
+export function heldPeer(reason: string): string | null {
   const m = /\bs(\d+)-[\w-]*.*?: both touch .+$/i.exec(reason)
-  return m === null ? null : `held · S${m[1] ?? ''}`
+  return m === null ? null : `S${m[1] ?? ''}`
+}
+
+/** `held · S518` for a reason `heldPeer` reads, or null for any other reason. */
+export function heldNote(reason: string): string | null {
+  const peer = heldPeer(reason)
+  return peer === null ? null : `held · ${peer}`
 }
 
 /** One row of the queue drawn as a tree. */
 export type TreeRow = {
   /** A rail for each level above whose branch goes on below this row, two cells per level. */
   rails: string
-  /** `├─` or `└─` under the entry it needs, empty at a root. */
+  /** `├─` or `└─` under the entry it needs, `├┄` or `└┄` under the run that holds it, empty at a root. */
   joint: string
   /**
    * `run`: a running root. `after`: an entry that needs its parent shipped.
    * `free`: a root that waits on neither.
-   * `held`: a root that waits for a run to leave paths both briefs touch. The
-   * hold orders nothing, so it draws as a tag, not an edge.
+   * `held`: an entry that waits for a run to leave paths both briefs touch.
+   * It hangs under that run on a dashed joint, or is a root tagged with the
+   * run when the board does not show that run running.
    * `block`: a stuck sitting that holds a chain. `hold`: a brief in that chain.
    */
   kind: 'run' | 'after' | 'free' | 'held' | 'block' | 'hold'
@@ -1551,7 +1557,7 @@ export type TreeRow = {
   lane: string
   /**
    * At an `after` or `hold` row, `after S396`: the waits the tree does not draw. At a free root, the
-   * dispatcher's reason; at a held root, the held tag; at a block, `blocked ↑ · holds N`; at a running root, empty.
+   * dispatcher's reason; at a held root, the held tag; at a held entry under its run, as at `after`; at a block, `blocked ↑ · holds N`; at a running root, empty.
    */
   note: string
 }
@@ -1564,6 +1570,12 @@ export type TreeRow = {
  * a held one sits under its block, and one that is neither has shipped. An entry that needs nothing in the tree is a root of its
  * own under the dispatcher's reason; a running run it does not name is not its
  * parent, since slots order nothing. Siblings go in queue order.
+ *
+ * An entry the dispatcher holds off a running run that touches the same paths
+ * hangs under that run on a dashed joint. The dispatcher checks `After:` waits
+ * before paths, so a held entry has no other wait to draw an edge for. The
+ * hold orders nothing: it lifts when that run lands, and the run that holds an
+ * entry can change from one pass to the next.
  *
  * Each block that holds something follows, its root first and its chain under
  * it in the order `Block.holds` gives, so a held entry is never a root of its
@@ -1598,6 +1610,12 @@ export function queueTree(
     const q = waiting.get(s)
     if (q === undefined || seen.has(s)) return 0
     seen.add(s)
+    const peer = heldPeer(q.reason)
+    if (peer !== null && runs.has(peer)) {
+      parent.set(s, peer)
+      depth.set(s, 1)
+      return 1
+    }
     let best: string | null = null
     let d = 0
     for (const n of needs(q)) {
@@ -1620,10 +1638,11 @@ export function queueTree(
   const walk = (q: Waiting, rails: string, isLast: boolean) => {
     if (drawn.has(q.sitting)) return
     drawn.add(q.sitting)
+    const isHeld = heldPeer(q.reason) === parent.get(q.sitting)
     rows.push({
       rails,
-      joint: `${isLast ? '└' : '├'}─`,
-      kind: 'after',
+      joint: `${isLast ? '└' : '├'}${isHeld ? '┄' : '─'}`,
+      kind: isHeld ? 'held' : 'after',
       sitting: q.sitting,
       slug: q.slug,
       lane: q.lane,

@@ -676,14 +676,25 @@ test('an entry with nothing in the tree to wait on is its own root, with the dis
   expect(rows.map(r => r.kind)).toEqual(['free'])
 })
 
-test('an entry held off a run that shares its paths is a root tagged held, not an edge under that run', async () => {
+test('an entry held off a running run that shares its paths hangs under that run on a dashed joint', async () => {
+  const running = [{ sitting: 'S518', slug: 'device-lab-webkit', lane: 'epic' }, { sitting: 'S519', slug: 'device-lab-simulator', lane: 'epic' }]
   const queued = [
     waits(10, 'S522', 'epic', [], 'kickoff-sitting-s518-device-lab-webkit in slot 1: both touch CLAUDE.md'),
     waits(11, 'S523', 'epic', [], 'kickoff-sitting-s519-device-lab-simulator (pid 4242): both touch package.json, docs/e2e-testing.md'),
+    waits(12, 'S524', 'epic', ['S518']),
+    waits(13, 'S525', 'epic', ['S522']),
   ]
+  const rows = queueTree(running, queued, [])
+  // Siblings go in queue order whatever the joint, and a held entry's own waiters hang under it.
+  expect(drawn(rows)).toEqual(['S518', '├┄S522', '│ └─S525', '└─S524', 'S519', '└┄S523'])
+  expect(rows.map(r => r.kind)).toEqual(['run', 'held', 'after', 'after', 'run', 'held'])
+})
+
+test('an entry held off a run the board does not show running is a root tagged held', async () => {
+  const queued = [waits(10, 'S522', 'epic', [], 'kickoff-sitting-s518-device-lab-webkit in slot 1: both touch CLAUDE.md')]
   const rows = queueTree([], queued, [])
-  expect(drawn(rows)).toEqual(['S522 held · S518', 'S523 held · S519'])
-  expect(rows.map(r => r.kind)).toEqual(['held', 'held'])
+  expect(drawn(rows)).toEqual(['S522 held · S518'])
+  expect(rows.map(r => r.kind)).toEqual(['held'])
 })
 
 test('on deck lists unheld briefs by sitting, epic lane from the Epic line', async () => {
