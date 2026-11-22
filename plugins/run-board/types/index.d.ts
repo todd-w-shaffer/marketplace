@@ -10,6 +10,10 @@ export type Run = {
   tool: string
   /** The chain's phases in order, each done, in flight or still to come. */
   phases: Phase[]
+  /** When the live phase started, or null when none is live or its opening line has no stamp. */
+  phaseSinceMs: number | null
+  /** The live phase's median over RECENT in milliseconds, or null when no recent run timed it. */
+  phaseMedianMs: number | null
   isAlive: boolean
 }
 
@@ -59,6 +63,8 @@ export type Ended = {
   endedMs: number
   /** The run's time as savor, cycles and ship cells, or null when its progress file holds no times. */
   split: PhaseSplit | null
+  /** The run's milliseconds in each phase, by phase label; empty when its progress file holds no times. */
+  phaseMs: Record<string, number>
   plan: PlanCost
   /** The highest `cycle k` a `/commit` line in its progress file names, or 0 when none names one. */
   cycles: number

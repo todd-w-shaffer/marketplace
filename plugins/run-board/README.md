@@ -17,6 +17,10 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   session in flight (the savor is session 0, a cycle session 1, simplify through the archive session 2; the
   bar's lit label names the phase), the stage when it adds to it, and the newest tool call, read from the last 256 KiB of the run's
   stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
+- **Time in phase.** A live card's header reads `9m · 15m │ $10.63`: the time in the phase in flight, then the run's
+  time and cost. The clock starts at the `at:` stamp on the line that opened the phase, or at the latest `slot:` line
+  when the run was relaunched later. It is peach, the lit label's colour, and red once it passes that phase's median
+  over RECENT. Every cycle is one sample of the cycle median; a phase no recent run timed has no median and stays peach.
 - **The architecture loop.** While `scripts/archloop.sh` holds its lock, a card and the hint line show the loop's stage,
   `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
   `(loop)`. The loop's spend counts toward the cost in flight.

@@ -1079,6 +1079,14 @@ export const register: Register = on => {
                     {isLoopLanding(b, r) && <Text color={F.overlay2}> (loop landing)</Text>}
                   </Text>
                   <Text color={F.overlay2}>
+                    {r.isAlive && r.phaseSinceMs !== null && (
+                      <Text>
+                        <Text color={r.phaseMedianMs !== null && b.checkedAt - r.phaseSinceMs > r.phaseMedianMs ? F.red : F.peach}>
+                          {elapsed(r.phaseSinceMs, b.checkedAt)}
+                        </Text>
+                        <Text color={F.overlay0}> · </Text>
+                      </Text>
+                    )}
                     {elapsed(r.startedMs, b.checkedAt)}
                     <Text color={F.overlay0}> │ </Text>
                     <Text color={F.text}>{money(r.cost)}</Text>

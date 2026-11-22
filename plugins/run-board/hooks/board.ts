@@ -423,6 +423,82 @@ export function phaseSplit(progress: string): PhaseSplit | null {
   return { savor: cells[0] ?? 0, cycles: cells[1] ?? 0, ship: cells[2] ?? 0 }
 }
 
+/**
+ * Each line's live phase label, by `phasesOf` over the lines up to it, or null
+ * when no phase is live. Progress files run to tens of lines, so reading each
+ * prefix costs nothing that matters, and `phasesOf` stays the one reader of
+ * what a phase is.
+ */
+function liveLabels(lines: readonly string[], cycles?: number): (string | null)[] {
+  return lines.map((_, i) => phasesOf(lines.slice(0, i + 1).join('\n'), cycles).find(p => p.state === 'live')?.label ?? null)
+}
+
+/**
+ * When the live phase started: the stamp on the first line of the run of
+ * lines that leave the same phase live, or the stamp on the latest `slot:`
+ * line when that is later, so a relaunched run's clock counts from its
+ * relaunch. Null when no phase is live or the opening line has no stamp.
+ */
+export function phaseSince(progress: string, cycles?: number): number | null {
+  const lines = progress.split('\n')
+  const times = lineTimes(progress)
+  const labels = liveLabels(lines, cycles)
+  const last = labels.length - 1
+  const live = labels[last] ?? null
+  if (live === null) return null
+  let first = last
+  while (first > 0 && labels[first - 1] === live) first--
+  const opened = times[first] ?? null
+  if (opened === null) return null
+  const launch = lines.findLastIndex(line => line.startsWith('slot: '))
+  const launchedAt = launch === -1 ? null : (times[launch] ?? null)
+  return launchedAt === null ? opened : Math.max(opened, launchedAt)
+}
+
+/**
+ * A run's milliseconds in each phase, by phase label. The time from one stamp
+ * to the next belongs to the phase the lines under the first one leave live.
+ * Time after a `finished:` line and before the next `slot:` line, a
+ * relaunch's wait, counts in no phase. A file with no `at:` lines gives no
+ * phases.
+ */
+export function phaseDurations(progress: string): Record<string, number> {
+  const lines = progress.split('\n')
+  const times = lineTimes(progress)
+  const labels = liveLabels(lines)
+  const out: Record<string, number> = {}
+  let from: number | null = null
+  let label: string | null = null
+  let paused = false
+  lines.forEach((line, i) => {
+    if (STAMP.test(line)) {
+      const at = times[i] ?? null
+      if (from !== null && at !== null && label !== null && !paused) out[label] = (out[label] ?? 0) + Math.max(0, at - from)
+      from = at
+      return
+    }
+    if (line.startsWith('finished: ')) paused = true
+    else if (line.startsWith('slot: ')) paused = false
+    label = labels[i] ?? null
+  })
+  return out
+}
+
+/** The key a phase's median pools under: every cycle is one sample of `cycle`. */
+const phaseKey = (label: string): string => (label.startsWith('cycle ') ? 'cycle' : label)
+
+/** The median milliseconds of each phase over RECENT, by `phaseKey`, among runs that spent time in it. */
+export function phaseMedians(recent: readonly Ended[]): Record<string, number> {
+  const samples: Record<string, number[]> = {}
+  for (const d of recent) for (const [label, ms] of Object.entries(d.phaseMs)) if (ms > 0) (samples[phaseKey(label)] ??= []).push(ms)
+  const out: Record<string, number> = {}
+  for (const [key, xs] of Object.entries(samples)) {
+    const m = medianOf(xs)
+    if (m !== null) out[key] = m
+  }
+  return out
+}
+
 // Stages the phase line leaves out: those that say no more than the phase,
 // and `review low`, which stays the last step line through the next
 // cycle's build, so it reads as the cycle before the one in flight.
@@ -658,10 +734,13 @@ export function buildBoard(
   const recent = (extra.recent ?? []).map(d => ({ ...d, plan: planOf(plans, d.sitting) }))
   // A held brief, and a stopped one, sits under BLOCKED and never on deck.
   const onDeck = (extra.onDeck ?? []).filter(d => !drawn.has(d.sitting))
+  const medians = phaseMedians(recent)
   const running: Run[] = raw.running.map(r => {
     const text = progress[r.brief] ?? ''
     const { cost } = noteOf(text)
     const stage = stageOf(text)
+    const phases = phasesOf(text, cycles[briefKey(r.brief)])
+    const live = phases.find(p => p.state === 'live')
     return {
       entry: r.entry,
       ...sittingOf(r.brief),
@@ -670,7 +749,9 @@ export function buildBoard(
       cost: Math.max(r.cost, cost ?? 0),
       stage,
       tool: tools[r.brief] ?? '',
-      phases: phasesOf(text, cycles[briefKey(r.brief)]),
+      phases,
+      phaseSinceMs: phaseSince(text, cycles[briefKey(r.brief)]),
+      phaseMedianMs: live === undefined ? null : (medians[phaseKey(live.label)] ?? null),
       isAlive: r.pid !== null && alive.has(r.pid),
     }
   })
@@ -1889,6 +1970,7 @@ export function recentOf(
       usd: totals === null ? null : Number(totals[1]),
       endedMs: f.mtimeMs,
       split: phaseSplit(f.text),
+      phaseMs: phaseDurations(f.text),
       plan: 'unread',
       cycles: namedCycles(f.text),
     })

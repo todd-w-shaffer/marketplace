@@ -56,6 +56,8 @@ import {
   historyTag,
   launchCount,
   lineTimes,
+  phaseDurations,
+  phaseSince,
   phaseSplit,
   planCosts,
   splitCounts,
@@ -1223,6 +1225,7 @@ const endedOf = (rows: [string, number | null, number | null][]): Ended[] =>
     split: null,
     plan: 'unread',
     cycles: 0,
+    phaseMs: {},
   }))
 const recentBoard = (recent: Ended[], extra: Parameters<typeof buildBoard>[4] = {}) =>
   buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { recent, ...extra })
@@ -1315,6 +1318,84 @@ test("a run's time splits into savor, cycles and ship cells by the at lines, not
   expect(phaseSplit(stamped(relaunched))).toEqual({ savor: 1, cycles: 4, ship: 1 })
   // A file with no at lines has no times.
   expect(phaseSplit(PHASED.map(([, line]) => line).join('\n'))).toBe(null)
+})
+
+test("each phase's time comes from the at lines, and a relaunch's wait counts in no phase", () => {
+  expect(phaseDurations(stamped(PHASED))).toEqual({
+    savor: 10 * 60000,
+    'cycle 1': 20 * 60000,
+    simplify: 15 * 60000,
+    'review xhigh': 5 * 60000,
+    shipping: 10 * 60000,
+  })
+  const relaunched: [number, string][] = [
+    [0, 'slot: 1'],
+    [0, 'skill: sittings:savor launch /w/b.md'],
+    [10, 'savored: session 0 handed over'],
+    [30, 'kind: decision'],
+    [30, 'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($5.00, 30 min)'],
+    [150, 'slot: 1'],
+    [160, 'skill: commit-skill:ship'],
+    [170, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
+  ]
+  expect(phaseDurations(stamped(relaunched))).toEqual({ savor: 10 * 60000, 'cycle 1': 30 * 60000, shipping: 10 * 60000 })
+  expect(phaseDurations(PHASED.map(([, line]) => line).join('\n'))).toEqual({})
+})
+
+test('the live phase starts at the line that opened it, or at the latest launch when that is later', () => {
+  const cycleTwo: [number, string][] = [
+    [0, 'slot: 1'],
+    [0, 'skill: sittings:savor launch /w/b.md'],
+    [10, 'savored: session 0 handed over'],
+    [20, 'skill: commit-skill:commit cycle 1: the reader'],
+    [25, 'skill: code-review low git diff a b'],
+    [31, 'bash: npm run check:cycle'],
+  ]
+  expect(phaseSince(stamped(cycleTwo), 3)).toBe(T0 + 25 * 60000)
+  // The run stops in cycle 2 and is relaunched: the clock restarts at the new slot line.
+  const relaunched: [number, string][] = [...cycleTwo, [40, 'finished: stopped: read the handoff. ($5.00, 40 min)'], [90, 'slot: 2'], [95, 'bash: npm test']]
+  expect(phaseSince(stamped(relaunched), 3)).toBe(T0 + 90 * 60000)
+  // No stamps, no clock.
+  expect(phaseSince(cycleTwo.map(([, line]) => line).join('\n'), 3)).toBe(null)
+})
+
+// S692 started 16:34; cycle 1 opened at 16:40, so at 16:49:25 it is 9m in.
+const S692_IN_CYCLE_ONE = {
+  [`${BRIEFS}s692-design-tokens.md`]: [
+    'at: 2026-10-31T16:34:00Z',
+    'skill: sittings:savor launch /w/b.md',
+    'at: 2026-10-31T16:40:00Z',
+    'savored: session 0 handed over',
+    'at: 2026-10-31T16:45:00Z',
+    'bash: npm test',
+  ].join('\n'),
+}
+// RECENT with one run per figure, each spending that many minutes in cycle 1.
+const recentWithCycles = (minutes: number[]): Ended[] =>
+  endedOf(minutes.map((_, i): [string, number, number] => [`S60${i}`, 60, 10])).map((d, i) => ({
+    ...d,
+    phaseMs: { 'cycle 1': (minutes[i] ?? 0) * 60000 },
+  }))
+const phaseClockBoard = (recent: Ended[]) =>
+  buildBoard(S684_STATUS, S692_IN_CYCLE_ONE, new Set([1, 11]), NOW, { cycles: { [`${BRIEFS}s692-design-tokens.md`]: 3 }, recent })
+
+test("the running card's header shows time in phase before the total, peach under the phase's median", async ($, on) => {
+  const { ui } = await mountBoard($, on, phaseClockBoard(recentWithCycles([12, 20, 30])))
+  expect(await coloursOf(ui, '9m')).toEqual(['#f5a97f'])
+  expect(await has(ui, '9m · 15m │ $10.63')).toBe(true)
+  await ui.unmount()
+})
+
+test("the time in phase turns red past the phase's median", async ($, on) => {
+  const { ui } = await mountBoard($, on, phaseClockBoard(recentWithCycles([4, 6, 8])))
+  expect(await coloursOf(ui, '9m')).toEqual(['#ed8796'])
+  await ui.unmount()
+})
+
+test('with no recent run timing the phase, the time in phase stays peach', async ($, on) => {
+  const { ui } = await mountBoard($, on, phaseClockBoard([]))
+  expect(await coloursOf(ui, '9m')).toEqual(['#f5a97f'])
+  await ui.unmount()
 })
 
 test('recent draws each run as a phase split, and a file with no times as the grey baseline', async ($, on) => {
