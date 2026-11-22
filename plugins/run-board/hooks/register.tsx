@@ -343,6 +343,7 @@ async function readEndings(
   dir: string,
   raw: RawStatus,
   onMain: readonly string[],
+  archived: readonly string[],
 ): Promise<{ recent: Ended[]; endings: Ending[]; mtimes: Map<string, number> }> {
   const files = (await $.fs.list(dir).catch(() => []))
     .filter(e => e.kind === 'file')
@@ -361,7 +362,7 @@ async function readEndings(
     texts.push({ ...f, text: hit.text })
   }
   return {
-    recent: recentOf(texts, raw.finished),
+    recent: recentOf(texts, raw.finished, new Set(archived)),
     endings: texts.map(t => ({ base: t.name.replace(/\.progress$/, ''), text: t.text, mtimeMs: t.mtimeMs })),
     mtimes: new Map(files.map(f => [f.name, f.mtimeMs])),
   }
@@ -481,9 +482,15 @@ async function blobText($: EngineInterface, cwd: string, sha: string, next: Map<
 // and the epics card its sitting to the end.
 const cyclesCache = new Map<string, { cycles?: number; epic?: string }>()
 
-// The last listing's cycles, epics, recorded epics and plan titles, which a
+// The last listing's cycles, epics, recorded epics, archived sittings and plan titles, which a
 // poll whose listing fails draws again.
-let lastRead: Pick<BriefsRead, 'cycles' | 'epics' | 'recordedEpics' | 'planTitles'> = { cycles: {}, epics: {}, recordedEpics: {}, planTitles: {} }
+let lastRead: Pick<BriefsRead, 'cycles' | 'epics' | 'recordedEpics' | 'archived' | 'planTitles'> = {
+  cycles: {},
+  epics: {},
+  recordedEpics: {},
+  archived: [],
+  planTitles: {},
+}
 
 /**
  * The briefs on deck, each brief's cycle count and epic, the epics
@@ -492,7 +499,7 @@ let lastRead: Pick<BriefsRead, 'cycles' | 'epics' | 'recordedEpics' | 'planTitle
  * Each blob the listing names is read at once, and a running brief that has
  * left the listing, or whose brief blob could not be read, reads its cycles
  * and epic from `cyclesCache`. A failed listing reads no deck and gives the
- * last listing's cycles, epics, recorded epics and plan titles.
+ * last listing's cycles, epics, recorded epics, archived sittings and plan titles.
  */
 async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Promise<BriefsRead> {
   const cwd = `${home}/${REPO}`
@@ -507,6 +514,7 @@ async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Pro
       splits: {},
       epics: { ...lastRead.epics },
       recordedEpics: lastRead.recordedEpics,
+      archived: lastRead.archived,
       planTitles: lastRead.planTitles,
     }
     for (const k of keys) {
@@ -537,7 +545,7 @@ async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Pro
     else if (kept.epic !== undefined) read.epics[k] = kept.epic
     cyclesCache.set(k, kept)
   }
-  lastRead = { cycles: read.cycles, epics: read.epics, recordedEpics: read.recordedEpics, planTitles: read.planTitles }
+  lastRead = { cycles: read.cycles, epics: read.epics, recordedEpics: read.recordedEpics, archived: read.archived, planTitles: read.planTitles }
   return read
 }
 
@@ -553,8 +561,8 @@ async function poll($: EngineInterface): Promise<void> {
   const status = text === undefined ? null : parseStatus(text)
   const loop = await readLoop($, home).catch(() => null)
   const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
-  const { onDeck, cycles, afters, splits, epics, recordedEpics, planTitles } = await readBriefs($, home, raw).catch(
-    (): BriefsRead => ({ onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, planTitles: {} }),
+  const { onDeck, cycles, afters, splits, epics, recordedEpics, archived, planTitles } = await readBriefs($, home, raw).catch(
+    (): BriefsRead => ({ onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, archived: [], planTitles: {} }),
   )
   if (status === null && loop === null && onDeck.length === 0) {
     await update($, board, () => null)
@@ -569,7 +577,7 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const { recent, endings, mtimes } = await readEndings($, dir, raw, Object.keys(afters)).catch(() => ({
+  const { recent, endings, mtimes } = await readEndings($, dir, raw, Object.keys(afters), archived).catch(() => ({
     recent: [] as Ended[],
     endings: [] as Ending[],
     mtimes: new Map<string, number>(),

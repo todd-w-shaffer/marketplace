@@ -93,7 +93,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   the time column, the total cost, bold, under the cost column, and `+ $81 plan`. The median and the time read only
   runs with minutes; the cost sums the unrounded costs, then rounds,
   so it can differ from the rows' sum. A stop and a `shipped; deploy failed` run are left
-  out: they belong to BLOCKED. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
+  out: they belong to BLOCKED, unless the sitting's claim in `docs/briefs/sittings.json` records an `archived` day: a run
+  finished by hand after it stopped reads `rescued`, with the stopped run's time and cost. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
   outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
   group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow

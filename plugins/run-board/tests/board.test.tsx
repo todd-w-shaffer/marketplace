@@ -66,6 +66,7 @@ import {
   planBlobs,
   planHeadings,
   recordedEpics,
+  archivedSittings,
   shortDollars,
   sparkGlyphs,
 } from '../hooks/board'
@@ -510,6 +511,31 @@ test('recent reads the last finished line of each sitting, newest first, and ski
   expect(recent.map(d => `${d.sitting}${laneTag(d)}:${d.endedMs}`)).toEqual(['S337 (epic):40'])
   expect(recent[0]?.detail).toBe('shipped · 1h48m · $32.71 · peak 360k · run 41585826609')
   expect(recent.map(d => [d.minutes, d.usd])).toEqual([[108, 32.71]])
+})
+
+test('a stopped run whose claim records an archive reads as rescued in RECENT', () => {
+  const claims = sittingsClaims(
+    JSON.stringify({
+      claims: {
+        s721: { slug: 'landing-outcomes', at: '2026-11-22T13:39:09Z', record: { archived: '2026-11-22', finishes: [] } },
+        s722: { slug: 'step-up-controls', at: '2026-11-22T14:00:00Z' },
+      },
+    }),
+  )
+  expect(archivedSittings(claims)).toEqual(['S721'])
+  const stop = 'kind: run-broke\nfinished: stopped: the brief is still in docs/briefs. Read the handoff. ($26.47, 70 min, peak 254k context)'
+  const recent = recentOf(
+    [
+      { name: 'kickoff-sitting-s721-landing-outcomes.progress', mtimeMs: 20, text: stop },
+      { name: 'kickoff-sitting-s722-step-up-controls.progress', mtimeMs: 30, text: stop },
+    ],
+    [],
+    new Set(archivedSittings(claims)),
+  )
+  // S722 has no archive record, so its stop still belongs to BLOCKED.
+  expect(recent.map(d => d.sitting)).toEqual(['S721'])
+  expect(recent[0]?.detail).toBe('rescued · 1h10m · $26.47 · peak 254k')
+  expect(recent.map(d => [d.minutes, d.usd])).toEqual([[70, 26.47]])
 })
 
 test('a short age reads in minutes, then hours, then days', async () => {

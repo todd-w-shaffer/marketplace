@@ -1360,6 +1360,18 @@ export function recordedEpics(claims: Readonly<Record<string, unknown>>): Record
   return out
 }
 
+/**
+ * The sittings whose claim in `sittings.json` holds a record with an
+ * `archived` day: scripts/record-sitting.sh writes it once the archive is on
+ * `origin/main`. A run that stopped and was finished by hand has one, though
+ * its progress file still ends on the stop. `claims` is `sittingsClaims`' answer.
+ */
+export function archivedSittings(claims: Readonly<Record<string, unknown>>): string[] {
+  return Object.entries(claims).flatMap(([id, claim]) =>
+    typeof obj(obj(claim)?.record)?.archived === 'string' ? [afterSittings(id)[0] ?? id] : [],
+  )
+}
+
 /** The plan files among a listing's blobs: `docs/plans/dashboard.md` is the plan `dashboard`. */
 export function planBlobs(blobs: readonly TreeBlob[]): { plan: string; sha: string }[] {
   return blobs.flatMap(({ path, sha }) => {
@@ -1435,6 +1447,8 @@ export type BriefsRead = {
   /** Each brief's `Epic:` value by its key; a brief that names none is absent. */
   epics: Record<string, string>
   recordedEpics: Record<string, string>
+  /** `archivedSittings`' answer. */
+  archived: string[]
   planTitles: Record<string, Record<string, string>>
 }
 
@@ -1499,6 +1513,7 @@ export function briefsRead(
     splits: splitCounts(briefs, claims),
     epics,
     recordedEpics: recordedEpics(claims),
+    archived: archivedSittings(claims),
     planTitles,
   }
 }
@@ -1825,7 +1840,9 @@ export function recentCandidates(files: readonly ProgressFile[], running: readon
 /**
  * The newest sittings live in production, one each, from their progress
  * files' last `finished:` line. A stop and a red deploy are left out: they
- * belong to BLOCKED. These files outlive the dispatcher, whose finished list
+ * belong to BLOCKED. A run that did not go live but whose sitting is in
+ * `archived` was finished by hand: it is listed as `rescued`, with the
+ * totals of the run that stopped. These files outlive the dispatcher, whose finished list
  * starts empty each time one starts. The lane comes from that list while it
  * still holds the run, and the cycle count from `namedCycles`: an archived
  * brief has left docs/briefs/, so no brief is read.
@@ -1833,19 +1850,22 @@ export function recentCandidates(files: readonly ProgressFile[], running: readon
 export function recentOf(
   files: readonly (ProgressFile & { text: string })[],
   finished: RawStatus['finished'],
+  archived: ReadonlySet<string> = new Set(),
 ): Ended[] {
   const laneOf = new Map<string, string>()
   for (const f of [...finished].sort((a, b) => a.entry - b.entry)) laneOf.set(baseName(f.brief), f.lane)
   const out: Ended[] = []
   for (const f of [...files].sort((a, b) => b.mtimeMs - a.mtimeMs)) {
     const end = lastEnd(f.text)
-    if (end === null || !end.isLive) continue
+    if (end === null) continue
     const base = f.name.replace(/\.progress$/, '')
+    const sitting = sittingOf(base)
+    if (!end.isLive && !archived.has(sitting.sitting)) continue
     const totals = TOTALS.exec(end.outcome)
     out.push({
-      ...sittingOf(base),
+      ...sitting,
       lane: laneOf.get(base) ?? '',
-      detail: outcomeDetail(end.outcome),
+      detail: outcomeDetail(end.isLive ? end.outcome : `rescued${totals?.[0] ?? ''}`),
       minutes: totals === null ? null : Number(totals[2]),
       usd: totals === null ? null : Number(totals[1]),
       endedMs: f.mtimeMs,
