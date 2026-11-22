@@ -2259,8 +2259,11 @@ export function ago(fromMs: number, toMs: number): string {
 }
 
 // The totals `scripts/autopilot.sh` ends an outcome with:
-// ` ($27.53, 158 min)`, or ` ($27.53, 158 min, peak 385k context)`.
-const TOTALS = /\s*\(\$([0-9]+(?:\.[0-9]+)?), ([0-9]+) min(?:, peak ([0-9]+k) context)?\)$/
+// ` ($27.53, 158 min)`, or ` ($27.53, 158 min, peak 385k context)`, then an
+// optional effort clause: `, effort medium`, `, effort medium-high, agents
+// low-xhigh`, or `, effort unknown` when no transcript named a level.
+const TOTALS =
+  /\s*\(\$([0-9]+(?:\.[0-9]+)?), ([0-9]+) min(?:, peak ([0-9]+k) context)?(?:, effort ([a-z]+(?:-[a-z]+)?)(?:, agents ([a-z]+(?:-[a-z]+)?))?)?\)$/
 // A ship, and the launcher's migration clause when it applied a brief's one
 // migration: `; Migrate Production applied migrations/0050_<slug>.sql (run N)`.
 const SHIPPED =
@@ -2283,6 +2286,8 @@ export function outcomeDetail(outcome: string): string {
   if (m !== null) {
     parts.push(hoursMinutes(Number(m[2])), `$${m[1]}`)
     if (m[3] !== undefined) parts.push(`peak ${m[3]}`)
+    if (m[4] !== undefined) parts.push(`effort ${m[4]}`)
+    if (m[5] !== undefined) parts.push(`agents ${m[5]}`)
   }
   if (run !== null) parts.push(`run ${run[1]}`)
   if (run?.[2] !== undefined) parts.push(`migrated ${run[2]}`)

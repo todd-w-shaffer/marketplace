@@ -472,6 +472,15 @@ test('an outcome reads as one detail line, outcome then time then cost', async (
     ),
   ).toBe('shipped · 1h03m · $13.98 · peak 194k · run 41751690490 · migrated 0050')
   expect(outcomeDetail('stopped at review. ($4.10, 7 min)')).toBe('stopped at review. · 7m · $4.10')
+  expect(
+    outcomeDetail('stopped at review. ($15.21, 47 min, peak 159k context, effort medium-high, agents low-xhigh)'),
+  ).toBe('stopped at review. · 47m · $15.21 · peak 159k · effort medium-high · agents low-xhigh')
+  expect(outcomeDetail('stopped at review. ($15.21, 47 min, peak 159k context, effort medium)')).toBe(
+    'stopped at review. · 47m · $15.21 · peak 159k · effort medium',
+  )
+  expect(outcomeDetail('stopped at review. ($15.21, 47 min, effort unknown)')).toBe(
+    'stopped at review. · 47m · $15.21 · effort unknown',
+  )
   expect(outcomeDetail('main has commits origin/main does not. Push or drop them first.')).toBe(
     'main has commits origin/main does not. Push or drop them first.',
   )
