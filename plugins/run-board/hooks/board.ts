@@ -1507,14 +1507,14 @@ export function briefsRead(
 export const afterSittings = (after: string): string[] => [...after.matchAll(/\bs(\d+)\b/gi)].map(m => `S${m[1] ?? ''}`)
 
 /**
- * `held · S518 shares CLAUDE.md` for a dispatcher reason that holds an entry
+ * `held · S518` for a dispatcher reason that holds an entry
  * off a run touching the same paths, or null for any other reason. If
  * dispatch.sh changes its `<brief> <where>: both touch <paths>` reason, update
  * this pattern.
  */
 export function heldNote(reason: string): string | null {
-  const m = /\bs(\d+)-[\w-]*.*?: both touch (.+)$/i.exec(reason)
-  return m === null ? null : `held · S${m[1] ?? ''} shares ${m[2] ?? ''}`
+  const m = /\bs(\d+)-[\w-]*.*?: both touch .+$/i.exec(reason)
+  return m === null ? null : `held · S${m[1] ?? ''}`
 }
 
 /** One row of the queue drawn as a tree. */

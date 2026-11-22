@@ -647,7 +647,7 @@ test('an entry held off a run that shares its paths is a root tagged held, not a
     waits(11, 'S523', 'epic', [], 'kickoff-sitting-s519-device-lab-simulator (pid 4242): both touch package.json, docs/e2e-testing.md'),
   ]
   const rows = queueTree([], queued, [])
-  expect(drawn(rows)).toEqual(['S522 held · S518 shares CLAUDE.md', 'S523 held · S519 shares package.json, docs/e2e-testing.md'])
+  expect(drawn(rows)).toEqual(['S522 held · S518', 'S523 held · S519'])
   expect(rows.map(r => r.kind)).toEqual(['held', 'held'])
 })
 
