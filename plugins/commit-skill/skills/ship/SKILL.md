@@ -38,7 +38,9 @@ Check `git status` for uncommitted changes.
 - **Upstream:** `git push`.
 - **Straight to the default branch:** check `git merge-base --is-ancestor origin/<default> HEAD`.
   If it fails, run `git pull --rebase origin <default>` once; a conflict STOPs the ship. Then
-  `git push origin HEAD:<default>`.
+  `git push origin HEAD:<default>`. Run each step as its own call, after the one before it answers.
+  A project that defines `push:checked` (below) skips the check and the pull: that script rebases
+  onto the remote's tip under its own lock.
 - **New branch:** `git push -u origin HEAD`. This publishes the branch and sets its upstream. It
   never touches the default branch, and opening a PR is left to the user.
 
