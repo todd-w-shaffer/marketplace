@@ -724,13 +724,13 @@ test('a brief key is the queue path, and a directory brief is its directory', as
 })
 
 test('the header stops at the first heading', async () => {
-  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', mode: 'ready', why: '', splitFrom: [] })
-  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', mode: 'enrich', why: '', splitFrom: [] })
+  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', mode: 'ready', splitFrom: [] })
+  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', mode: 'enrich', splitFrom: [] })
 })
 
-test('an interactive brief says why it needs a person', async () => {
+test('an interactive brief reads as needs you', async () => {
   const text = '# x\n\n**Mode: interactive.** Removes a wrangler.toml line.\n\n## y\n**Mode: autopilot.**'
-  expect(briefHeader(text)).toEqual({ epic: '', after: '', mode: 'interactive', why: 'Removes a wrangler.toml line.', splitFrom: [] })
+  expect(briefHeader(text)).toEqual({ epic: '', after: '', mode: 'interactive', splitFrom: [] })
 })
 
 test('an After line names its sittings', async () => {
@@ -830,7 +830,7 @@ test('on deck lists unheld briefs by sitting, epic lane from the Epic line', asy
   expect(onDeckOf(briefs, ['docs/briefs/s350-split-work/README.md']).some(d => d.sitting === 'S350')).toBe(false)
 })
 
-const deckOf = (sitting: string, mode: Deck['mode'], after = '', why = ''): Deck => ({ sitting, slug: sitting.toLowerCase(), lane: 'fix', epic: '', after, mode, why })
+const deckOf = (sitting: string, mode: Deck['mode'], after = ''): Deck => ({ sitting, slug: sitting.toLowerCase(), lane: 'fix', epic: '', after, mode })
 const deckDrawn = (rows: ReturnType<typeof deckTree>) =>
   rows.map(r => `${r.rails}${r.joint}${r.kind === 'group' ? r.slug : r.sitting} ${[r.wait === '' ? '' : `after ${r.wait}`, r.note].filter(x => x !== '').join(' · ')}`.trimEnd())
 
@@ -842,8 +842,8 @@ test('on deck draws as a tree under ready, enrich and needs you, each brief unde
     deckOf('S473', 'ready', 'S470, S471'),
     deckOf('S472', 'enrich', 'S470, S471, S475'),
     deckOf('S474', 'enrich'),
-    deckOf('S435', 'interactive', 'S470', 'Todd records the probe answers.'),
-    deckOf('S436', 'interactive', 'S429, S434', 'Removes a wrangler.toml line.'),
+    deckOf('S435', 'interactive', 'S470'),
+    deckOf('S436', 'interactive', 'S429, S434'),
   ]
   // S434 is running, S475 is queued one deep, S429 has shipped. Each row names
   // only its nearest wait, and none under the parent the tree draws.
@@ -858,8 +858,8 @@ test('on deck draws as a tree under ready, enrich and needs you, each brief unde
     '├╌S472 after S471',
     '└╌S474',
     'needs you 2',
-    '├╌S435 after S470 · Todd records the probe answers.',
-    '└╌S436 after S434 · Removes a wrangler.toml line.',
+    '├╌S435 after S470',
+    '└╌S436 after S434',
   ])
   expect(deckTree(deck, new Map(), new Set()).filter(r => r.kind === 'group').map(r => r.mode)).toEqual(['ready', 'enrich', 'interactive'])
 })
@@ -912,7 +912,7 @@ const S625_ENDINGS = [
   { base: 'kickoff-sitting-s625-gallery-arrange-doors', text: S625_PROGRESS, mtimeMs: 20 },
   { base: 'kickoff-sitting-s626-gallery-arrange-page', text: 'finished: refused: S625 stopped before it shipped (stopped: the brief is still in docs/briefs. Read the handoff.).', mtimeMs: 21 },
 ]
-const heldDeck = (sitting: string, slug: string): Deck => ({ sitting, slug, lane: 'epic', epic: 'gallery', after: '', mode: 'ready', why: '' })
+const heldDeck = (sitting: string, slug: string): Deck => ({ sitting, slug, lane: 'epic', epic: 'gallery', after: '', mode: 'ready' })
 
 test("S625's decision stop is one block that holds S626 and S627, which leave on deck", async () => {
   const b = buildBoard(S625_STATUS, {}, new Set([927]), NOW, {

@@ -116,8 +116,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   the brief its `After:` line names that sits deepest in the group, and otherwise dashed under the heading. Its note
   names one wait, the nearest: of the named sittings still on deck, queued or running, the one that sits deepest
   across the queue and on deck, a tie going to the brief's tree parent. A brief under that parent names no wait, and
-  a queued wait's sitting reads in blue. Then the epic, and for `needs you` the text after the marker, which says
-  why: `└╌◇ S436 retire-held-path  after S434 · Removes a wrangler.toml line.`
+  a queued wait's sitting reads in blue. Then the epic: `└╌◇ S436 retire-held-path  after S434`.
   `/board` again closes it.
 - **BLOCKED.** A red-bordered card above the timeline and the running cards, drawn only when something is stuck: one block per root cause,
   the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or

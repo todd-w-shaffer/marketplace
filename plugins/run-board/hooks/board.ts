@@ -1547,15 +1547,13 @@ export function briefKey(path: string): string {
 /**
  * The header lines above a brief's first `## ` heading that the board reads.
  * The mode is `ready` for a brief marked `**Mode: autopilot.**`, `interactive`
- * for one marked `**Mode: interactive.**`, whose `why` is the text after the
- * marker, and `enrich` for a brief that carries neither yet. `splitFrom` is
+ * for one marked `**Mode: interactive.**`, and `enrich` for a brief that carries neither yet. `splitFrom` is
  * the sittings its `Split from:` line names.
  */
 export function briefHeader(text: string): BriefHeader {
   let epic = ''
   let after = ''
   let mode: DeckMode = 'enrich'
-  let why = ''
   let splitFrom: string[] = []
   for (const line of text.split('\n')) {
     if (line.startsWith('## ')) break
@@ -1566,19 +1564,15 @@ export function briefHeader(text: string): BriefHeader {
     const s = /^Split from: (.+)$/.exec(line)
     if (s) splitFrom = afterSittings(s[1] ?? '')
     if (line.includes('**Mode: autopilot.**')) mode = 'ready'
-    const i = line.indexOf(INTERACTIVE)
-    if (i !== -1) {
-      mode = 'interactive'
-      why = line.slice(i + INTERACTIVE.length).trim()
-    }
+    if (line.includes(INTERACTIVE)) mode = 'interactive'
   }
-  return { epic, after, mode, why, splitFrom }
+  return { epic, after, mode, splitFrom }
 }
 
 const INTERACTIVE = '**Mode: interactive.**'
 
 /** A brief's header lines as `briefHeader` reads them. */
-export type BriefHeader = { epic: string; after: string; mode: DeckMode; why: string; splitFrom: string[] }
+export type BriefHeader = { epic: string; after: string; mode: DeckMode; splitFrom: string[] }
 
 /** A brief on `origin/main`: its path and its header, read once. */
 export type HeadedBrief = { path: string; header: BriefHeader }
@@ -1638,8 +1632,8 @@ export function onDeckOf(briefs: readonly HeadedBrief[], held: readonly string[]
   return briefs
     .filter(b => !taken.has(briefKey(b.path)))
     .map(b => {
-      const { epic, after, mode, why } = b.header
-      return { ...briefName(briefKey(b.path)), lane: epic === '' ? 'fix' : 'epic', epic, after, mode, why }
+      const { epic, after, mode } = b.header
+      return { ...briefName(briefKey(b.path)), lane: epic === '' ? 'fix' : 'epic', epic, after, mode }
     })
     .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
 }
@@ -2026,7 +2020,7 @@ export type DeckRow = {
   wait: string
   /** Whether `wait` is queued. */
   isWaitQueued: boolean
-  /** At a group, how many briefs it holds. At a brief, its epic, then why it needs a person. */
+  /** At a group, how many briefs it holds. At a brief, its epic. */
   note: string
 }
 
@@ -2069,7 +2063,7 @@ export function deckTree(deck: readonly Deck[], live: ReadonlyMap<string, number
     }
     return best === null || best === parent ? '' : best
   }
-  const note = (d: Deck): string => [d.epic, d.why].filter(x => x !== '').join(' · ')
+  const note = (d: Deck): string => d.epic
 
   const rows: DeckRow[] = []
   for (const g of DECK_GROUPS) {

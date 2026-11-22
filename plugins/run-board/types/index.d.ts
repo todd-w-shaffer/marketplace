@@ -140,8 +140,6 @@ export type Deck = {
   after: string
   /** `ready`: marked `**Mode: autopilot.**`. `interactive`: marked `**Mode: interactive.**`. `enrich`: neither yet. */
   mode: DeckMode
-  /** The text after `**Mode: interactive.**`: why the brief needs a person. Empty otherwise. */
-  why: string
 }
 
 export type DeckMode = 'ready' | 'enrich' | 'interactive'
