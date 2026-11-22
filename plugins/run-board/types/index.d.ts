@@ -14,6 +14,8 @@ export type Run = {
   phaseSinceMs: number | null
   /** The live phase's median over RECENT in milliseconds, or null when no recent run timed it. */
   phaseMedianMs: number | null
+  /** How far the live phase has come, 0 to 1, from the run's log, or null when no phase is live or the log was not read. */
+  fill: number | null
   isAlive: boolean
 }
 

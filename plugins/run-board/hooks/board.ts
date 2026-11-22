@@ -522,22 +522,249 @@ export function phaseLine(r: Run): string {
 export const miniBar = (phases: readonly Phase[]): string =>
   `${phases.map(p => (p.state === 'done' ? '⣿' : p.state === 'live' ? '⣤' : '⣀')).join('')}⡇`
 
-// A block in flight tapers from full to the baseline, so it reads as filling.
-const LIVE_TAPER = '⣿⣿⣷⣦⣤⣀'
+// The steps a cell climbs from the baseline to full.
+const FILL_LEVELS = ['⣀', '⣤', '⣶', '⣿']
+const FILL_STEPS = FILL_LEVELS.length - 1
 
 /**
  * A phase's block in the pane's bar, `width` cells of braille: full when
- * done, tapering when in flight, the `⣀` baseline when still to come.
+ * done, the `⣀` baseline when still to come. A block in flight fills from
+ * the left to `fill`, a fraction of 0 to 1, in FILL_STEPS steps a cell. It
+ * shows at least one step and stops one step short of full, so a live block
+ * never reads as not started or as done.
  */
-export function phaseGlyphs(state: PhaseState, width: number): string {
+export function phaseGlyphs(state: PhaseState, width: number, fill = 0): string {
   if (state === 'done') return '⣿'.repeat(width)
   if (state === 'todo') return '⣀'.repeat(width)
-  if (width >= LIVE_TAPER.length) return LIVE_TAPER + '⣀'.repeat(width - LIVE_TAPER.length)
-  // A narrow block samples the taper without its baseline end, so it never
-  // ends on the dot a phase still to come draws.
-  const core = LIVE_TAPER.slice(0, -1)
-  const step = (core.length - 1) / Math.max(1, width - 1)
-  return Array.from({ length: width }, (_, i) => core[Math.round(i * step)] ?? '⣤').join('')
+  const steps = width * FILL_STEPS
+  const lit = Math.min(steps - 1, Math.max(1, Math.round(fill * steps)))
+  return Array.from({ length: width }, (_, i) => FILL_LEVELS[Math.min(FILL_STEPS, Math.max(0, lit - i * FILL_STEPS))]).join('')
+}
+
+// The marks the phase fill reads from a run's stream-json log, one `grep -oE`
+// alternative each: a tool call's id and name; the first field of its input;
+// a Skill call's name and the start of its args; a task's start, progress or
+// end, with the tool call it belongs to; a task's type; a tool result; and
+// the agent a nested event belongs to. Each match stops at a quote, so a mark
+// never runs into the large fields that follow.
+export const LOG_MARKS = [
+  '"type":"tool_use","id":"[^"]+","name":"[^"]+"',
+  '"input":\\{"(command|description|file_path|skill)":"[^"]{0,80}',
+  '"skill":"[^"]+","args":"[^"]{0,24}',
+  '"subtype":"task_(started|progress|notification)","task_id":"[^"]+",("run_id":"[^"]+",)?"tool_use_id":"[^"]+"',
+  '"task_type":"[a-z_]+"',
+  '"tool_use_id":"[^"]+","type":"tool_result"',
+  '"parent_tool_use_id":"[^"]+"',
+].join('|')
+
+// How many of the newest marks the board reads. A phase's opener sits within
+// a few thousand marks of the end, and the output stays under the 4 MiB cap.
+export const LOG_MARK_LINES = 8000
+
+/** One event of a run's log that the phase fill reads, in log order. */
+export type LogEvent =
+  | { kind: 'use'; id: string; name: string; detail: string; skill: string; args: string; nested: boolean }
+  | { kind: 'task'; step: 'started' | 'progress' | 'notification'; id: string; agent: boolean }
+  | { kind: 'result'; id: string }
+
+/**
+ * The events in `grep -noE LOG_MARKS` output, in log order. The marks of one
+ * log line describe one event, so they are read together: an input or a
+ * Skill's args belongs to the tool call before it on the line, a task type
+ * to the task, and a parent id nests every tool call on the line. A line
+ * that is no mark, such as one `tail` cut, is skipped.
+ */
+export function logEventsOf(marks: string): LogEvent[] {
+  const lines = new Map<string, string[]>()
+  for (const line of marks.split('\n')) {
+    const m = /^(\d+):(.*)$/.exec(line)
+    if (m) (lines.get(m[1] ?? '') ?? lines.set(m[1] ?? '', []).get(m[1] ?? ''))?.push(m[2] ?? '')
+  }
+  const out: LogEvent[] = []
+  for (const group of lines.values()) {
+    const nested = group.some(g => g.startsWith('"parent_tool_use_id":'))
+    const agent = group.some(g => g === '"task_type":"local_agent"')
+    let use: Extract<LogEvent, { kind: 'use' }> | null = null
+    for (const g of group) {
+      const call = /^"type":"tool_use","id":"([^"]+)","name":"([^"]+)"$/.exec(g)
+      const input = /^"input":\{"([a-z_]+)":"(.*)$/.exec(g)
+      const skill = /^"skill":"([^"]+)","args":"(.*)$/.exec(g)
+      const task = /^"subtype":"task_(started|progress|notification)",.*"tool_use_id":"([^"]+)"$/.exec(g)
+      const result = /^"tool_use_id":"([^"]+)","type":"tool_result"$/.exec(g)
+      if (call) {
+        use = { kind: 'use', id: call[1] ?? '', name: call[2] ?? '', detail: '', skill: '', args: '', nested }
+        out.push(use)
+      } else if (input && use !== null) {
+        use.detail = input[2] ?? ''
+        if (input[1] === 'skill') use.skill = use.detail
+      } else if (skill && use !== null) {
+        use.skill = skill[1] ?? ''
+        use.args = skill[2] ?? ''
+      } else if (task) {
+        const step = task[1] as 'started' | 'progress' | 'notification'
+        out.push({ kind: 'task', step, id: task[2] ?? '', agent: step === 'started' && agent })
+      } else if (result) out.push({ kind: 'result', id: result[1] ?? '' })
+    }
+  }
+  return out
+}
+
+// How many tool calls close about two thirds of the gap to the next checkpoint.
+const CREEP_CALLS = 20
+// The most a live phase fills.
+const FILL_CAP = 0.95
+
+type FillContext = { opener: string; last: string }
+type Checkpoint = { at: number; hit: (e: LogEvent, c: FillContext) => boolean }
+type FillSpec = {
+  /** The index of the event that opens the phase, or -1 for the log's start. */
+  opener: (events: readonly LogEvent[]) => number
+  /** The span the phase's agents fill, by how many of them are back, before any checkpoint. */
+  fanOut?: [number, number]
+  checkpoints: Checkpoint[]
+}
+
+const topUse = (e: LogEvent, name?: string): e is Extract<LogEvent, { kind: 'use' }> =>
+  e.kind === 'use' && !e.nested && (name === undefined || e.name === name)
+const skillUse = (e: LogEvent, skill: string, args = ''): boolean => topUse(e, 'Skill') && e.skill === skill && e.args.startsWith(args)
+const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+const edited = (e: LogEvent): boolean => topUse(e) && EDITS.has(e.name)
+// A Bash call that runs a build or a suite, by the start of its command.
+const BUILD = /\b(check|test|tests|vitest|vt\.sh|door\.sh|build|lint|typecheck)\b/i
+const built = (e: LogEvent): boolean => topUse(e, 'Bash') && BUILD.test(e.detail)
+const committed = (e: LogEvent): boolean => skillUse(e, 'commit-skill:commit')
+const shipped = (e: LogEvent): boolean => skillUse(e, 'commit-skill:ship')
+/** Whether `e` ends the tool call `id`: its result, or its task's end. */
+const ends = (e: LogEvent, id: string): boolean =>
+  id !== '' && e.id === id && (e.kind === 'result' || (e.kind === 'task' && e.step === 'notification'))
+
+const reviewLow = (e: LogEvent): boolean => skillUse(e, 'code-review', 'low')
+const reviewXhigh = (e: LogEvent): boolean => skillUse(e, 'code-review', 'xhigh')
+
+/** The first event after `from` that `f` matches, or -1. */
+const firstAfter = (events: readonly LogEvent[], from: number, f: (e: LogEvent) => boolean): number => {
+  const i = events.findIndex((e, k) => k > from && f(e))
+  return i
+}
+
+/**
+ * Where each phase opens in the log and what it passes on the way. A cycle
+ * opens at the last `code-review low`, or at the savor's commit before the
+ * first review, and passes its first edit, a build and its commit. The
+ * savor and simplify fill by their agents first. The xhigh review is one
+ * forked task, so its own tool calls carry it to its end. The ship ends when
+ * its forked `/ship` does, and the archive passes its commit and its push.
+ */
+function fillSpec(label: string): FillSpec {
+  if (label === 'savor')
+    return { opener: es => es.findIndex(e => skillUse(e, 'sittings:savor')), fanOut: [0.05, 0.75], checkpoints: [{ at: 0.9, hit: committed }] }
+  if (label.startsWith('cycle '))
+    return {
+      opener: es => {
+        const review = es.findLastIndex(reviewLow)
+        if (review !== -1) return review
+        const savor = es.findIndex(e => skillUse(e, 'sittings:savor'))
+        return savor === -1 ? -1 : firstAfter(es, savor, committed)
+      },
+      checkpoints: [
+        { at: 0.2, hit: edited },
+        { at: 0.5, hit: built },
+        { at: 0.8, hit: committed },
+      ],
+    }
+  if (label === 'simplify')
+    return {
+      opener: es => {
+        const at = es.findLastIndex(e => skillUse(e, 'simplify'))
+        return at !== -1 ? at : es.findLastIndex(reviewLow)
+      },
+      fanOut: [0.05, 0.55],
+      checkpoints: [
+        { at: 0.65, hit: edited },
+        { at: 0.75, hit: built },
+        { at: 0.9, hit: committed },
+      ],
+    }
+  if (label === 'review xhigh')
+    return {
+      opener: es => es.findLastIndex(reviewXhigh),
+      checkpoints: [
+        { at: 0.7, hit: (e, c) => ends(e, c.opener) },
+        { at: 0.8, hit: edited },
+        { at: 0.9, hit: committed },
+      ],
+    }
+  if (label === 'shipping')
+    return {
+      opener: es => firstAfter(es, es.findLastIndex(reviewXhigh), shipped),
+      checkpoints: [{ at: 0.8, hit: (e, c) => ends(e, c.opener) }],
+    }
+  if (label === 'archiving')
+    return {
+      opener: es => es.findLastIndex(committed),
+      checkpoints: [
+        { at: 0.4, hit: (e, c) => ends(e, c.opener) },
+        { at: 0.6, hit: shipped },
+        { at: 0.9, hit: (e, c) => ends(e, c.last) },
+      ],
+    }
+  return { opener: () => -1, checkpoints: [] }
+}
+
+/**
+ * How far the live phase `label` has come, 0 to FILL_CAP, from its log
+ * events. The phase sits at the last checkpoint it passed, or, before any,
+ * at the share of its agents that are back. From there it creeps toward the
+ * next checkpoint with each tool call, its agents' included, and never
+ * reaches it: a long wait inside one step still moves, but claims no step it
+ * has not passed. The fill never falls below its highest point.
+ */
+export function phaseFill(label: string, events: readonly LogEvent[]): number {
+  const spec = fillSpec(label)
+  const from = spec.opener(events)
+  const head = from === -1 ? undefined : events[from]
+  const context: FillContext = { opener: head?.kind === 'use' ? head.id : '', last: '' }
+  const agents = new Set<string>()
+  const back = new Set<string>()
+  const first = spec.checkpoints[0]?.at ?? FILL_CAP
+  let reached = -1
+  let calls = 0
+  const now = (): number => {
+    let base = 0
+    let next = first
+    if (reached !== -1) {
+      base = spec.checkpoints[reached]?.at ?? 0
+      next = spec.checkpoints[reached + 1]?.at ?? FILL_CAP
+    } else if (spec.fanOut !== undefined) {
+      const [lo, hi] = spec.fanOut
+      const share = (n: number) => lo + ((hi - lo) * n) / agents.size
+      if (agents.size === 0) next = lo
+      else {
+        base = share(back.size)
+        next = back.size === agents.size ? first : share(back.size + 1)
+      }
+    }
+    return Math.min(FILL_CAP, base + (next - base) * (1 - Math.exp(-calls / CREEP_CALLS)))
+  }
+  // A later wave of agents lowers the share that are back, so the fill keeps
+  // its highest point and never draws a step backwards.
+  let peak = 0
+  for (const e of events.slice(from + 1)) {
+    const k = spec.checkpoints.findIndex((c, i) => i > reached && c.hit(e, context))
+    if (k !== -1) {
+      reached = k
+      if (e.kind === 'use') context.last = e.id
+      calls = 0
+    } else if (spec.fanOut !== undefined && reached === -1 && e.kind === 'task' && e.agent) {
+      agents.add(e.id)
+      calls = 0
+    } else if (e.kind === 'task' && e.step === 'notification' && agents.has(e.id) && !back.has(e.id)) {
+      back.add(e.id)
+      calls = 0
+    } else if (e.kind === 'use') calls++
+    peak = Math.max(peak, now())
+  }
+  return Math.max(peak, now())
 }
 
 /**
@@ -683,6 +910,8 @@ export function buildBoard(
     onDeck?: Deck[]
     /** Each running brief's newest tool call, read from its log. */
     tools?: Readonly<Record<string, string>>
+    /** Each running brief's log marks, as `grep -noE LOG_MARKS` prints them; a brief whose log was not read is absent. */
+    marks?: Readonly<Record<string, string>>
     /** Each brief's cycle count by its key, read from `origin/main`; a brief whose blobs could not be read is absent. */
     cycles?: Readonly<Record<string, number>>
     /** The machine's UTC offset as `date +%z` prints it, `-0500`. */
@@ -745,6 +974,7 @@ export function buildBoard(
       phases,
       phaseSinceMs: phaseSince(text, cycles[briefKey(r.brief)]),
       phaseMedianMs: live === undefined ? null : (medians[phaseKey(live.label)] ?? null),
+      fill: live === undefined || extra.marks?.[r.brief] === undefined ? null : phaseFill(live.label, logEventsOf(extra.marks[r.brief] ?? '')),
       isAlive: r.pid !== null && alive.has(r.pid),
     }
   })

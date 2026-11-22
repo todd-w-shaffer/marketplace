@@ -12,6 +12,8 @@ import {
   foldSummary,
   isFolded,
   lastEnd,
+  LOG_MARK_LINES,
+  LOG_MARKS,
   LOG_TAIL_BYTES,
   LOOP_LANE,
   agoShort,
@@ -230,6 +232,19 @@ async function readLastTool($: EngineInterface, log: string): Promise<string> {
     .run(['tail', '-c', String(LOG_TAIL_BYTES), log], { timeoutMs: 5000 })
     .catch(() => ({ exitCode: 1, stdout: '' }))
   return tail.exitCode === 0 ? lastToolOf(tail.stdout) : ''
+}
+
+/**
+ * A run's phase-fill marks: `grep -noE LOG_MARKS` over its whole stream-json
+ * log, the newest LOG_MARK_LINES of them. The marks are a few short fields an
+ * event, so the output stays small where the log does not. Undefined when the
+ * read fails, so the card draws no fill rather than an empty one.
+ */
+async function readLogMarks($: EngineInterface, log: string): Promise<string | undefined> {
+  const run = await $.process
+    .run(['sh', '-c', 'grep -noE "$1" "$2" | tail -n "$3"', 'sh', LOG_MARKS, log, String(LOG_MARK_LINES)], { timeoutMs: 5000 })
+    .catch(() => ({ exitCode: 1, stdout: '' }))
+  return run.exitCode === 0 ? run.stdout : undefined
 }
 
 // token-ledger's record of what each /commit and /ship cost, under $HOME.
@@ -571,9 +586,12 @@ async function poll($: EngineInterface): Promise<void> {
 
   const progress: Record<string, string> = {}
   const tools: Record<string, string> = {}
+  const marks: Record<string, string> = {}
   for (const run of raw.running) {
     progress[run.brief] = await $.fs.read(`${dir}/${baseName(run.brief)}.progress`).catch(() => '')
     tools[run.brief] = await readLastTool($, `${dir}/${baseName(run.brief)}.log`)
+    const read = await readLogMarks($, `${dir}/${baseName(run.brief)}.log`)
+    if (read !== undefined) marks[run.brief] = read
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
@@ -599,6 +617,7 @@ async function poll($: EngineInterface): Promise<void> {
     recent,
     onDeck,
     tools,
+    marks,
     cycles,
     utcOffset,
     spend: read === null ? null : { days: read.days },
@@ -685,7 +704,7 @@ export const register: Register = on => {
     )
 
     // The bar and its labels: one braille block per phase, green when done,
-    // peach and tapering in flight, a grey baseline to come; `⋮` where
+    // peach and filled to the run's fill in flight, a grey baseline to come; `⋮` where
     // session 2 takes over and a `⡇` cap at the end.
     const phaseRows = (r: Run, width: number) => {
       const cut = r.phases.findIndex(p => p.label === 'simplify')
@@ -697,7 +716,7 @@ export const register: Register = on => {
           {r.phases.map((p, i) => (
             <Text>
               {i === cut && <Text color={F.overlay0}>⋮ </Text>}
-              <Text color={color(p)}>{phaseGlyphs(p.state, width - 1)}</Text>
+              <Text color={color(p)}>{phaseGlyphs(p.state, width - 1, r.fill ?? 0)}</Text>
               {i === last ? <Text color={F.overlay0}>⡇</Text> : ' '}
             </Text>
           ))}

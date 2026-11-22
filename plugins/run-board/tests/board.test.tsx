@@ -33,6 +33,8 @@ import {
   onDeckOf,
   outcomeDetail,
   phaseGlyphs,
+  phaseFill,
+  logEventsOf,
   phaseLine,
   phaseName,
   phasesOf,
@@ -315,10 +317,17 @@ test('a running card and the hint line show the phase, the stage and the newest 
     { [s393]: S393, [s395]: S395 },
     new Set([5147, 79762, 21491]),
     NOW,
-    { tools: { [s393]: 'Bash: Run the focused check' }, cycles: { [s393]: 2, [s395]: 3 } },
+    {
+      tools: { [s393]: 'Bash: Run the focused check' },
+      cycles: { [s393]: 2, [s395]: 3 },
+      marks: { [s393]: marks(skillMark(1, 'R1', 'code-review', 'low a~1..a'), useMark(2, 'E1', 'Edit', '"file_path":"/x/a.ts')) },
+    },
   )
   const [epic, fix] = b.running
   if (epic === undefined || fix === undefined) throw new Error('runs missing')
+  // The live phase fills from the run's log marks; a run whose marks were not read has no fill.
+  expect(near(epic.fill)).toBe(0.2)
+  expect(fix.fill).toBeNull()
   // The bar's lit label names the phase, so the phase line names neither the phase nor its session.
   expect(phaseLine(epic)).toBe('Bash: Run the focused check')
   expect(phaseLine(fix)).toBe('')
@@ -364,12 +373,122 @@ test('a header tile sets its figure right-aligned over a rule, and its label in 
   expect(tileFace('13402', '$ month')).toEqual({ top, bottom, rule: '─'.repeat(10), label: '$ month   ' })
 })
 
-test('a phase block fills with braille: full when done, tapering in flight, a baseline to come', async () => {
+test('a phase block fills with braille: full when done, filled to its fraction in flight, a baseline to come', async () => {
   expect(phaseGlyphs('done', 4)).toBe('⣿⣿⣿⣿')
-  expect(phaseGlyphs('live', 6)).toBe('⣿⣿⣷⣦⣤⣀')
-  expect(phaseGlyphs('live', 3)).toBe('⣿⣷⣤')
-  expect(phaseGlyphs('live', 2)).toBe('⣿⣤')
   expect(phaseGlyphs('todo', 3)).toBe('⣀⣀⣀')
+  // Each cell climbs ⣀ ⣤ ⣶ ⣿, so a block of 6 has 18 steps.
+  expect(phaseGlyphs('live', 6, 0.5)).toBe('⣿⣿⣿⣀⣀⣀')
+  expect(phaseGlyphs('live', 6, 0.4)).toBe('⣿⣿⣤⣀⣀⣀')
+  // A live block always shows a step, and never fills, however near done it reads.
+  expect(phaseGlyphs('live', 6, 0)).toBe('⣤⣀⣀⣀⣀⣀')
+  expect(phaseGlyphs('live', 6)).toBe('⣤⣀⣀⣀⣀⣀')
+  expect(phaseGlyphs('live', 6, 1)).toBe('⣿⣿⣿⣿⣿⣶')
+  expect(phaseGlyphs('live', 2, 0.99)).toBe('⣿⣶')
+})
+
+// A run log's marks as readLogMarks prints them, one `grep -noE` match a line: `<log line>:<match>`.
+const useMark = (n: number, id: string, name: string, input = '', nestedIn = ''): string[] => [
+  `${n}:"type":"tool_use","id":"${id}","name":"${name}"`,
+  ...(input === '' ? [] : [`${n}:"input":{${input}`]),
+  ...(nestedIn === '' ? [] : [`${n}:"parent_tool_use_id":"${nestedIn}"`]),
+]
+const skillMark = (n: number, id: string, skill: string, args: string): string[] => [
+  ...useMark(n, id, 'Skill', `"skill":"${skill}`),
+  `${n}:"skill":"${skill}","args":"${args}`,
+]
+const taskMark = (n: number, step: 'started' | 'progress' | 'notification', id: string, type = ''): string[] => [
+  `${n}:"subtype":"task_${step}","task_id":"a1","run_id":"r1","tool_use_id":"${id}"`,
+  ...(type === '' ? [] : [`${n}:"task_type":"${type}"`]),
+]
+const resultMark = (n: number, id: string): string => `${n}:"tool_use_id":"${id}","type":"tool_result"`
+// A fill to two places, so a checkpoint's fraction compares exactly.
+const near = (x: number | null): number | null => (x === null ? null : Math.round(x * 100) / 100)
+const marks = (...groups: (string | string[])[]): string => groups.flat().join('\n')
+
+test('logEventsOf reads tool calls, their inputs, nesting, task events and results from the marks', async () => {
+  const events = logEventsOf(
+    marks(
+      '1:"type":"tool_use","id":"cut-off',
+      skillMark(2, 'S1', 'simplify', 'over the changed'),
+      taskMark(3, 'started', 'A1', 'local_agent'),
+      resultMark(4, 'A1'),
+      useMark(5, 'B1', 'Bash', '"command":"git diff --stat', 'A1'),
+      taskMark(6, 'notification', 'A1'),
+      'not a mark',
+    ),
+  )
+  expect(events).toEqual([
+    { kind: 'use', id: 'S1', name: 'Skill', detail: 'simplify', skill: 'simplify', args: 'over the changed', nested: false },
+    { kind: 'task', step: 'started', id: 'A1', agent: true },
+    { kind: 'result', id: 'A1' },
+    { kind: 'use', id: 'B1', name: 'Bash', detail: 'git diff --stat', skill: '', args: '', nested: true },
+    { kind: 'task', step: 'notification', id: 'A1', agent: false },
+  ])
+})
+
+test('simplify fills by how many of its agents are back, then by its fixes, build and commit', async () => {
+  const opened = [skillMark(1, 'S1', 'code-review', 'low abc'), skillMark(10, 'S2', 'simplify', 'over the range')]
+  const fanned = [...opened, ...['A1', 'A2', 'A3', 'A4'].map((id, i) => taskMark(11 + i, 'started', id, 'local_agent'))]
+  const fill = (...more: (string | string[])[]) => phaseFill('simplify', logEventsOf(marks(...fanned, ...more)))
+  const none = fill()
+  const two = fill(taskMark(20, 'notification', 'A2'), taskMark(21, 'notification', 'A4'))
+  const all = fill(...['A1', 'A2', 'A3', 'A4'].map((id, i) => taskMark(20 + i, 'notification', id)))
+  const fixed = fill(...['A1', 'A2', 'A3', 'A4'].map((id, i) => taskMark(20 + i, 'notification', id)), useMark(30, 'E1', 'Edit', '"file_path":"/x/a.ts'))
+  const committed = fill(useMark(30, 'E1', 'Edit', '"file_path":"/x/a.ts'), skillMark(40, 'C1', 'commit-skill:commit', 'refactor: x'))
+  expect(none).toBeLessThan(0.1)
+  expect(near(two)).toBe(0.3)
+  expect(near(all)).toBe(0.55)
+  expect(near(fixed)).toBe(0.65)
+  expect(near(committed)).toBe(0.9)
+  // A second wave of agents does not draw the fill backwards.
+  const wave = fill(taskMark(20, 'notification', 'A1'), taskMark(21, 'notification', 'A2'), taskMark(22, 'notification', 'A3'), taskMark(23, 'notification', 'A4'), taskMark(24, 'started', 'A5', 'local_agent'))
+  expect(near(wave)).toBe(0.55)
+  // A background build is no agent: it neither counts toward the fan-out nor holds it back.
+  expect(near(fill(taskMark(16, 'started', 'K1', 'local_bash'), taskMark(20, 'notification', 'A2'), taskMark(21, 'notification', 'A4')))).toBe(0.3)
+})
+
+test('a phase creeps toward its next checkpoint as tool calls land, and never reaches it', async () => {
+  const opened = skillMark(1, 'X1', 'code-review', 'xhigh 719d3f796..HEAD')
+  const calls = (n: number) => Array.from({ length: n }, (_, i) => useMark(2 + i, `N${i}`, 'Bash', '"command":"git diff', 'X1'))
+  const fills = [0, 5, 20, 60, 400].map(n => phaseFill('review xhigh', logEventsOf(marks(opened, ...calls(n)))))
+  for (let i = 1; i < fills.length; i++) expect(fills[i]).toBeGreaterThan(fills[i - 1] ?? 1)
+  expect(fills[4]).toBeLessThan(0.7)
+  // The review's end is a checkpoint; a fix after it and its commit are the next two.
+  const ended = marks(opened, ...calls(60), taskMark(80, 'notification', 'X1'))
+  expect(near(phaseFill('review xhigh', logEventsOf(ended)))).toBe(0.7)
+  expect(near(phaseFill('review xhigh', logEventsOf(marks(ended, skillMark(90, 'C1', 'commit-skill:commit', 'fix: y')))))).toBe(0.9)
+  // Nothing fills past the cap.
+  expect(phaseFill('review xhigh', logEventsOf(marks(ended, skillMark(90, 'C1', 'commit-skill:commit', 'fix: y'), ...calls(400))))).toBeLessThan(0.96)
+})
+
+test('a cycle opens at the last review low and fills by its first edit, its build and its commit', async () => {
+  const before = [skillMark(1, 'C0', 'commit-skill:commit', 'cycle 1 of S1'), useMark(2, 'E0', 'Edit', '"file_path":"/x/old.ts'), skillMark(3, 'R0', 'code-review', 'low a~1..a')]
+  const fill = (...more: (string | string[])[]) => phaseFill('cycle 2', logEventsOf(marks(...before, ...more)))
+  // The last cycle's edit and commit sit before the opener, so they count for nothing here.
+  expect(fill()).toBeLessThan(0.05)
+  expect(near(fill(useMark(10, 'E1', 'Write', '"file_path":"/x/a.test.ts')))).toBe(0.2)
+  expect(near(fill(useMark(10, 'E1', 'Edit', '"file_path":"/x/a.ts'), useMark(11, 'B1', 'Bash', '"command":"npm run check:cycle')))).toBe(0.5)
+  expect(near(fill(useMark(10, 'E1', 'Edit', '"file_path":"/x/a.ts'), skillMark(12, 'C1', 'commit-skill:commit', 'cycle 2 of S1')))).toBe(0.8)
+  // An edit inside an agent is the agent's, not the cycle's.
+  expect(fill(useMark(10, 'E1', 'Edit', '"file_path":"/x/a.ts', 'A9'))).toBeLessThan(0.05)
+})
+
+test('the savor fills by its agents, the ship by its push, the archive by its commit and push', async () => {
+  const savor = [skillMark(1, 'V1', 'sittings:savor', 'launch docs/briefs/x.md'), ...['A1', 'A2'].map((id, i) => taskMark(2 + i, 'started', id, 'local_agent'))]
+  expect(near(phaseFill('savor', logEventsOf(marks(...savor, taskMark(5, 'notification', 'A1')))))).toBe(0.4)
+  expect(near(phaseFill('savor', logEventsOf(marks(...savor, skillMark(9, 'C1', 'commit-skill:commit', 'step 0')))))).toBe(0.9)
+  const shipped = [skillMark(1, 'X1', 'code-review', 'xhigh a..HEAD'), skillMark(2, 'P1', 'commit-skill:ship', 'autopilot run')]
+  expect(phaseFill('shipping', logEventsOf(marks(...shipped)))).toBeLessThan(0.1)
+  expect(near(phaseFill('shipping', logEventsOf(marks(...shipped, taskMark(3, 'notification', 'P1')))))).toBe(0.8)
+  const archived = [...shipped, taskMark(3, 'notification', 'P1'), skillMark(4, 'C2', 'commit-skill:commit', 'archive commit')]
+  expect(phaseFill('archiving', logEventsOf(marks(...archived)))).toBeLessThan(0.1)
+  expect(near(phaseFill('archiving', logEventsOf(marks(...archived, resultMark(5, 'C2')))))).toBe(0.4)
+  expect(near(phaseFill('archiving', logEventsOf(marks(...archived, resultMark(5, 'C2'), skillMark(6, 'P2', 'commit-skill:ship', 'archive push')))))).toBe(0.6)
+})
+
+test('no marks fill a phase to nothing, and an unknown phase reads from its first event', async () => {
+  expect(phaseFill('simplify', [])).toBe(0)
+  expect(phaseFill('observations', logEventsOf(marks(useMark(1, 'E1', 'Edit', '"file_path":"/x/a.ts'))))).toBeGreaterThan(0)
 })
 
 const LEDGER = [

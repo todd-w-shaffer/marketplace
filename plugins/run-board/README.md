@@ -9,13 +9,21 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   It is empty when nothing runs or waits.
 - **Progress bar.** Each run's card has a braille block per phase of the fixed chain: step 0's `savor` when the run has one (from the
   `sittings:savor launch` line to the `/commit` that holds its edits, or to the launcher's `savored:` line), each cycle, then `⋮` where session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is a full `⣿` run in green when done, a
-  peach taper in flight and a grey `⣀` baseline to come, and the bar ends in a `⡇` cap. The lane's name is a
+  peach block in flight filled to how far the phase has come (see **Phase fill**), and a grey `⣀` baseline to come, and the bar ends in a `⡇` cap. The lane's name is a
   pill on the raised surface, in the lane's colour (pink epic, teal fix). The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
   on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
   `code-review low` line; the ship starts at `/ship` or a push, and the archive at the first `/commit` after
   the ship's push. Under the bar, the phase line reads `committing · Bash: Run the focused check`: the
   stage when it adds to the phase (the bar's lit label names the phase), and the newest tool call, read from the last 256 KiB of the run's
   stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
+- **Phase fill.** The block in flight fills left to right, each cell climbing `⣀⣤⣶⣿`, from the run's stream-json `.log`:
+  one `grep -noE` pulls a few short marks per event (tool calls and their first input field, Skill args, `task_started`,
+  `task_progress` and `task_notification`, tool results, the parent id that nests an agent's calls), the newest `LOG_MARK_LINES` of them.
+  Each phase opens at its skill call and passes checkpoints: a cycle its first edit, a build and its commit; the savor and
+  simplify first fill by how many of their agents are back; the xhigh review at its forked task's end, then a fix and its commit;
+  the ship at its `/ship`'s end; the archive at its commit and its push. Between checkpoints the fill creeps toward the next one
+  with each tool call, agents' calls included, and never reaches it, so a long step still moves but claims nothing it has not
+  passed. A live block never fills and never steps backwards. When the marks cannot be read the block shows one step.
 - **Time in phase.** A live card's header reads `9m · 15m · $10.63`: the time in the phase in flight, then the run's
   time and cost. The clock starts at the `at:` stamp on the line that opened the phase, or at the latest `slot:` line
   when the run was relaunched later. It is peach, the lit label's colour, and red once it passes that phase's median
