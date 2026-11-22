@@ -1095,11 +1095,8 @@ export const register: Register = on => {
                 {r.isAlive ? (
                   <Box flexDirection="column" marginTop={1}>
                     {phaseRows(r, segmentWidth(e.props.bodyColumns, r.phases.length))}
-                    <Text wrap="truncate-end">
-                      <Text color={F.peach}>{phaseLine(r).split(' · ')[0]}</Text>
-                      <Text color={F.overlay2}>
-                        {phaseLine(r).includes(' · ') ? ` · ${phaseLine(r).split(' · ').slice(1).join(' · ')}` : ''}
-                      </Text>
+                    <Text wrap="truncate-end" color={F.overlay2}>
+                      {phaseLine(r)}
                     </Text>
                   </Box>
                 ) : (

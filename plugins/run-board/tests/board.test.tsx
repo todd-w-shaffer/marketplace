@@ -231,9 +231,7 @@ test('a run with step 0 opens on a savor phase that its own commit closes', asyn
   expect(states(`${cycle1}\nskill: code-review xhigh a b`, 2)).toBe(
     'savor:done c1:done c2:done simpl:done xhigh:live ship:todo arch:todo',
   )
-  expect(phaseLine({ phases: phasesOf(savoring, 2), stage: 'savor', tool: 'Agent: systems' } as Run)).toBe(
-    'session 0 · Agent: systems',
-  )
+  expect(phaseLine({ phases: phasesOf(savoring, 2), stage: 'savor', tool: 'Agent: systems' } as Run)).toBe('Agent: systems')
 })
 
 test('a savor file closes a savor that made no edits, so the first cycle commit counts as cycle 1', async () => {
@@ -321,11 +319,12 @@ test('a running card and the hint line show the phase, the stage and the newest 
   )
   const [epic, fix] = b.running
   if (epic === undefined || fix === undefined) throw new Error('runs missing')
-  // The bar's lit label names the cycle, so the phase line names only the session.
-  expect(phaseLine(epic)).toBe('session 1 · Bash: Run the focused check')
-  expect(phaseLine(fix)).toBe('session 2')
-  expect(phaseLine({ ...epic, stage: 'committing', tool: '' })).toBe('session 1 · committing')
-  expect(phaseLine({ ...epic, stage: 'review low', tool: '' })).toBe('session 1')
+  // The bar's lit label names the phase, so the phase line names neither the phase nor its session.
+  expect(phaseLine(epic)).toBe('Bash: Run the focused check')
+  expect(phaseLine(fix)).toBe('')
+  expect(phaseLine({ ...epic, stage: 'committing', tool: '' })).toBe('committing')
+  expect(phaseLine({ ...epic, stage: 'committing' })).toBe('committing · Bash: Run the focused check')
+  expect(phaseLine({ ...epic, stage: 'review low', tool: '' })).toBe('')
   expect(phaseLine({ ...epic, phases: epic.phases.map(p => ({ ...p, state: 'done' as const })), tool: '' })).toBe('finishing')
   expect(statusLine(b)).toBe('● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h06m │ ● S395 ⣿⣿⣿⣿⣤⣀⣀⡇ xhigh 1h37m │ $16.68')
 })

@@ -13,9 +13,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   pill on the raised surface, in the lane's colour (pink epic, teal fix). The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
   on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
   `code-review low` line; the ship starts at `/ship` or a push, and the archive at the first `/commit` after
-  the ship's push. Under the bar, the phase line reads `session 1 · Bash: Run the focused check`: the
-  session in flight (the savor is session 0, a cycle session 1, simplify through the archive session 2; the
-  bar's lit label names the phase), the stage when it adds to it, and the newest tool call, read from the last 256 KiB of the run's
+  the ship's push. Under the bar, the phase line reads `committing · Bash: Run the focused check`: the
+  stage when it adds to the phase (the bar's lit label names the phase), and the newest tool call, read from the last 256 KiB of the run's
   stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
 - **Time in phase.** A live card's header reads `9m · 15m · $10.63`: the time in the phase in flight, then the run's
   time and cost. The clock starts at the `at:` stamp on the line that opened the phase, or at the latest `slot:` line

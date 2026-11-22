@@ -505,21 +505,14 @@ export function phaseMedians(recent: readonly Ended[]): Record<string, number> {
 const QUIET_STAGES = new Set(['savor', 'starting', 'working', 'review low', 'simplify', 'review xhigh', 'shipping'])
 
 /**
- * The session that runs a phase: the savor is session 0, a cycle session 1,
- * and simplify through the archive session 2 (docs/briefs/rules/autopilot.md,
- * "A run is three sessions").
- */
-const sessionOf = (label: string): number => (label === 'savor' ? 0 : label.startsWith('cycle ') ? 1 : 2)
-
-/**
- * A running card's phase line: the session in flight, then the stage when it
- * adds to the phase, then the newest tool call. The bar's lit label names
- * the phase, so the line does not. A run with no phase in flight reads
- * `finishing`.
+ * A running card's phase line: the stage when it adds to the phase, then the
+ * newest tool call. The bar's lit label names the phase, and the bar's `⋮`
+ * marks where each session starts, so the line names neither. A run with no
+ * phase in flight reads `finishing`.
  */
 export function phaseLine(r: Run): string {
-  const live = r.phases.find(p => p.state === 'live')
-  const parts = [live === undefined ? 'finishing' : `session ${sessionOf(live.label)}`]
+  if (!r.phases.some(p => p.state === 'live')) return 'finishing'
+  const parts: string[] = []
   if (!QUIET_STAGES.has(r.stage)) parts.push(r.stage)
   if (r.tool !== '') parts.push(r.tool)
   return parts.join(' · ')
