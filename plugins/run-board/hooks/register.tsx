@@ -1086,8 +1086,9 @@ export const register: Register = on => {
                 <Text color={F.overlay0}>{'  '}idle</Text>
               </Text>
             )}
-            {runs.map(r => (
-              <Box flexDirection="column">
+            {runs.map((r, i) => (
+              // A run after the first in its lane opens on a blank line, as its bar does under its header.
+              <Box flexDirection="column" marginTop={i === 0 ? 0 : 1}>
                 <Box justifyContent="space-between" columnGap={2}>
                   <Text wrap="truncate-end">
                     {pill(lane)}
