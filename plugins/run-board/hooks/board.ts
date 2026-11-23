@@ -246,8 +246,9 @@ const unquoted = (command: string): string => command.replace(/'[^']*'|"(?:\\.|[
 /** Whether a progress line is a `bash: ` line whose command runs a push. */
 const isPushLine = (line: string): boolean => line.startsWith('bash: ') && PUSH_COMMAND.test(unquoted(line.slice(6)))
 
-/** Whether a push line runs `ship-run --finish`, /ship's second call, which follows its docs commit. */
-const isFinishLine = (line: string): boolean => /(^|[\s/])ship-run\s+(\S+\s+)*--finish\b/.test(unquoted(line.slice(6)))
+/** Whether a push line runs commit-skill's `ship-run`, rather than `push:checked` itself. */
+const SHIP_RUN = /(^|[\s/;&|(])ship-run([\s;&|)<>]|$)/
+const isShipRunLine = (line: string): boolean => isPushLine(line) && SHIP_RUN.test(unquoted(line.slice(6)))
 // The `cycle k` that a `/commit` line's text names.
 const CYCLE_NAMED = /\bcycle (\d+)/i
 
@@ -262,8 +263,9 @@ const CYCLE_NAMED = /\bcycle (\d+)/i
  * Cycle k is done when a `/commit` naming `cycle k` (or, naming none, the
  * next cycle) is followed by a `code-review low` line. The ship starts at
  * `/ship` or a push, and the archive at the first `/commit` after the ship's
- * push, unless a `ship-run --finish` follows that commit: it was /ship's
- * docs commit. A later step marks every earlier one done. `cycles` is the brief's
+ * push, unless a `ship-run` follows that commit inside the same `/ship`, with
+ * no `skill: commit-skill:ship` line between them: then it was /ship's own
+ * commit, its docs or the cleanup after a dirty tree. A later step marks every earlier one done. `cycles` is the brief's
  * count; without it the count is the highest cycle the progress file names.
  */
 export function phasesOf(progress: string, cycles?: number): Phase[] {
@@ -277,12 +279,14 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
   let ship = false
   let shipPushed = false
   let archive = false
+  // The archive's commit, with no /ship begun since: a ship-run now means the commit was the ship's.
+  let archiveOpen = false
   let finished = false
   for (const line of progress.split('\n')) {
     const commit = COMMIT_LINE.exec(line)
     if (commit) {
       if (savor === 'live') savor = 'done'
-      else if (shipPushed) archive = true
+      else if (shipPushed && !archive) archive = archiveOpen = true
       else if (!simplify && !ship) {
         const k = CYCLE_NAMED.exec(commit[1] ?? '')
         pending = k ? Number(k[1]) : done + 1
@@ -298,12 +302,13 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
     } else if (line.startsWith('cut: ')) cut = true
     else if (/^skill: simplify\b/.test(line)) simplify = true
     else if (/^skill: code-review xhigh\b/.test(line)) xhigh = true
-    else if (/^skill: commit-skill:ship\b/.test(line)) ship = true
-    else if (isPushLine(line)) {
+    else if (/^skill: commit-skill:ship\b/.test(line)) {
+      ship = true
+      archiveOpen = false
+    } else if (isPushLine(line)) {
       if (ship) shipPushed = true
       ship = true
-      // The commit before `ship-run --finish` was /ship's docs commit, not the archive's.
-      if (isFinishLine(line)) archive = false
+      if (archiveOpen && isShipRunLine(line)) archive = archiveOpen = false
     } else if (line.startsWith('finished: shipped')) finished = true
   }
   const n = cycles !== undefined && cycles > 0 ? cycles : Math.max(named, done + 1, 1)

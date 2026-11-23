@@ -238,6 +238,15 @@ test('a ship-run call is a push: the stage, the archive after it, --finish and t
   expect(states(`${docs}\nskill: commit-skill:commit archive S395`, 3)).toBe(
     'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
   )
+  // The archive's own /ship runs ship-run and --finish: the run stays archiving.
+  const archiveShip = `${docs}\nskill: commit-skill:commit archive S395\nskill: commit-skill:ship\nbash: ship-run`
+  expect(states(archiveShip, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live')
+  expect(states(`${archiveShip}\nbash: ship-run --finish`, 3)).toBe(
+    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
+  )
+  // A ship-run that found the tree dirty, then /ship's /commit and its second ship-run: still shipping.
+  const dirty = `${shipping}\nskill: commit-skill:commit leftover\nbash: ship-run --to-default`
+  expect(states(dirty, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:live arch:todo')
   expect(stripOf(`${S395}\nbash: ship-run`, 'run-broke').map(c => `${c.stage}:${c.state}`)).toEqual([
     'savor:skip', 'cycles:done', 'push:broke', 'staging:todo', 'prod:todo',
   ])
