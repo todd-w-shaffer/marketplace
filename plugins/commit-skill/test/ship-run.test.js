@@ -135,6 +135,18 @@ test('a rebase left in progress refuses', (t) => {
   assert.equal(r.json.outcome, 'dirty');
 });
 
+test('a rebase stopped on a conflict names the rebase, not /commit', (t) => {
+  const { repo, sb, shipRun, commit, teammate } = setup(t);
+  commit('f.txt', 'mine\n');
+  teammate('f.txt', 'theirs\n');
+  sb.git(repo, 'fetch', '-q');
+  assert.notEqual(run('git', ['rebase', 'origin/main'], { cwd: repo, env: sb.env }).status, 0);
+  const r = shipRun();
+  assert.equal(r.status, 2);
+  assert.equal(r.json.outcome, 'dirty');
+  assert.match(r.json.next, /rebase is in progress/);
+});
+
 test('a pre-push hook refusal is refused, with its words', (t) => {
   const { shipRun, commit, hook, remoteSha } = setup(t);
   const seed = remoteSha();

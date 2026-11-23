@@ -9,8 +9,9 @@
 //   ship-run [--to-default]            steps 0 and 1: the code push
 //   ship-run --finish [--to-default]   step 6's push, then 7 and 8
 //
-// 1. Refuses, exit 2, a tree with a tracked change ({"outcome":"dirty"}), a
-//    rebase in progress or a detached HEAD, before anything else runs.
+// 1. Refuses, exit 2, a rebase in progress, a detached HEAD or a tree with a
+//    tracked change ({"outcome":"dirty"}), in that order, before anything
+//    else runs.
 //    Untracked files do not refuse: no push carries them.
 // 2. The target: the branch's upstream; with none, `--to-default` makes it the
 //    remote's default branch (origin/HEAD, else origin/main, else
@@ -318,14 +319,15 @@ function main() {
   const gitDir = path.resolve(gitOut(['rev-parse', '--git-dir']));
 
   // 1. Refusals
-  const status = (git(['status', '--porcelain', '--untracked-files=all']).stdout || '').split('\n').filter(Boolean);
-  const dirty = status.filter((l) => !l.startsWith('?? ')).map((l) => l.slice(3));
-  if (dirty.length) return print({ outcome: 'dirty', files: dirty, next: 'run /commit first' }, 2);
+  // A stopped rebase first: its conflicts are tracked changes that /commit must not take.
   if (rebaseInProgress(gitDir)) {
     return print({ outcome: 'dirty', files: [], next: 'a rebase is in progress: finish it or run git rebase --abort' }, 2);
   }
   const branch = gitOut(['symbolic-ref', '-q', '--short', 'HEAD']);
   if (!branch) return print({ outcome: 'dirty', files: [], next: 'HEAD is detached: check out a branch' }, 2);
+  const status = (git(['status', '--porcelain', '--untracked-files=all']).stdout || '').split('\n').filter(Boolean);
+  const dirty = status.filter((l) => !l.startsWith('?? ')).map((l) => l.slice(3));
+  if (dirty.length) return print({ outcome: 'dirty', files: dirty, next: 'run /commit first' }, 2);
 
   // 2. Target
   const upstreamRemote = gitOut(['config', `branch.${branch}.remote`]) || 'origin';
