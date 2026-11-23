@@ -7,14 +7,17 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   as a one-cell-per-phase bar, the phase in flight and how long it has run, then
   how many briefs wait and the cost so far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ ○ 1 │ $12.22`.
   It is empty when nothing runs or waits.
-- **Progress bar.** Each run's card has a braille block per phase of the fixed chain: step 0's `savor` when the run has one (from the
-  `sittings:savor launch` line to the `/commit` that holds its edits, or to the launcher's `savored:` line), each cycle, then `⋮` where session 2 takes over, simplify, the xhigh review, the ship and the archive. A block is a full `⣿` run in green when done, a
+- **Progress bar.** Each run's card has a braille block per phase of its run record's `phases`, in the record's order: step 0's `savor` when the run has one,
+  each cycle, then `⋮` where session 2 takes over, simplify, the xhigh review, the ship and the archive. The record is
+  `<name>.run.json`, at the running entry's `run_record` in status.json, and `scripts/run-status.mjs` in the
+  shoots.film repo owns it: its header states each field and when each phase closes, and the board shows the record's
+  `stage`, `phases` and `phase_since` as written. A block is a full `⣿` run in green when done, a
   peach block in flight filled to how far the phase has come (see **Phase fill**), and a grey `⣀` baseline to come, and the bar ends in a `⡇` cap. The lane's name is a
-  pill on the raised surface, in the lane's colour (pink epic, teal fix). The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
-  on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
-  `code-review low` line; the ship starts at `/ship` or a push (`npm run push:checked`, or commit-skill's `ship-run`),
-  and the archive at the first `/commit` after the ship's push, unless a `ship-run` follows it with no new `/ship` between
-  them: then it was /ship's own commit, its docs or a dirty tree's cleanup. Under the bar, the phase line reads `committing · Bash: Run the focused check`: the
+  pill on the raised surface, in the lane's colour (pink epic, teal fix). A record of a version the board does not
+  know draws no bar, and the card reads `the record is newer than the board`. A run with no record the board can read
+  draws what `node <main>/scripts/run-status.mjs --print <progress> <brief>` prints for it, once per key (the progress
+  file's mtime, the brief's path and mtime, and `run-status.mjs`'s mtime), and with neither it draws from status.json
+  alone, its stage `starting`. Under the bar, the phase line reads `committing · Bash: Run the focused check`: the
   stage when it adds to the phase (the bar's lit label names the phase), and the newest tool call, read from the last 256 KiB of the run's
   stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
 - **Phase fill.** The block in flight fills left to right, each cell climbing `⣀⣤⣶⣿`, from the run's stream-json `.log`:
@@ -26,8 +29,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   with each tool call, agents' calls included, and never reaches it, so a long step still moves but claims nothing it has not
   passed. A live block never fills and never steps backwards. When the marks cannot be read the block shows one step.
 - **Time in phase.** A live card's header reads `9m · 15m · $10.63`: the time in the phase in flight, then the run's
-  time and cost. The clock starts at the `at:` stamp on the line that opened the phase, or at the latest `slot:` line
-  when the run was relaunched later. It is peach, the lit label's colour, and red once it passes that phase's median
+  time and cost. The clock starts at the record's `phase_since`. It is peach, the lit label's colour, and red once it passes that phase's median
   over RECENT. Every cycle is one sample of the cycle median; a phase no recent run timed has no median and stays peach.
 - **The architecture loop.** While `scripts/archloop.sh` holds its lock, a card and the hint line show the loop's stage,
   `◐ loop review p1 14m`, and a fix run that is one of the loop's landings is tagged
@@ -152,16 +154,19 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 - **Toast.** A run that finishes while the session is open raises a toast with its outcome.
 
 Every 5 seconds it reads `~/Library/Logs/shootsfilm-autopilot/status.json` (written by
-`scripts/dispatch.sh` in the shoots.film repo) and each running sitting's `.progress` file, and runs `ps`
+`scripts/dispatch.sh` in the shoots.film repo), each running sitting's record, and runs `ps`
 to check that the dispatcher and each run are alive. A run whose process is gone without a finished
-line shows as `launcher gone`.
+line shows as `launcher gone`. Every other path comes from status.json's `sources`: `main`, the shoots.film
+checkout, and `archloop_log_dir`, the loop's log directory. A status.json that is missing, or whose `sources` is
+missing or malformed, draws only `status.json names no sources`, and one of a version the board does not know draws
+only `status.json is newer than the board`.
 
 For ON DECK, the cycle squares and EPICS it runs `git ls-tree -r origin/main docs/briefs/ docs/plans/` in
-`~/Desktop/apps/shootsfilm` and reads each brief, `sittings.json` and each plan with `git cat-file`, once per blob.
+the main checkout and reads each brief, `sittings.json` and each plan with `git cat-file`, once per blob.
 A blob that fails to read gives no count and no title, and is read again on the next poll. It never fetches: a push from any worktree of the checkout
 moves `origin/main`, and a brief pushed from another machine shows after the next fetch.
 
-For the loop it reads `~/Library/Logs/shootsfilm-archloop/.lock/pid`, and lists the newest run directory
+For the loop it reads `<archloop_log_dir>/.lock/pid`, and lists the newest run directory
 (`<UTC date>-<HHMM>`) and its `p<n>/` pass directories. The loop's `progress` file logs a stage only when it
 exits, so the stage in flight is the newest session log or landing output: `p1/review.log` reads as
 `review p1`, `p1/verify-01.log` as `verify 01`, `p1/plan-01.log` as `plan 01`, `p1/plan-01.autopilot` as

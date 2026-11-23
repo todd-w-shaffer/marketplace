@@ -4,7 +4,7 @@ import type { BarTone, Block, BlockKind, Board, BriefCost, Deck, DeckMode, Done,
 // checked on read, since the file is another program's output.
 export type RawStatus = {
   dispatcher: number | null
-  running: ({ entry: number; brief: string; lane: string; pid: number | null; started: string; cost: number } & SlotFields)[]
+  running: ({ entry: number; brief: string; lane: string; pid: number | null; started: string; cost: number; runRecord?: string } & SlotFields)[]
   queued: { entry: number; brief: string; lane: string; reason: string; cause?: Cause | null }[]
   finished: ({ entry: number; brief: string; lane: string; status: number; outcome: string; kind: string | null } & SlotFields)[]
 }
@@ -87,6 +87,7 @@ export function parseStatus(text: string): RawStatus | null {
       pid: num(r.pid),
       started: str(r.started),
       cost: num(r.session_cost) ?? 0,
+      ...(typeof r.run_record === 'string' && r.run_record !== '' ? { runRecord: r.run_record } : {}),
       ...parseSlot(r),
     })),
     queued: list(d.queued).map(q => ({
@@ -108,6 +109,158 @@ export function parseStatus(text: string): RawStatus | null {
   }
 }
 
+// The version of scripts/run-status.mjs's record and status.json this board
+// reads. Their header rules that a reader that finds another version draws no
+// run and says the record is newer than the reader.
+export const RUN_STATUS_VERSION = 1
+
+/** The paths status.json's `sources` names: the main checkout, the launcher's log directory, the archloop's. */
+export type Sources = { main: string; logDir: string; archloopLogDir: string }
+
+/** `sources` with each path a string that is not empty, else null. */
+function parseSources(v: unknown): Sources | null {
+  const s = obj(v)
+  if (s === null || Array.isArray(s)) return null
+  const [main, logDir, archloopLogDir] = [s.main, s.log_dir, s.archloop_log_dir]
+  if (typeof main !== 'string' || typeof logDir !== 'string' || typeof archloopLogDir !== 'string') return null
+  if (main === '' || logDir === '' || archloopLogDir === '') return null
+  return { main, logDir, archloopLogDir }
+}
+
+/**
+ * What a status.json's text gives the board: `newer` when its `version` is
+ * an integer the board does not know, else its fields and its `sources`, null
+ * when they are missing or malformed. Null when the text is no JSON object.
+ * The board checks `version` before any other field.
+ */
+export function statusRead(text: string): { kind: 'newer' } | { kind: 'status'; raw: RawStatus; sources: Sources | null } | null {
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const d = obj(data)
+  if (d === null || Array.isArray(d)) return null
+  if (Number.isInteger(d.version) && d.version !== RUN_STATUS_VERSION) return { kind: 'newer' }
+  const raw = parseStatus(text)
+  if (raw === null) return null
+  return { kind: 'status', raw, sources: d.version === RUN_STATUS_VERSION ? parseSources(d.sources) : null }
+}
+
+/** A run's record as the board reads it: the fields of scripts/run-status.mjs's record that the board draws. */
+export type RunRecord = {
+  stage: string
+  phases: Phase[]
+  end: { outcome: string; text: string; kind: string | null; live: boolean; deployRun: number | null } | null
+  note: { text: string; cost: number } | null
+  namedCycles: number
+  /** When the live phase opened, in milliseconds, or null when none is live or its line has no stamp. */
+  phaseSinceMs: number | null
+  phaseMs: { label: string; ms: number }[]
+  /** The milliseconds of each split phase, or null when no time falls in any. */
+  phaseSplit: { savor: number; cycles: number; ship: number } | null
+  launchSpans: { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }[]
+  launches: number
+  mode: string | null
+  epic: string | null
+  after: string[] | null
+  splitFrom: string[] | null
+  cycles: number | null
+}
+
+/**
+ * What a record's text gives the board: the record; `newer` when its
+ * `version` is an integer the board does not know; or `none` when the text is
+ * no JSON object, has no version 1, or holds a field the board draws that is
+ * missing or of another type, as a record that predates a field does.
+ */
+export type RecordRead = { kind: 'record'; record: RunRecord } | { kind: 'newer' } | { kind: 'none' }
+
+const isInt = (v: unknown): v is number => Number.isInteger(v)
+const isStr = (v: unknown): v is string => typeof v === 'string'
+const isList = (v: unknown, item: (x: unknown) => boolean): v is unknown[] => Array.isArray(v) && v.every(item)
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const PHASE_STATES: readonly unknown[] = ['todo', 'live', 'done']
+const isPhase = (v: unknown): v is Phase => isObject(v) && isStr(v.label) && isStr(v.short) && PHASE_STATES.includes(v.state)
+
+/** A record's `end`: the object, null when the record says the run has not ended, undefined when it is malformed. */
+function parseEnd(v: unknown): RunRecord['end'] | undefined {
+  if (v === null) return null
+  if (!isObject(v)) return undefined
+  const { outcome, text, kind, live, deploy_run } = v
+  if (!isStr(outcome) || !isStr(text) || !(kind === null || isStr(kind)) || typeof live !== 'boolean') return undefined
+  if (!(deploy_run === null || isInt(deploy_run))) return undefined
+  return { outcome, text, kind, live, deployRun: deploy_run }
+}
+
+/** A launch span with both times parsed, or undefined when it is malformed. */
+function parseSpan(v: unknown): RunRecord['launchSpans'][number] | undefined {
+  if (!isObject(v)) return undefined
+  const { slot, start, end, live } = v
+  const startMs = parseMs(start)
+  const endMs = end === null ? null : parseMs(end)
+  if (!(slot === null || isInt(slot)) || startMs === null || (end !== null && endMs === null) || typeof live !== 'boolean') return undefined
+  return { slot, startMs, endMs, isLive: live }
+}
+
+export function recordRead(text: string): RecordRead {
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  } catch {
+    return { kind: 'none' }
+  }
+  if (!isObject(data)) return { kind: 'none' }
+  const r = data
+  if (isInt(r.version) && r.version !== RUN_STATUS_VERSION) return { kind: 'newer' }
+  if (r.version !== RUN_STATUS_VERSION) return { kind: 'none' }
+  const end = parseEnd(r.end)
+  const note = r.note
+  const split = r.phase_split
+  const spans = isList(r.launch_spans, x => parseSpan(x) !== undefined) ? r.launch_spans.map(x => parseSpan(x)) : null
+  const orNullList = (v: unknown): v is string[] | null => v === null || isList(v, isStr)
+  const fits =
+    isStr(r.stage) &&
+    isList(r.phases, isPhase) &&
+    end !== undefined &&
+    (note === null || (isObject(note) && isStr(note.text) && num(note.cost) !== null)) &&
+    isInt(r.named_cycles) &&
+    (r.phase_since === null || parseMs(r.phase_since) !== null) &&
+    isList(r.phase_ms, x => isObject(x) && isStr(x.label) && isInt(x.ms)) &&
+    (split === null || (isObject(split) && isInt(split.savor) && isInt(split.cycles) && isInt(split.ship))) &&
+    spans !== null &&
+    isInt(r.launches) &&
+    (r.mode === null || isStr(r.mode)) &&
+    (r.epic === null || isStr(r.epic)) &&
+    orNullList(r.after) &&
+    orNullList(r.split_from) &&
+    (r.cycles === null || isInt(r.cycles))
+  if (!fits) return { kind: 'none' }
+  const n = note as { text: string; cost: number } | null
+  const s = split as { savor: number; cycles: number; ship: number } | null
+  return {
+    kind: 'record',
+    record: {
+      stage: r.stage as string,
+      phases: (r.phases as Phase[]).map(p => ({ label: p.label, short: p.short, state: p.state })),
+      end,
+      note: n === null ? null : { text: n.text, cost: n.cost },
+      namedCycles: r.named_cycles as number,
+      phaseSinceMs: r.phase_since === null ? null : parseMs(r.phase_since),
+      phaseMs: (r.phase_ms as { label: string; ms: number }[]).map(p => ({ label: p.label, ms: p.ms })),
+      phaseSplit: s === null ? null : { savor: s.savor, cycles: s.cycles, ship: s.ship },
+      launchSpans: spans.filter(x => x !== undefined),
+      launches: r.launches as number,
+      mode: r.mode as string | null,
+      epic: r.epic as string | null,
+      after: r.after as string[] | null,
+      splitFrom: r.split_from as string[] | null,
+      cycles: r.cycles as number | null,
+    },
+  }
+}
+
 /** `docs/briefs/kickoff-sitting-s299-one-full-check.md` → `kickoff-sitting-s299-one-full-check`. */
 export function baseName(brief: string): string {
   return brief.replace(/^.*\//, '').replace(/\.md$/, '')
@@ -122,36 +275,6 @@ export function sittingOf(brief: string): { sitting: string; slug: string } {
   const base = baseName(brief)
   const m = /s(\d+)-(.+)$/.exec(base)
   return m ? { sitting: `S${m[1] ?? ''}`, slug: m[2] ?? '' } : { sitting: base, slug: '' }
-}
-
-const SKILL_STAGES: Record<string, string> = {
-  'commit-skill:commit': 'committing',
-  'commit-skill:ship': 'shipping',
-  simplify: 'simplify',
-  'sittings:savor': 'savor',
-  'sittings:observations': 'observations',
-}
-const REVIEW_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
-
-/**
- * Names what a run is doing from its progress file: the last line that marks a
- * step. A `commit:` line ends a skill's work, so the run is between steps.
- */
-export function stageOf(progress: string): string {
-  for (const line of progress.split('\n').reverse()) {
-    if (line.startsWith('finished: ')) return 'finished'
-    if (line.startsWith('pushes: ')) return 'recording'
-    if (isPushLine(line)) return 'pushing'
-    if (line.startsWith('commit: ')) return 'working'
-    const skill = /^skill: (\S+)(?: (\S+))?/.exec(line)
-    if (skill) {
-      const name = skill[1] ?? ''
-      const level = skill[2] ?? ''
-      if (name === 'code-review') return REVIEW_LEVELS.has(level) ? `review ${level}` : 'review'
-      return SKILL_STAGES[name] ?? name.replace(/^.*:/, '')
-    }
-  }
-  return 'starting'
 }
 
 // How much of a run's stream-json log the board reads for its newest tool
@@ -454,28 +577,6 @@ function liveLabels(lines: readonly string[], cycles?: number): (string | null)[
 }
 
 /**
- * When the live phase started: the stamp on the first line of the run of
- * lines that leave the same phase live, or the stamp on the latest `slot:`
- * line when that is later, so a relaunched run's clock counts from its
- * relaunch. Null when no phase is live or the opening line has no stamp.
- */
-export function phaseSince(progress: string, cycles?: number): number | null {
-  const lines = progress.split('\n')
-  const times = lineTimes(progress)
-  const labels = liveLabels(lines, cycles)
-  const last = labels.length - 1
-  const live = labels[last] ?? null
-  if (live === null) return null
-  let first = last
-  while (first > 0 && labels[first - 1] === live) first--
-  const opened = times[first] ?? null
-  if (opened === null) return null
-  const launch = lines.findLastIndex(line => line.startsWith('slot: '))
-  const launchedAt = launch === -1 ? null : (times[launch] ?? null)
-  return launchedAt === null ? opened : Math.max(opened, launchedAt)
-}
-
-/**
  * A run's milliseconds in each phase, by phase label. The time from one stamp
  * to the next belongs to the phase the lines under the first one leave live.
  * Time after a `finished:` line and before the next `slot:` line, a
@@ -532,6 +633,8 @@ const QUIET_STAGES = new Set(['savor', 'starting', 'working', 'review low', 'sim
  * phase in flight reads `finishing`.
  */
 export function phaseLine(r: Run): string {
+  // A run with no record draws no phases, and its stage is status.json's alone.
+  if (r.phases.length === 0) return r.stage
   if (!r.phases.some(p => p.state === 'live')) return 'finishing'
   const parts: string[] = []
   if (!QUIET_STAGES.has(r.stage)) parts.push(r.stage)
@@ -832,15 +935,6 @@ export function shortDollars(n: number): string {
 /** The phase in flight's short name, or `done` once every phase is. */
 export const livePhase = (phases: readonly Phase[]): string => phases.find(p => p.state === 'live')?.short ?? 'done'
 
-/** The run's own last sentence and cost, from its newest `… $N so far: text` line. */
-export function noteOf(progress: string): { note: string; cost: number | null } {
-  for (const line of progress.split('\n').reverse()) {
-    const m = /\$(\d+(?:\.\d+)?) so far: (.*)$/.exec(line)
-    if (m) return { note: (m[2] ?? '').trim(), cost: Number(m[1]) }
-  }
-  return { note: '', cost: null }
-}
-
 // A loop's run directory: `<UTC date>-<HHMM>`, and `-2`, `-3` for a later
 // launch in the same minute (scripts/archloop.sh). `canary-…` and `s297` are
 // not loop runs.
@@ -927,6 +1021,8 @@ export function buildBoard(
   now: number,
   extra: {
     loop?: Loop | null
+    /** Each running brief's record as the board read it; a brief with no read is absent. */
+    records?: Readonly<Record<string, RecordRead>>
     recent?: Ended[]
     onDeck?: Deck[]
     /** Each running brief's newest tool call, read from its log. */
@@ -979,21 +1075,22 @@ export function buildBoard(
   const onDeck = (extra.onDeck ?? []).filter(d => !drawn.has(d.sitting))
   const medians = phaseMedians(recent)
   const running: Run[] = raw.running.map(r => {
-    const text = progress[r.brief] ?? ''
-    const { cost } = noteOf(text)
-    const stage = stageOf(text)
-    const phases = phasesOf(text, cycles[briefKey(r.brief)])
+    // A run with no record the board can read draws from status.json alone.
+    const read = extra.records?.[r.brief]
+    const record = read?.kind === 'record' ? read.record : null
+    const phases = record?.phases ?? []
     const live = phases.find(p => p.state === 'live')
     return {
       entry: r.entry,
       ...sittingOf(r.brief),
       lane: r.lane,
       startedMs: parseMs(r.started) ?? now,
-      cost: Math.max(r.cost, cost ?? 0),
-      stage,
+      cost: Math.max(r.cost, record?.note?.cost ?? 0),
+      stage: read?.kind === 'newer' ? 'newer' : (record?.stage ?? 'starting'),
+      isNewer: read?.kind === 'newer',
       tool: tools[r.brief] ?? '',
       phases,
-      phaseSinceMs: phaseSince(text, cycles[briefKey(r.brief)]),
+      phaseSinceMs: record?.phaseSinceMs ?? null,
       phaseMedianMs: live === undefined ? null : (medians[phaseKey(live.label)] ?? null),
       fill: live === undefined || extra.marks?.[r.brief] === undefined ? null : phaseFill(live.label, logEventsOf(extra.marks[r.brief] ?? '')),
       isAlive: r.pid !== null && alive.has(r.pid),
@@ -1036,6 +1133,7 @@ export function buildBoard(
     .sort((a, b) => b.entry - a.entry)
     .map(f => ({ entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped: f.status === 0, detail: outcomeDetail(outcomeOf(f)) }))
   return {
+    notice: null,
     checkedAt: now,
     clock: localClock(now, utcOffset),
     spend,
@@ -1063,6 +1161,17 @@ export function buildBoard(
       utcOffset,
     }),
   }
+}
+
+// The lines a board draws alone, in place of every card.
+export const STATUS_NEWER = 'status.json is newer than the board'
+export const NO_SOURCES = 'status.json names no sources'
+export const RECORD_NEWER = 'the record is newer than the board'
+
+/** A board that draws `notice` alone: no run, no queue, no loop and no deck. */
+export function noticeBoard(notice: string, now: number): Board {
+  const empty = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), now)
+  return { ...empty, notice }
 }
 
 const HOUR_MS = 3600000
@@ -2944,9 +3053,11 @@ export function statusLine(b: Board): string | undefined {
     runs.length === 0
       ? [lane === LOOP_LANE && b.loop !== null ? loopPart(b.loop, b.checkedAt) : `${lane} idle`]
       : runs.map(r =>
-          r.isAlive
-            ? `● ${r.sitting} ${miniBar(r.phases)} ${livePhase(r.phases)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
-            : `✗ ${r.sitting} launcher gone`,
+          !r.isAlive
+            ? `✗ ${r.sitting} launcher gone`
+            : r.phases.length === 0
+              ? `● ${r.sitting} ${r.stage} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
+              : `● ${r.sitting} ${miniBar(r.phases)} ${livePhase(r.phases)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`,
         ),
   )
   if (b.queued.length > 0) parts.push(`○ ${b.queued.length}`)

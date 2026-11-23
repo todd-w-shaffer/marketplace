@@ -38,6 +38,7 @@ import {
   logEventsOf,
   phaseLine,
   phaseName,
+  recordRead,
   phasesOf,
   queueTree,
   parseStatus,
@@ -45,7 +46,6 @@ import {
   recentOf,
   segmentWidth,
   runStartedMs,
-  stageOf,
   stripOf,
   statusLine,
   tileFace,
@@ -61,7 +61,6 @@ import {
   launchCount,
   lineTimes,
   phaseDurations,
-  phaseSince,
   phaseSplit,
   planCosts,
   splitCounts,
@@ -77,6 +76,7 @@ import {
   sparkGlyphs,
 } from '../hooks/board'
 import type { Deck, Ended, Run } from '../types'
+import type { RecordRead } from '../hooks/board'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -92,6 +92,10 @@ const STATUS = JSON.stringify({
   ],
 })
 
+const S300_BRIEF = 'docs/briefs/kickoff-sitting-s300-loop-run-record.md'
+// S300's record: pushing the ship, $10.07 in.
+const S300_READ = () => runRead({ stage: 'pushing', phases: phasesAt(1, 3), note: { text: 'The archive commit is pushing.', cost: 10.07 } })
+
 const S300 = [
   'skill: commit-skill:commit S300 cycle 1: ...',
   'commit: feat(x): y',
@@ -102,24 +106,11 @@ const S300 = [
 
 const NOW = Date.parse('2026-10-31T16:49:25Z')
 
-test('stages come from the last step line', async () => {
-  expect(stageOf(S300)).toBe('pushing')
-  expect(stageOf('skill: code-review xhigh /usr/bin/git diff a b')).toBe('review xhigh')
-  expect(stageOf('skill: commit-skill:commit x\ncommit: y')).toBe('working')
-  expect(stageOf('skill: simplify Paths in scope')).toBe('simplify')
-  expect(stageOf('')).toBe('starting')
-})
-
 test('a board reads runs, queue, outcomes and liveness', async () => {
   const raw = parseStatus(STATUS)
   expect(raw === null).toBe(false)
   if (raw === null) return
-  const b = buildBoard(
-    raw,
-    { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 },
-    new Set([5147, 21491]),
-    NOW,
-  )
+  const b = buildBoard(raw, {}, new Set([5147, 21491]), NOW, { records: { [S300_BRIEF]: S300_READ() } })
   expect(b.isDispatcherLive).toBe(true)
   expect(b.running.map(r => `${r.sitting}:${r.stage}:${r.isAlive}`)).toEqual([
     'S299:starting:false',
@@ -151,7 +142,8 @@ test('a free slot has no card and no idle part on the hint line', async () => {
   if (raw === null) throw new Error('status did not parse')
   const oneRun = { ...raw, running: raw.running.filter(r => r.lane === 'epic'), queued: [] }
   const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
-  expect(statusLine(b)).toBe('● S299 ⣤⣀⣀⣀⣀⡇ c1 1h06m │ $7.65')
+  // S299 has no record, so it draws from status.json alone.
+  expect(statusLine(b)).toBe('● S299 starting 1h06m │ $7.65')
   expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1'])
 })
 
@@ -223,12 +215,7 @@ test('phases follow the chain: each cycle closes on its low review, then simplif
   )
 })
 
-test('a ship-run call is a push: the stage, the archive after it, --finish and the strip', async () => {
-  expect(stageOf('skill: commit-skill:ship\nbash: ship-run --to-default')).toBe('pushing')
-  expect(stageOf('skill: commit-skill:ship\nbash: /x/commit-skill/bin/ship-run')).toBe('pushing')
-  // A command that only names ship-run, in a string or as an argument, pushes nothing.
-  expect(stageOf("skill: commit-skill:ship\nbash: grep -n 'ship-run' SKILL.md")).toBe('shipping')
-  expect(stageOf('skill: commit-skill:ship\nbash: cat bin/ship-run')).toBe('shipping')
+test('a ship-run call is a push: the archive after it, --finish and the strip', async () => {
   const shipping = `${S395}\nskill: commit-skill:ship\nbash: ship-run --to-default`
   expect(states(`${shipping}\nskill: commit-skill:commit archive S395`, 3)).toBe(
     'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
@@ -346,10 +333,14 @@ test('a running card and the hint line show the phase, the stage and the newest 
         { entry: 5, brief: s395, lane: 'fix', pid: 21491, started: '2026-10-31T15:11:36Z', cost: 0 },
       ],
     },
-    { [s393]: S393, [s395]: S395 },
+    {},
     new Set([5147, 79762, 21491]),
     NOW,
     {
+      records: {
+        [s393]: runRead({ stage: 'working', phases: phasesAt(2, 1), note: { text: "Cycle 2's build is running.", cost: 10.62 } }),
+        [s395]: runRead({ phases: phasesAt(3, 4), note: { text: "Waiting for cycle 3's build.", cost: 6.06 } }),
+      },
       tools: { [s393]: 'Bash: Run the focused check' },
       cycles: { [s393]: 2, [s395]: 3 },
       marks: { [s393]: marks(skillMark(1, 'R1', 'code-review', 'low a~1..a'), useMark(2, 'E1', 'Edit', '"file_path":"/x/a.ts')) },
@@ -383,7 +374,7 @@ test('the clock reads in the local offset, to the minute, on a 12-hour face', as
 test('the cost in flight adds every run and the loop', async () => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
-  const b = buildBoard(raw, { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 }, new Set([5147]), NOW, { utcOffset: '-0500' })
+  const b = buildBoard(raw, {}, new Set([5147]), NOW, { utcOffset: '-0500', records: { [S300_BRIEF]: S300_READ() } })
   expect(inFlight(b)).toBe(17.72)
   expect(b.clock).toBe('11:49 AM')
 })
@@ -620,7 +611,10 @@ test('a live loop shows its stage, and tags a landing of its own', async () => {
     {},
     new Set([1, 7]),
     at,
-    { loop: buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at) },
+    {
+      loop: buildLoop('2026-11-01-1417', [file('p1/plan-01.autopilot', 4)], LOOP_PROGRESS, at),
+      records: { 'docs/briefs/kickoff-sitting-s316-x.md': runRead({ phases: phasesAt(1, 0), note: null }) },
+    },
   )
   expect(statusLine(landing)).toBe('● S316 ⣤⣀⣀⣀⣀⡇ c1 10m (loop) │ $21.49')
 })
@@ -1099,7 +1093,7 @@ test('a handoff question reads both the bare and the addressed label', () => {
 })
 
 // The shape the pane's board atom is stored under; it moves with the Board type.
-const BOARD_SHAPE = 'board-15'
+const BOARD_SHAPE = 'board-16'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>
@@ -1519,23 +1513,6 @@ test("each phase's time comes from the at lines, and a relaunch's wait counts in
   })
 })
 
-test('the live phase starts at the line that opened it, or at the latest launch when that is later', () => {
-  const cycleTwo: [number, string][] = [
-    [0, 'slot: 1'],
-    [0, 'skill: sittings:savor launch /w/b.md'],
-    [10, 'savored: session 0 handed over'],
-    [20, 'skill: commit-skill:commit cycle 1: the reader'],
-    [25, 'skill: code-review low git diff a b'],
-    [31, 'bash: npm run check:cycle'],
-  ]
-  expect(phaseSince(stamped(cycleTwo), 3)).toBe(T0 + 25 * 60000)
-  // The run stops in cycle 2 and is relaunched: the clock restarts at the new slot line.
-  const relaunched: [number, string][] = [...cycleTwo, [40, 'finished: stopped: read the handoff. ($5.00, 40 min)'], [90, 'slot: 2'], [95, 'bash: npm test']]
-  expect(phaseSince(stamped(relaunched), 3)).toBe(T0 + 90 * 60000)
-  // No stamps, no clock.
-  expect(phaseSince(cycleTwo.map(([, line]) => line).join('\n'), 3)).toBe(null)
-})
-
 // S692 started 16:34; cycle 1 opened at 16:40, so at 16:49:25 it is 9m in.
 const S692_IN_CYCLE_ONE = {
   [`${BRIEFS}s692-design-tokens.md`]: [
@@ -1553,8 +1530,13 @@ const recentWithCycles = (minutes: number[]): Ended[] =>
     ...d,
     phaseMs: { 'cycle 1': (minutes[i] ?? 0) * 60000 },
   }))
+// S692 started 16:34, and its record opened cycle 1 at 16:40.
 const phaseClockBoard = (recent: Ended[]) =>
-  buildBoard(S684_STATUS, S692_IN_CYCLE_ONE, new Set([1, 11]), NOW, { cycles: { [`${BRIEFS}s692-design-tokens.md`]: 3 }, recent })
+  buildBoard(S684_STATUS, {}, new Set([1, 11]), NOW, {
+    cycles: { [`${BRIEFS}s692-design-tokens.md`]: 3 },
+    recent,
+    records: { [`${BRIEFS}s692-design-tokens.md`]: runRead({ phases: phasesAt(3, 0), phase_since: '2026-10-31T16:40:00Z', note: null }) },
+  })
 
 test("the running card's header reads phase time · total · cost, the phase time peach under its median", async ($, on) => {
   const { ui } = await mountBoard($, on, phaseClockBoard(recentWithCycles([12, 20, 30])))
@@ -1892,8 +1874,11 @@ test('the timeline does not fold itself while BLOCKED shows', () => {
 // One poll over a home whose files and commands the test answers by path and argv.
 const HOME = '/h'
 const LOGS = `${HOME}/Library/Logs/shootsfilm-autopilot`
+// status.json's `sources` on the machine the defaults name; DEFAULT_STATUS heads every poll fixture's status.json.
+const DEFAULT_SOURCES = { main: `${HOME}/Desktop/apps/shootsfilm`, log_dir: LOGS, archloop_log_dir: `${HOME}/Library/Logs/shootsfilm-archloop` }
+const DEFAULT_STATUS = { version: 1, sources: DEFAULT_SOURCES }
 const POLL_FILES: Record<string, string> = {
-  [`${LOGS}/status.json`]: JSON.stringify({ dispatcher: 1, running: [], queued: [], finished: [] }),
+  [`${LOGS}/status.json`]: JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [], finished: [] }),
   [`${LOGS}/kickoff-sitting-s682-dom-wait-quiet.progress`]: stampedAt([[NOW - 3 * HOUR, 'slot: 1'], [NOW - 2 * HOUR, 'finished: shipped; production is live (run 1). ($22.40, 60 min)']]),
   [`${LOGS}/kickoff-sitting-s681-dropped.progress`]: stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 5 * HOUR, 'finished: shipped; production is live (run 2). ($9.00, 60 min)']]),
   [`${LOGS}/${S684_RUN}.progress`]: S684_STOP,
@@ -2074,7 +2059,7 @@ test('a brief blob that fails to read is asked for again on the next poll', asyn
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'board' } }))
   on('ui.status', () => ({ value: undefined }))
-  const status = JSON.stringify({ dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
+  const status = JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
   on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: status } : { deny: 'no such file' }))
   on('fs.list', (_: unknown, e: { path: string }) =>
     e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
@@ -2199,6 +2184,7 @@ const epicBoard = (opts: { sittings?: string; recent?: Ended[]; drop?: string } 
     cycles,
     endings: [{ base: S684_RUN, text: S684_PROGRESS, mtimeMs: NOW - 19 * MIN }],
     recent: opts.recent ?? recentOf(COST_FILES, []),
+    records: { [`${BRIEFS}s693-token-export.md`]: runRead({ phases: phasesAt(2, 0), note: null }) },
   })
 }
 
@@ -2403,7 +2389,7 @@ test('one poll counts every brief, reads epics from sittings.json and the plan, 
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'board' } }))
   on('ui.status', () => ({ value: undefined }))
-  const status = JSON.stringify({ dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s694-system-catalogue.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
+  const status = JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s694-system-catalogue.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
   on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: status } : { deny: 'no such file' }))
   on('fs.list', (_: unknown, e: { path: string }) =>
     e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
@@ -2504,7 +2490,7 @@ async function pollFixture($: any, on: any, status: object, answer: (poll: numbe
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'board' } }))
   on('ui.status', () => ({ value: undefined }))
-  const text = JSON.stringify({ dispatcher: 1, running: [], queued: [], finished: [], ...status })
+  const text = JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [], finished: [], ...status })
   on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: text } : { deny: 'no such file' }))
   on('fs.list', (_: unknown, e: { path: string }) =>
     e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
@@ -2587,4 +2573,298 @@ test('a running brief whose Epic line leaves origin/main leaves the epics card',
   const second = await mount()
   expect(await has(second, '▾ epics')).toBe(false)
   await second.unmount()
+})
+
+// ---------- the run record ----------
+
+// A record as scripts/run-status.mjs writes it: pasted from
+// ~/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.run.json.
+const RECORD_BASE = {
+  version: 1,
+  stage: 'finished',
+  phases: [
+    { label: 'savor', short: 'savor', state: 'done' },
+    { label: 'cycle 1', short: 'c1', state: 'done' },
+    { label: 'cycle 2', short: 'c2', state: 'done' },
+    { label: 'simplify', short: 'simpl', state: 'done' },
+    { label: 'review xhigh', short: 'xhigh', state: 'done' },
+    { label: 'shipping', short: 'ship', state: 'done' },
+    { label: 'archiving', short: 'arch', state: 'done' },
+  ],
+  end: {
+    outcome: 'shipped',
+    text: 'shipped; production is live (run 45194059532). ($23.27, 73 min, peak 226k context, effort medium, agents low-xhigh)',
+    kind: null,
+    live: true,
+    deploy_run: null,
+  },
+  note: { text: 'S727 has shipped and is archived. The new `POST /api/gallery/:galleryId/edits` door is on `main` at 2d2f29a38..52c68e7bf', cost: 9 },
+  named_cycles: 2,
+  phase_since: null,
+  phase_ms: [
+    { label: 'cycle 1', ms: 478000 },
+    { label: 'savor', ms: 480000 },
+    { label: 'cycle 2', ms: 1070000 },
+    { label: 'simplify', ms: 595000 },
+    { label: 'review xhigh', ms: 1370000 },
+    { label: 'shipping', ms: 243000 },
+    { label: 'archiving', ms: 200000 },
+  ],
+  phase_split: { savor: 480000, cycles: 3473000, ship: 443000 },
+  launch_spans: [{ slot: 2, start: '2026-11-23T13:15:56Z', end: '2026-11-23T14:25:34Z', live: true }],
+  stops: [],
+  handoff: null,
+  brief: 'docs/briefs/kickoff-sitting-s727-gallery-edit-batch.md',
+  mode: 'autopilot',
+  epic: 'gallery-panels/E11',
+  after: ['S725', 'S752'],
+  split_from: [],
+  cycles: 2,
+  landed: true,
+  launches: 1,
+  progress: '/Users/toddwshaffer/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.progress',
+  log: '/Users/toddwshaffer/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.log',
+}
+
+// The record `--print` answers, as
+// `node scripts/run-status.mjs --print ~/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.progress docs/archive/s727-gallery-edit-batch/kickoff-sitting-s727-gallery-edit-batch.md`
+// printed it: the written record with the brief path it was given.
+const PRINT_BASE = { ...RECORD_BASE, brief: 'docs/archive/s727-gallery-edit-batch/kickoff-sitting-s727-gallery-edit-batch.md' }
+
+// A running chain at the xhigh review.
+const XHIGH_PHASES = [
+  { label: 'cycle 1', short: 'c1', state: 'done' },
+  { label: 'cycle 2', short: 'c2', state: 'done' },
+  { label: 'simplify', short: 'simpl', state: 'done' },
+  { label: 'review xhigh', short: 'xhigh', state: 'live' },
+  { label: 'shipping', short: 'ship', state: 'todo' },
+  { label: 'archiving', short: 'arch', state: 'todo' },
+]
+/** A running run's record, from the base: at the xhigh review for nine minutes, $3 in. */
+const runningRecord = (more: object = {}) => ({
+  ...RECORD_BASE,
+  stage: 'review xhigh',
+  phases: XHIGH_PHASES,
+  end: null,
+  phase_since: iso(NOW - 9 * MIN),
+  note: { text: 'reviewing', cost: 3 },
+  launch_spans: [{ slot: 1, start: iso(NOW - 30 * MIN), end: null, live: false }],
+  ...more,
+})
+
+// Every path the board reads from status.json's `sources`, each off its default.
+const SOURCES = { main: '/src/main', log_dir: '/src/logs', archloop_log_dir: '/src/loop' }
+const S758 = 'kickoff-sitting-s758-run-board-reads-record'
+const S758_BRIEF = `docs/briefs/${S758}.md`
+const S758_RECORD = '/src/records/s758.run.json'
+/** A status.json with one running run, S758, whose record sits at S758_RECORD. */
+const runningStatus = (more: object = {}, run: object = {}) =>
+  JSON.stringify({
+    version: 1,
+    sources: SOURCES,
+    dispatcher: 1,
+    running: [
+      { entry: 9, brief: S758_BRIEF, lane: '1', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 2, slot: 1, slot_taken: iso(NOW - 30 * MIN), slot_released: null, run_record: S758_RECORD, ...run },
+    ],
+    queued: [],
+    finished: [],
+    ...more,
+  })
+// The progress text names another stage than any record here: a board that reads it lights `ship`.
+const S758_PROGRESS = stampedAt([[NOW - 30 * MIN, 'slot: 1'], [NOW - 2 * MIN, 'skill: commit-skill:ship']])
+
+type Argv = readonly string[]
+type RunAnswer = { exitCode: number; stdout: string } | undefined
+
+/**
+ * Polls over `files` as a file tree, each file at its `mtimes` entry or NOW,
+ * with `run` answering the commands it knows. Returns the pane the last poll
+ * wrote, every command the polls ran with its working directory, and the
+ * clock.
+ */
+async function pollPane(
+  $: any,
+  on: any,
+  files: Record<string, string>,
+  run: (argv: Argv, cwd: string | undefined) => RunAnswer = () => undefined,
+  mtimes: Record<string, number> = {},
+) {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { HOME })
+  mock.store(on, { folds: {} })
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: { command: 'board' } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.read', (_: unknown, e: { path: string }) => (e.path in files ? { value: files[e.path] } : { deny: 'no such file' }))
+  on('fs.list', (_: unknown, e: { path: string }) => {
+    const entries = new Map<string, { name: string; kind: 'file' | 'dir'; size: number; mtimeMs: number; isLink: boolean }>()
+    for (const p of Object.keys(files)) {
+      if (!p.startsWith(`${e.path}/`)) continue
+      const [name = '', ...deeper] = p.slice(e.path.length + 1).split('/')
+      entries.set(name, { name, kind: deeper.length > 0 ? 'dir' : 'file', size: 1, mtimeMs: mtimes[p] ?? NOW, isLink: false })
+    }
+    return entries.size === 0 ? { deny: 'no such directory' } : { value: [...entries.values()] }
+  })
+  const calls: { argv: Argv; cwd: string | undefined }[] = []
+  on('process.run', (_: unknown, e: { argv: Argv; init?: { cwd?: string } }) => {
+    calls.push({ argv: e.argv, cwd: e.init?.cwd })
+    const answer = run(e.argv, e.init?.cwd)
+    const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (answer !== undefined) return out(answer.stdout, answer.exitCode)
+    const [cmd = ''] = e.argv
+    if (cmd === 'date') return out('-0500')
+    if (cmd === 'ps') return out('1\n7\n11\n')
+    return out('', 1)
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(0)
+  const mount = () =>
+    $.ui.mount({
+      plugin: 'run-board',
+      component: 'Pane',
+      requestId: 'run-board',
+      surface: 'terminal',
+      props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+    })
+  return { ui: await mount(), calls, clock, mount }
+}
+
+/** The bar labels drawn lit: peach and bold, the phase in flight. */
+const litLabels = async (ui: Ui): Promise<string[]> =>
+  (await ui.findAll({ type: 'Text' }))
+    .filter(t => t.props?.color === PEACH && (t.props as { bold?: boolean } | undefined)?.bold === true)
+    .map(t => (t.text ?? '').trim())
+
+/**
+ * The fixed chain over `cycles` cycles, each phase before index `live` done,
+ * that one live and the rest to come: the phases a record lists.
+ */
+function phasesAt(cycles: number, live: number) {
+  const names: [string, string][] = [
+    ...Array.from({ length: cycles }, (_, i): [string, string] => [`cycle ${i + 1}`, `c${i + 1}`]),
+    ['simplify', 'simpl'],
+    ['review xhigh', 'xhigh'],
+    ['shipping', 'ship'],
+    ['archiving', 'arch'],
+  ]
+  return names.map(([label, short], i) => ({ label, short, state: i < live ? 'done' : i === live ? 'live' : 'todo' }))
+}
+
+/** A running record read through the board's reader, from `runningRecord(more)`. */
+function runRead(more: object = {}): RecordRead {
+  const read = recordRead(JSON.stringify(runningRecord(more)))
+  if (read.kind !== 'record') throw new Error('the fixture is no record')
+  return read
+}
+
+const isPrint = (argv: Argv): boolean => argv[0] === 'node' && argv.includes('--print')
+
+test('the record base passes the reader, and so does the --print answer', () => {
+  expect(recordRead(JSON.stringify(RECORD_BASE)).kind).toBe('record')
+  expect(recordRead(JSON.stringify(PRINT_BASE)).kind).toBe('record')
+})
+
+test("a running run draws its record's stage, phases and clock, whatever its progress text says", async ($, on) => {
+  const { ui, calls } = await pollPane(
+    $,
+    on,
+    {
+      [`${LOGS}/status.json`]: runningStatus(),
+      [S758_RECORD]: JSON.stringify(runningRecord()),
+      [`${LOGS}/${S758}.progress`]: S758_PROGRESS,
+    },
+    argv => (isPrint(argv) ? { exitCode: 0, stdout: JSON.stringify({ ...PRINT_BASE, stage: 'committing' }) } : undefined),
+  )
+  expect(await litLabels(ui)).toEqual(['xhigh'])
+  expect(await has(ui, '9m · 30m · $3.00')).toBe(true)
+  expect(calls.filter(c => isPrint(c.argv))).toEqual([])
+  await ui.unmount()
+})
+
+test('a record of a version the board does not know draws no run, says it is newer, and never asks --print', async ($, on) => {
+  // A whole record with its own stage, and a field v1 would refuse: a board that checks fields first reads it as old.
+  const newer = { ...runningRecord({ stage: 'observations' }), version: 2, phases: 'every phase' }
+  const { ui, calls } = await pollPane(
+    $,
+    on,
+    {
+      [`${LOGS}/status.json`]: runningStatus(),
+      [S758_RECORD]: JSON.stringify(newer),
+      [`${LOGS}/${S758}.progress`]: S758_PROGRESS,
+    },
+    argv => (isPrint(argv) ? { exitCode: 0, stdout: JSON.stringify({ ...runningRecord({ stage: 'committing' }) }) } : undefined),
+  )
+  expect(await has(ui, 'the record is newer than the board')).toBe(true)
+  expect(await litLabels(ui)).toEqual([])
+  expect(await has(ui, 'observations')).toBe(false)
+  expect(await has(ui, 'committing')).toBe(false)
+  expect(calls.filter(c => isPrint(c.argv))).toEqual([])
+  await ui.unmount()
+})
+
+test('a --print answer of a version the board does not know draws the newer line too', async ($, on) => {
+  const { ui } = await pollPane(
+    $,
+    on,
+    { [`${LOGS}/status.json`]: runningStatus(), [`${LOGS}/${S758}.progress`]: S758_PROGRESS },
+    argv => (isPrint(argv) ? { exitCode: 0, stdout: JSON.stringify({ ...runningRecord({ stage: 'observations' }), version: 2 }) } : undefined),
+  )
+  expect(await has(ui, 'the record is newer than the board')).toBe(true)
+  expect(await litLabels(ui)).toEqual([])
+  await ui.unmount()
+})
+
+test('a status.json of a version the board does not know draws no board and says it is newer', async ($, on) => {
+  const { ui } = await pollPane($, on, {
+    [`${LOGS}/status.json`]: runningStatus({ version: 2 }),
+    [S758_RECORD]: JSON.stringify(runningRecord()),
+  })
+  expect(await has(ui, 'status.json is newer than the board')).toBe(true)
+  expect(await has(ui, 'S758')).toBe(false)
+  await ui.unmount()
+})
+
+for (const [name, status] of [
+  ['a missing status.json', undefined],
+  ['a status.json with no sources', JSON.stringify({ ...JSON.parse(runningStatus()), sources: undefined })],
+  ['a status.json whose sources name no strings', JSON.stringify({ ...JSON.parse(runningStatus()), sources: { main: 7 } })],
+] as const) {
+  test(`${name} draws the no-sources line alone, with no loop and no ON DECK`, async ($, on) => {
+    const files: Record<string, string> = {
+      [S758_RECORD]: JSON.stringify(runningRecord()),
+      [`${HOME}/Library/Logs/shootsfilm-archloop/.lock/pid`]: '7\n',
+      [`${HOME}/Library/Logs/shootsfilm-archloop/2026-10-31-1600/progress`]: '',
+    }
+    if (status !== undefined) files[`${LOGS}/status.json`] = status
+    const { ui } = await pollPane($, on, files, argv =>
+      argv[0] === 'git' && argv[1] === 'ls-tree'
+        ? { exitCode: 0, stdout: '100644 blob d777\tdocs/briefs/kickoff-sitting-s777-on-deck.md\n' }
+        : argv[0] === 'git' && argv[1] === 'cat-file'
+          ? { exitCode: 0, stdout: '# S777\n\n**Mode: autopilot.**\n' }
+          : undefined,
+    )
+    expect(await has(ui, 'status.json names no sources')).toBe(true)
+    expect(await has(ui, 'S777')).toBe(false)
+    expect(await has(ui, 'S758')).toBe(false)
+    expect(await has(ui, '2026-10-31-1600')).toBe(false)
+    await ui.unmount()
+  })
+}
+
+test("status.json's sources name the main checkout and the loop's log directory", async ($, on) => {
+  const { ui, calls } = await pollPane(
+    $,
+    on,
+    {
+      [`${LOGS}/status.json`]: runningStatus(),
+      [S758_RECORD]: JSON.stringify(runningRecord()),
+      [`${SOURCES.archloop_log_dir}/.lock/pid`]: '7\n',
+      [`${SOURCES.archloop_log_dir}/2026-10-31-1600/progress`]: '',
+      [`${SOURCES.archloop_log_dir}/2026-10-31-1600/p1/review.log`]: '',
+    },
+    argv => (argv[0] === 'git' && argv[1] === 'ls-tree' ? { exitCode: 0, stdout: '' } : undefined),
+  )
+  expect(await has(ui, '2026-10-31-1600')).toBe(true)
+  expect([...new Set(calls.filter(c => c.argv[0] === 'git').map(c => c.cwd))]).toEqual([SOURCES.main])
+  await ui.unmount()
 })

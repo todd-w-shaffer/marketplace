@@ -51,7 +51,12 @@ import {
   money,
   newestRunDir,
   queueTree,
-  parseStatus,
+  noticeBoard,
+  NO_SOURCES,
+  RECORD_NEWER,
+  recordRead,
+  STATUS_NEWER,
+  statusRead,
   lanesOf,
   recentCandidates,
   recentOf,
@@ -63,7 +68,7 @@ import {
   laneCells,
   nowCell,
 } from './board'
-import type { BriefsRead, CellTone, Ending, LoopFile, RawStatus, Spend, TimelineCell } from './board'
+import type { BriefsRead, CellTone, Ending, LoopFile, RawStatus, RecordRead, Sources, Spend, TimelineCell } from './board'
 
 // Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
 // paints comes from here, the pane's own ground included, so the pane reads
@@ -156,18 +161,15 @@ const PANE = 'run-board'
 const COMMAND = 'board'
 const TITLE = 'Autopilot runs'
 const POLL_MS = 5000
-// scripts/dispatch.sh's default LOG_DIR, under $HOME.
+// scripts/dispatch.sh's default LOG_DIR, under $HOME, where the board finds
+// status.json. The main checkout and the archloop's log directory come from
+// its `sources`. The main checkout's `origin/main` holds the briefs; every
+// worktree's push moves that ref, so the board reads it without a fetch.
 const LOG_DIR = 'Library/Logs/shootsfilm-autopilot'
-// scripts/archloop.sh's default ARCHLOOP_LOG_DIR, under $HOME.
-const LOOP_DIR = 'Library/Logs/shootsfilm-archloop'
-
-// The shoots.film checkout, under $HOME. Its `origin/main` holds the briefs;
-// every worktree's push moves that ref, so the board reads it without a fetch.
-const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-15' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-16' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -204,8 +206,7 @@ async function alivePids($: EngineInterface, pids: number[]): Promise<Set<number
  * flight is read from the newest file in the run directory and its pass
  * directories, by listing alone: a session log can pass the 4 MiB read cap.
  */
-async function readLoop($: EngineInterface, home: string): Promise<Loop | null> {
-  const dir = `${home}/${LOOP_DIR}`
+async function readLoop($: EngineInterface, dir: string): Promise<Loop | null> {
   const pid = Number((await $.fs.read(`${dir}/.lock/pid`).catch(() => '')).trim())
   if (!Number.isInteger(pid) || pid <= 0) return null
   if (!(await alivePids($, [pid]).catch(() => new Set<number>())).has(pid)) return null
@@ -388,12 +389,12 @@ async function readEndings(
  * reads `handoff/<name>.md` in the run's worktree, `.claude/worktrees/<name
  * without kickoff-sitting->`. If the launcher moves the handoff, update this.
  */
-async function readHandoffs($: EngineInterface, home: string, endings: readonly Ending[]): Promise<Record<string, string>> {
+async function readHandoffs($: EngineInterface, main: string, endings: readonly Ending[]): Promise<Record<string, string>> {
   const out: Record<string, string> = {}
   for (const e of endings) {
     const kind = lastEnd(e.text)?.kind
     if (kind !== 'decision' && kind !== 'split') continue
-    const tree = `${home}/${REPO}/.claude/worktrees/${e.base.replace(/^kickoff-sitting-/, '')}`
+    const tree = `${main}/.claude/worktrees/${e.base.replace(/^kickoff-sitting-/, '')}`
     const text = await $.fs.read(`${tree}/handoff/${e.base}.md`).catch(() => '')
     if (text !== '') out[e.base] = text
   }
@@ -415,11 +416,11 @@ let liveDeployCache = { run: '', askedMs: Number.NEGATIVE_INFINITY }
  * through production, or the last answer when `gh` fails. If deploy.yml is
  * renamed, update the workflow name here.
  */
-async function readLiveDeploy($: EngineInterface, home: string, now: number): Promise<string> {
+async function readLiveDeploy($: EngineInterface, main: string, now: number): Promise<string> {
   if (now - liveDeployCache.askedMs < DEPLOY_REASK_MS) return liveDeployCache.run
   const r = await $.process
     .run(['gh', 'run', 'list', '--workflow', 'deploy.yml', '--branch', 'main', '--status', 'success', '--limit', '1', '--json', 'databaseId', '--jq', '.[0].databaseId // empty'], {
-      cwd: `${home}/${REPO}`,
+      cwd: main,
       timeoutMs: 10000,
     })
     .catch(() => ({ exitCode: 1, stdout: '' }))
@@ -437,7 +438,7 @@ async function readLiveDeploy($: EngineInterface, home: string, now: number): Pr
  */
 async function readDeployStages(
   $: EngineInterface,
-  home: string,
+  main: string,
   endings: readonly Ending[],
   now: number,
 ): Promise<{ stages: Record<string, string>; live: string }> {
@@ -445,7 +446,7 @@ async function readDeployStages(
   let newestLive = Number.NEGATIVE_INFINITY
   for (const e of endings) if (lastEnd(e.text)?.isLive) newestLive = Math.max(newestLive, e.mtimeMs)
   const reds = endings.filter(e => e.mtimeMs > newestLive && deployRunOf(lastEnd(e.text)?.outcome ?? '') !== '')
-  const live = reds.length === 0 ? liveDeployCache.run : await readLiveDeploy($, home, now)
+  const live = reds.length === 0 ? liveDeployCache.run : await readLiveDeploy($, main, now)
   for (const e of endings) {
     const run = deployRunOf(lastEnd(e.text)?.outcome ?? '')
     if (run === '') continue
@@ -455,7 +456,7 @@ async function readDeployStages(
     if (known === undefined || reask) {
       const r = await $.process
         .run(['gh', 'run', 'view', run, '--json', 'status,conclusion,jobs', '--jq', '(.status + "\\t" + .conclusion), (.jobs[] | select(.conclusion == "failure") | .name)'], {
-          cwd: `${home}/${REPO}`,
+          cwd: main,
           timeoutMs: 10000,
         })
         .catch(() => ({ exitCode: 1, stdout: '' }))
@@ -516,8 +517,7 @@ let lastRead: Pick<BriefsRead, 'cycles' | 'epics' | 'recordedEpics' | 'archived'
  * and epic from `cyclesCache`. A failed listing reads no deck and gives the
  * last listing's cycles, epics, recorded epics, archived sittings and plan titles.
  */
-async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Promise<BriefsRead> {
-  const cwd = `${home}/${REPO}`
+async function readBriefs($: EngineInterface, cwd: string, raw: RawStatus): Promise<BriefsRead> {
   const running = raw.running.map(r => r.brief)
   const keys = running.map(briefKey)
   const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/', 'docs/plans/'], { cwd, timeoutMs: 5000 })
@@ -568,22 +568,123 @@ async function readBriefs($: EngineInterface, home: string, raw: RawStatus): Pro
 // seeds it, so loading the mod raises no toast for old runs.
 let seen: Set<number> | null = null
 
+// Records `--print` printed, by run name, each with the key it was printed
+// under: the progress file's mtime, the brief's path and mtime, and the
+// owner's mtime. A failed `--print` keeps no entry.
+const printCache = new Map<string, { key: string; read: RecordRead }>()
+// The `--print` in flight for each key, so an overlapping poll awaits it.
+const printInFlight = new Map<string, Promise<RecordRead | null>>()
+
+/** A file's mtime from the listing of its directory, or null when the listing does not hold it. */
+async function mtimeOf($: EngineInterface, dir: string, name: string): Promise<number | null> {
+  const hit = (await $.fs.list(dir).catch(() => [])).find(e => e.kind === 'file' && e.name === name)
+  return hit === undefined ? null : hit.mtimeMs
+}
+
+/**
+ * The brief `--print` reads for the run named `base`: `docs/briefs/<file>`
+ * while it exists, else the archive's `docs/archive/<name>/<file>`, where the
+ * archive keeps each brief under its name without `kickoff-sitting-`. Its
+ * mtime is null when neither path holds it, and `--print` then reads no brief.
+ */
+async function briefOnDisk($: EngineInterface, main: string, base: string): Promise<{ path: string; mtimeMs: number | null }> {
+  const file = `${base}.md`
+  const live = await mtimeOf($, `${main}/docs/briefs`, file)
+  if (live !== null) return { path: `${main}/docs/briefs/${file}`, mtimeMs: live }
+  const archive = `${main}/docs/archive/${base.replace(/^kickoff-sitting-/, '')}`
+  const archived = await mtimeOf($, archive, file)
+  return archived === null ? { path: `${main}/docs/briefs/${file}`, mtimeMs: null } : { path: `${archive}/${file}`, mtimeMs: archived }
+}
+
+/**
+ * The record of a run with no record the board can read, from
+ * `node <main>/scripts/run-status.mjs --print <progress> <brief>`, once per
+ * key. A `--print` that exits non-zero, rejects, or prints no record of a
+ * version the board knows or a newer one has failed, whatever its stdout
+ * holds: null, and nothing is kept, so the next poll asks again.
+ */
+async function printedRecord(
+  $: EngineInterface,
+  main: string,
+  dir: string,
+  base: string,
+  progressMs: number | null,
+  ownerMs: number | null,
+): Promise<RecordRead | null> {
+  const brief = await briefOnDisk($, main, base)
+  const key = JSON.stringify([progressMs, brief.path, brief.mtimeMs, ownerMs])
+  const hit = printCache.get(base)
+  if (hit !== undefined && hit.key === key) return hit.read
+  const running = printInFlight.get(key)
+  if (running !== undefined) return running
+  const read = $.process
+    .run(['node', `${main}/scripts/run-status.mjs`, '--print', `${dir}/${base}.progress`, brief.path], { cwd: main, timeoutMs: 10000 })
+    .then(r => {
+      const printed = r.exitCode === 0 ? recordRead(r.stdout) : null
+      if (printed === null || printed.kind === 'none') return null
+      printCache.set(base, { key, read: printed })
+      return printed
+    })
+    .catch(() => null)
+    .finally(() => printInFlight.delete(key))
+  printInFlight.set(key, read)
+  return read
+}
+
+/**
+ * Each running run's record, by brief: the file at its `run_record`, else
+ * what `--print` prints for it, one run after another. A run whose record
+ * has a version the board does not know reads `newer` and is not printed. A
+ * run with neither is absent, and draws from status.json alone.
+ */
+async function readRunningRecords($: EngineInterface, main: string, dir: string, raw: RawStatus): Promise<Record<string, RecordRead>> {
+  const out: Record<string, RecordRead> = {}
+  let ownerMs: number | null | undefined
+  for (const run of raw.running) {
+    const text = run.runRecord === undefined ? undefined : await $.fs.read(run.runRecord).catch(() => undefined)
+    const read = text === undefined ? null : recordRead(text)
+    if (read !== null && read.kind !== 'none') {
+      out[run.brief] = read
+      continue
+    }
+    const base = baseName(run.brief)
+    ownerMs ??= await mtimeOf($, `${main}/scripts`, 'run-status.mjs')
+    const printed = await printedRecord($, main, dir, base, await mtimeOf($, dir, `${base}.progress`), ownerMs)
+    if (printed !== null) out[run.brief] = printed
+  }
+  return out
+}
+
+/**
+ * The status.json the board draws from, or the notice it draws alone: the
+ * file is newer than the board, or it, or its `sources`, is missing or
+ * malformed.
+ */
+async function readStatus($: EngineInterface, dir: string): Promise<{ raw: RawStatus; sources: Sources } | { notice: string }> {
+  const text = await $.fs.read(`${dir}/status.json`).catch(() => undefined)
+  const read = text === undefined ? null : statusRead(text)
+  if (read?.kind === 'newer') return { notice: STATUS_NEWER }
+  if (read === null || read.sources === null) return { notice: NO_SOURCES }
+  return { raw: read.raw, sources: read.sources }
+}
+
 async function poll($: EngineInterface): Promise<void> {
   const home = await $.env.get('HOME')
   if (!home) return
   const dir = `${home}/${LOG_DIR}`
-  const text = await $.fs.read(`${dir}/status.json`).catch(() => undefined)
-  const status = text === undefined ? null : parseStatus(text)
-  const loop = await readLoop($, home).catch(() => null)
-  const raw = status ?? { dispatcher: null, running: [], queued: [], finished: [] }
-  const { onDeck, cycles, afters, splits, epics, recordedEpics, archived, planTitles } = await readBriefs($, home, raw).catch(
-    (): BriefsRead => ({ onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, archived: [], planTitles: {} }),
-  )
-  if (status === null && loop === null && onDeck.length === 0) {
-    await update($, board, () => null)
+  const status = await readStatus($, dir)
+  if ('notice' in status) {
+    const notice = noticeBoard(status.notice, await $.clock.now())
+    await update($, board, () => notice)
     return
   }
+  const { raw, sources } = status
+  const loop = await readLoop($, sources.archloopLogDir).catch(() => null)
+  const { onDeck, cycles, afters, splits, epics, recordedEpics, archived, planTitles } = await readBriefs($, sources.main, raw).catch(
+    (): BriefsRead => ({ onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, archived: [], planTitles: {} }),
+  )
 
+  const records = await readRunningRecords($, sources.main, dir, raw).catch(() => ({}))
   const progress: Record<string, string> = {}
   const tools: Record<string, string> = {}
   const marks: Record<string, string> = {}
@@ -606,14 +707,15 @@ async function poll($: EngineInterface): Promise<void> {
     .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
     .catch(() => '')
   const [handoffs, launches, deploys, utcOffset, read] = await Promise.all([
-    readHandoffs($, home, endings).catch(() => ({})),
+    readHandoffs($, sources.main, endings).catch(() => ({})),
     readLaunchCounts($, dir, endings, mtimes).catch(() => ({})),
-    readDeployStages($, home, endings, now).catch(() => ({ stages: {}, live: '' })),
+    readDeployStages($, sources.main, endings, now).catch(() => ({ stages: {}, live: '' })),
     offset,
     readSpend($, home, now, offset).catch(() => null),
   ])
   const next = buildBoard(raw, progress, alive, now, {
     loop,
+    records,
     recent,
     onDeck,
     tools,
@@ -742,6 +844,7 @@ export const register: Register = on => {
         </Box>
       )
     }
+    if (b.notice !== null) return <Text color={F.yellow}>{b.notice}</Text>
 
     // The header's three figures as dot numerals, each in the colour its
     // section uses below; a zero fades to the to-come grey.
@@ -1112,7 +1215,9 @@ export const register: Register = on => {
                     <Text color={F.text}>{money(r.cost)}</Text>
                   </Text>
                 </Box>
-                {r.isAlive ? (
+                {r.isNewer ? (
+                  <Text color={F.yellow}>{RECORD_NEWER}</Text>
+                ) : r.isAlive ? (
                   <Box flexDirection="column" marginTop={1}>
                     {phaseRows(r, segmentWidth(e.props.bodyColumns, r.phases.length))}
                     <Text wrap="truncate-end" color={F.overlay2}>

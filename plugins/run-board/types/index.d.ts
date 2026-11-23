@@ -6,6 +6,8 @@ export type Run = {
   startedMs: number
   cost: number
   stage: string
+  /** Whether the run's record has a version this board does not know, so the card draws no run. */
+  isNewer: boolean
   /** The newest tool call in the run's log, or empty. */
   tool: string
   /** The chain's phases in order, each done, in flight or still to come. */
@@ -206,6 +208,8 @@ export type EpicRow = {
 export type BriefCost = { cycles: number | null; usd: number | null; lit?: number }
 
 export type Board = {
+  /** A line the board draws alone in place of every card, or null: status.json is newer than the board, or names no sources. */
+  notice: string | null
   checkedAt: number
   /** `checkedAt` on a 12-hour clock in the machine's offset, `7:41 PM`. */
   clock: string
