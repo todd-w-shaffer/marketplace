@@ -34,6 +34,7 @@ import {
   outcomeDetail,
   phaseGlyphs,
   phaseFill,
+  LOG_MARKS,
   logEventsOf,
   phaseLine,
   phaseName,
@@ -423,9 +424,10 @@ const useMark = (n: number, id: string, name: string, input = '', nestedIn = '')
   ...(input === '' ? [] : [`${n}:"input":{${input}`]),
   ...(nestedIn === '' ? [] : [`${n}:"parent_tool_use_id":"${nestedIn}"`]),
 ]
+// As real `grep -noE LOG_MARKS` prints a Skill call: no input mark, the name and args in one.
 const skillMark = (n: number, id: string, skill: string, args: string): string[] => [
-  ...useMark(n, id, 'Skill', `"skill":"${skill}`),
-  `${n}:"skill":"${skill}","args":"${args}`,
+  ...useMark(n, id, 'Skill'),
+  `${n}:"skill":"${skill}"${args === '' ? '' : `,"args":"${args}`}`,
 ]
 const taskMark = (n: number, step: 'started' | 'progress' | 'notification', id: string, type = ''): string[] => [
   `${n}:"subtype":"task_${step}","task_id":"a1","run_id":"r1","tool_use_id":"${id}"`,
@@ -449,12 +451,22 @@ test('logEventsOf reads tool calls, their inputs, nesting, task events and resul
     ),
   )
   expect(events).toEqual([
-    { kind: 'use', id: 'S1', name: 'Skill', detail: 'simplify', skill: 'simplify', args: 'over the changed', nested: false },
+    { kind: 'use', id: 'S1', name: 'Skill', detail: '', skill: 'simplify', args: 'over the changed', nested: false },
     { kind: 'task', step: 'started', id: 'A1', agent: true },
     { kind: 'result', id: 'A1' },
     { kind: 'use', id: 'B1', name: 'Bash', detail: 'git diff --stat', skill: '', args: '', nested: true },
     { kind: 'task', step: 'notification', id: 'A1', agent: false },
   ])
+})
+
+test("LOG_MARKS reads a Skill call's name and args from a real log line", async () => {
+  // `grep -o` resumes after each match, as a global JS match does: an earlier mark must not take the skill's name.
+  const line = '{"type":"tool_use","id":"R1","name":"Skill","input":{"skill":"code-review","args":"low abc..def"}}'
+  const found = [...line.matchAll(new RegExp(LOG_MARKS, 'g'))].map(m => m[0])
+  expect(found).toEqual(['"type":"tool_use","id":"R1","name":"Skill"', '"skill":"code-review","args":"low abc..def'])
+  const bare = '{"type":"tool_use","id":"S1","name":"Skill","input":{"skill":"simplify"}}'
+  const events = logEventsOf([...bare.matchAll(new RegExp(LOG_MARKS, 'g'))].map(m => `1:${m[0]}`).join('\n'))
+  expect(events).toEqual([{ kind: 'use', id: 'S1', name: 'Skill', detail: '', skill: 'simplify', args: '', nested: false }])
 })
 
 test('simplify fills by how many of its agents are back, then by its fixes, build and commit', async () => {

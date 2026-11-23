@@ -563,14 +563,15 @@ export function phaseGlyphs(state: PhaseState, width: number, fill = 0): string 
 
 // The marks the phase fill reads from a run's stream-json log, one `grep -oE`
 // alternative each: a tool call's id and name; the first field of its input;
-// a Skill call's name and the start of its args; a task's start, progress or
+// a Skill call's name and the start of its args, a mark of its own, since
+// `grep -o` resumes after a match and an input mark would take the name; a task's start, progress or
 // end, with the tool call it belongs to; a task's type; a tool result; and
 // the agent a nested event belongs to. Each match stops at a quote, so a mark
 // never runs into the large fields that follow.
 export const LOG_MARKS = [
   '"type":"tool_use","id":"[^"]+","name":"[^"]+"',
-  '"input":\\{"(command|description|file_path|skill)":"[^"]{0,80}',
-  '"skill":"[^"]+","args":"[^"]{0,24}',
+  '"input":\\{"(command|description|file_path)":"[^"]{0,80}',
+  '"skill":"[^"]+"(,"args":"[^"]{0,24})?',
   '"subtype":"task_(started|progress|notification)","task_id":"[^"]+",("run_id":"[^"]+",)?"tool_use_id":"[^"]+"',
   '"task_type":"[a-z_]+"',
   '"tool_use_id":"[^"]+","type":"tool_result"',
@@ -608,7 +609,7 @@ export function logEventsOf(marks: string): LogEvent[] {
     for (const g of group) {
       const call = /^"type":"tool_use","id":"([^"]+)","name":"([^"]+)"$/.exec(g)
       const input = /^"input":\{"([a-z_]+)":"(.*)$/.exec(g)
-      const skill = /^"skill":"([^"]+)","args":"(.*)$/.exec(g)
+      const skill = /^"skill":"([^"]+)"(?:,"args":"(.*))?$/.exec(g)
       const task = /^"subtype":"task_(started|progress|notification)",.*"tool_use_id":"([^"]+)"$/.exec(g)
       const result = /^"tool_use_id":"([^"]+)","type":"tool_result"$/.exec(g)
       if (call) {
@@ -616,7 +617,6 @@ export function logEventsOf(marks: string): LogEvent[] {
         out.push(use)
       } else if (input && use !== null) {
         use.detail = input[2] ?? ''
-        if (input[1] === 'skill') use.skill = use.detail
       } else if (skill && use !== null) {
         use.skill = skill[1] ?? ''
         use.args = skill[2] ?? ''
