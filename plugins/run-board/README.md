@@ -12,8 +12,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   peach block in flight filled to how far the phase has come (see **Phase fill**), and a grey `⣀` baseline to come, and the bar ends in a `⡇` cap. The lane's name is a
   pill on the raised surface, in the lane's colour (pink epic, teal fix). The cycle count is the brief's `### Cycle` headings (or `**Cycle` lines)
   on `origin/main`, counted once per blob. Cycle k closes when a `/commit` naming `cycle k` is followed by a
-  `code-review low` line; the ship starts at `/ship` or a push, and the archive at the first `/commit` after
-  the ship's push. Under the bar, the phase line reads `committing · Bash: Run the focused check`: the
+  `code-review low` line; the ship starts at `/ship` or a push (`npm run push:checked`, or commit-skill's `ship-run`),
+  and the archive at the first `/commit` after the ship's push, unless `ship-run --finish` follows it as /ship's docs
+  commit. Under the bar, the phase line reads `committing · Bash: Run the focused check`: the
   stage when it adds to the phase (the bar's lit label names the phase), and the newest tool call, read from the last 256 KiB of the run's
   stream-json `.log` with `tail -c`, because the log can pass the 4 MiB read cap.
 - **Phase fill.** The block in flight fills left to right, each cell climbing `⣀⣤⣶⣿`, from the run's stream-json `.log`:

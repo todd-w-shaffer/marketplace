@@ -37,3 +37,11 @@ test('the commit skill commits through commit-run, with separate calls as the fa
   assert.match(text, /`git add[^`]*` as its own Bash call/);
   assert.match(text, /then `token-ledger commit`/);
 });
+
+test('the ship skill pushes through ship-run in the background, with separate calls as the fallback', () => {
+  const text = fs.readFileSync(path.join(SKILLS, 'ship', 'SKILL.md'), 'utf8');
+  assert.match(text, /one Bash call to `ship-run`/);
+  assert.match(text, /`run_in_background: true`/);
+  assert.match(text, /`ship-run --finish`/);
+  assert.match(text, /`token-ledger ship-begin` as its own Bash call/);
+});

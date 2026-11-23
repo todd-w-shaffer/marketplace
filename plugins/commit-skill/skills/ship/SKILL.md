@@ -13,7 +13,34 @@ Run silently — do NOT output intermediate progress, tool results, or commentar
 
 ## Workflow
 
-### 0. Pre-flight
+### 0–1. Pre-flight and push: `ship-run`
+
+Push with one Bash call to `ship-run`, which ships in this plugin beside `commit-run`:
+
+```
+ship-run [--to-default]
+```
+
+Pass `--to-default` when the branch has no upstream and the repo's CLAUDE.md says work goes straight to the default branch; that is the one judgement here. Run it with `run_in_background: true` and the Bash tool's longest timeout (`600000`), then wait for its completion notification. Do not poll or sleep: a pre-push check can take ten minutes or more, and a foreground call meets the 2-minute default and kills the push mid-check. Do not run `token-ledger ship-begin`, `git fetch`, `git status`, `git log` or `git push` yourself around it.
+
+It finds the target, opens the ship's cost window, pushes with the project's command (`push:checked`, else `check:push` then `git push`), decides the outcome by fetching, rebases once where a check reruns on the rebased commit, and retries transport failures. It prints one JSON object:
+
+- `outcome` `landed`: go on to step 2. `before` is the pre-push sha step 2 diffs from (`null` for a branch it just published), `commits` the pushed commits oldest first, and `changed` the files they change.
+- `outcome` `nothing-to-push`: say so and stop.
+- `outcome` `dirty` (exit 2): there are uncommitted changes, listed in `files`. Invoke the `/commit` skill first and wait for it; if the commit fails, STOP. Then run `ship-run` again. A `dirty` with no `files` names what else to fix in `next`.
+- `outcome` `refused`: a hook or check refusal, or a push failure that is not a rebase or transport case; its words are in `output_tail`. Apply the refusal rules below, then run `ship-run` again or STOP.
+- `outcome` `conflict` or `transport`: STOP and report `output_tail`. A conflict has already been aborted, so the branch is as it was. Never force-push.
+
+**If the hook refuses the push**, never retry with `--no-verify`. If the refusal names failing
+tests, rerun those files alone before deciding. A file that passes alone, in an area the pushed
+commits don't touch, is a flake: run `ship-run` again, once. Otherwise, or on a second refusal, STOP and
+report the hook's output.
+
+A refusal that ends "rebase and re-check" means the remote moved and no check reruns on a rebased commit here: STOP and report it.
+
+**If `ship-run` is not on PATH**, run the steps below instead, each as its own Bash call, starting with `token-ledger ship-begin` as its own Bash call.
+
+#### Fallback 0. Pre-flight
 
 Run `token-ledger ship-begin` before anything else. It records the pre-push upstream sha that step 8 measures the rollup from, and prints nothing. `token-ledger` ships in this plugin beside `/commit`; if it isn't on PATH, the cost lines drop out and the ship carries on.
 
@@ -31,7 +58,7 @@ Check `git status` for uncommitted changes.
 - If the working tree is clean and `git log <target>..HEAD` lists commits, or the target doesn't exist yet: proceed to step 1.
 - If `git log <target>..HEAD` is empty: nothing to push. Say so and stop.
 
-### 1. Push
+#### Fallback 1. Push
 
 **Pick the push command** for the target from step 0.
 
@@ -156,11 +183,15 @@ Changes:
    - The subject stays under 70 characters. If it runs over, shorten the description, not the scope.
    - Never include `Co-Authored-By` lines, the same rule /commit follows.
 
-3. Push the documentation commit.
+3. Push the documentation commit with step 6's `ship-run --finish` call below.
 
-If no files needed updating, skip this step.
+If no files needed updating, skip the commit, not the call: run `ship-run --finish` regardless, since it runs steps 7 and 8 too.
+
+**Run `ship-run --finish`**, with the same `--to-default` as the first call, as one Bash call with `run_in_background: true` and the Bash tool's longest timeout. It pushes any commit `HEAD` holds past the target, the docs commit, the same way as the first call, and reports the same fields. Once that push lands, or there was nothing to push, it adds `staleness` (step 7's output, or `null`) and `ship_cost` (step 8's block, or `null`), so do not run `scripts/staleness.mjs` or `token-ledger ship` yourself. When the push does not land, both are `null` and the ship stays open: apply step 1's rules to its outcome, then run `ship-run --finish` again or STOP. Without `ship-run`, push the docs commit as the fallback in step 1 does, then run steps 7 and 8 by hand.
 
 ### 7. Staleness nudge (only if the project opts in)
+
+With `ship-run`, this is `ship-run --finish`'s `staleness` field: append it as below when it is not `null`, and skip the rest of this step. Without it:
 
 If — and only if — `scripts/staleness.mjs` exists in the repo, run it:
 
@@ -180,7 +211,7 @@ a gate — it must never block or fail a ship.
 
 ### 8. Print summary
 
-Run `token-ledger ship`. Its output is the `**Ship cost:**` block below — paste it verbatim, and never compute or adjust the numbers yourself. If the script is missing or fails, omit the block and carry on: the rollup never fails a ship.
+With `ship-run`, the block is `ship-run --finish`'s `ship_cost` field; omit it when `null`. Without it, run `token-ledger ship`. Its output is the `**Ship cost:**` block below — paste it verbatim, and never compute or adjust the numbers yourself. If the script is missing or fails, omit the block and carry on: the rollup never fails a ship.
 
 Print ONLY the following:
 

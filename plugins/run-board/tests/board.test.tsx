@@ -45,6 +45,7 @@ import {
   segmentWidth,
   runStartedMs,
   stageOf,
+  stripOf,
   statusLine,
   tileFace,
   KIND_TAG,
@@ -219,6 +220,27 @@ test('phases follow the chain: each cycle closes on its low review, then simplif
   expect(states(`${archiving}\npushes: 1a2b\nfinished: shipped; production is live (run 1).`, 3)).toBe(
     'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:done',
   )
+})
+
+test('a ship-run call is a push: the stage, the archive after it, --finish and the strip', async () => {
+  expect(stageOf('skill: commit-skill:ship\nbash: ship-run --to-default')).toBe('pushing')
+  expect(stageOf('skill: commit-skill:ship\nbash: /x/commit-skill/bin/ship-run')).toBe('pushing')
+  // A command that only names ship-run, in a string or as an argument, pushes nothing.
+  expect(stageOf("skill: commit-skill:ship\nbash: grep -n 'ship-run' SKILL.md")).toBe('shipping')
+  expect(stageOf('skill: commit-skill:ship\nbash: cat bin/ship-run')).toBe('shipping')
+  const shipping = `${S395}\nskill: commit-skill:ship\nbash: ship-run --to-default`
+  expect(states(`${shipping}\nskill: commit-skill:commit archive S395`, 3)).toBe(
+    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
+  )
+  // /ship's docs commit sits between its two calls, so the run is still shipping.
+  const docs = `${shipping}\nskill: commit-skill:commit docs sync\nbash: ship-run --finish --to-default`
+  expect(states(docs, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:live arch:todo')
+  expect(states(`${docs}\nskill: commit-skill:commit archive S395`, 3)).toBe(
+    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
+  )
+  expect(stripOf(`${S395}\nbash: ship-run`, 'run-broke').map(c => `${c.stage}:${c.state}`)).toEqual([
+    'savor:skip', 'cycles:done', 'push:broke', 'staging:todo', 'prod:todo',
+  ])
 })
 
 test('a run with step 0 opens on a savor phase that its own commit closes', async () => {

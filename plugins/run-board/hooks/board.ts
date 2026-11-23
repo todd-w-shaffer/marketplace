@@ -141,7 +141,7 @@ export function stageOf(progress: string): string {
   for (const line of progress.split('\n').reverse()) {
     if (line.startsWith('finished: ')) return 'finished'
     if (line.startsWith('pushes: ')) return 'recording'
-    if (line.startsWith('bash: ') && line.includes('push:checked')) return 'pushing'
+    if (isPushLine(line)) return 'pushing'
     if (line.startsWith('commit: ')) return 'working'
     const skill = /^skill: (\S+)(?: (\S+))?/.exec(line)
     if (skill) {
@@ -236,6 +236,18 @@ export function cycleBlobMap(blobs: readonly TreeBlob[]): Map<string, string[]> 
 
 // A `/commit` line in a progress file, and the text after the skill's name.
 const COMMIT_LINE = /^skill: commit-skill:commit\b(.*)$/
+
+// A push: `npm run push:checked`, or commit-skill's `ship-run` behind any path, where a command starts. Each quoted
+// string becomes one `_` first, and a quote left open cuts the rest, so a string or a path that names either runs no
+// push. A port of shootsfilm's `runsPush` in scripts/run-status.mjs: keep the two in step.
+const PUSH_COMMAND = /(^|[;&|(]\s*)(npm run push:checked\b|(\S*\/)?ship-run([\s;&|)<>]|$))/
+const unquoted = (command: string): string => command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, '_').replace(/['"].*$/, '')
+
+/** Whether a progress line is a `bash: ` line whose command runs a push. */
+const isPushLine = (line: string): boolean => line.startsWith('bash: ') && PUSH_COMMAND.test(unquoted(line.slice(6)))
+
+/** Whether a push line runs `ship-run --finish`, /ship's second call, which follows its docs commit. */
+const isFinishLine = (line: string): boolean => /(^|[\s/])ship-run\s+(\S+\s+)*--finish\b/.test(unquoted(line.slice(6)))
 // The `cycle k` that a `/commit` line's text names.
 const CYCLE_NAMED = /\bcycle (\d+)/i
 
@@ -250,7 +262,8 @@ const CYCLE_NAMED = /\bcycle (\d+)/i
  * Cycle k is done when a `/commit` naming `cycle k` (or, naming none, the
  * next cycle) is followed by a `code-review low` line. The ship starts at
  * `/ship` or a push, and the archive at the first `/commit` after the ship's
- * push. A later step marks every earlier one done. `cycles` is the brief's
+ * push, unless a `ship-run --finish` follows that commit: it was /ship's
+ * docs commit. A later step marks every earlier one done. `cycles` is the brief's
  * count; without it the count is the highest cycle the progress file names.
  */
 export function phasesOf(progress: string, cycles?: number): Phase[] {
@@ -286,9 +299,11 @@ export function phasesOf(progress: string, cycles?: number): Phase[] {
     else if (/^skill: simplify\b/.test(line)) simplify = true
     else if (/^skill: code-review xhigh\b/.test(line)) xhigh = true
     else if (/^skill: commit-skill:ship\b/.test(line)) ship = true
-    else if (line.startsWith('bash: ') && line.includes('push:checked')) {
+    else if (isPushLine(line)) {
       if (ship) shipPushed = true
       ship = true
+      // The commit before `ship-run --finish` was /ship's docs commit, not the archive's.
+      if (isFinishLine(line)) archive = false
     } else if (line.startsWith('finished: shipped')) finished = true
   }
   const n = cycles !== undefined && cycles > 0 ? cycles : Math.max(named, done + 1, 1)
@@ -341,7 +356,7 @@ export function namedCycles(progress: string): number {
       if (savor === 'none') savor = 'live'
     } else if (line.startsWith('savored: ')) {
       if (savor === 'live') savor = 'done'
-    } else if (/^skill: (simplify|commit-skill:ship)\b/.test(line) || (line.startsWith('bash: ') && line.includes('push:checked'))) after = true
+    } else if (/^skill: (simplify|commit-skill:ship)\b/.test(line) || isPushLine(line)) after = true
   }
   return most
 }
@@ -382,7 +397,7 @@ function nextSplitPhase(phase: SplitPhase, line: string): SplitPhase {
   if (line === '' || line.startsWith('kind: ')) return phase
   if (/^skill: sittings:savor launch\b/.test(line)) return phase === 'none' ? 'savor' : phase
   if (phase === 'savor') return line.startsWith('savored: ') || COMMIT_LINE.test(line) ? 'cycles' : 'savor'
-  if (/^skill: commit-skill:ship\b/.test(line) || (line.startsWith('bash: ') && line.includes('push:checked'))) return 'ship'
+  if (/^skill: commit-skill:ship\b/.test(line) || isPushLine(line)) return 'ship'
   return phase === 'none' ? 'cycles' : phase
 }
 
@@ -2248,7 +2263,7 @@ export function stripOf(text: string, kind: BlockKind, deployStage = ''): StripC
   const lines = text.split('\n')
   const savorAt = lines.findIndex(l => /^skill: sittings:savor launch\b/.test(l))
   const commitsAfter = lines.slice(savorAt + 1).filter(l => COMMIT_LINE.test(l)).length
-  const pushed = lines.some(l => l.startsWith('bash: ') && l.includes('push:checked'))
+  const pushed = lines.some(isPushLine)
   const broke: Stage =
     kind === 'deploy-red'
       ? deployStage === 'prod'
