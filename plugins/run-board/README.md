@@ -93,7 +93,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   it fits, else beside it; a bar clipped at the window start reads `◂ S677`. A run's slot comes from status.json's
   `slot`, `slot_taken` and `slot_released`, else from each of its record's `launch_spans`, so a run the finished
   list dropped keeps its slot; a span the record leaves open on a run that is not running ends at the progress
-  file's last stamp, else its mtime; a run that names no slot goes
+  file's mtime; a run that names no slot goes
   on the lowest slot free over its span. `you` is a red bar from the oldest decision stop's finish to now,
   `S684 ? 19m`, with `+N` for each other one. `held` is a dashed yellow strip from now, `3 held · ~3h12m`: every
   brief BLOCKED holds and every queued entry a `cause` holds, at the median each. With no median there are no

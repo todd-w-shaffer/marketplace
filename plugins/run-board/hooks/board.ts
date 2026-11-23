@@ -63,6 +63,9 @@ const list = (v: unknown): Record<string, unknown>[] =>
   Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null) : []
 /** A value as an object to read fields from, an array included, else null. */
 const obj = (v: unknown): Record<string, unknown> | null => (typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : null)
+const isInt = (v: unknown): v is number => Number.isInteger(v)
+/** A value as an object to read fields from, an array excluded. */
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 /** A time string in milliseconds, or null when it is no string or `Date.parse` cannot read it. */
 const parseMs = (v: unknown): number | null => {
   const ms = typeof v === 'string' ? Date.parse(v) : NaN
@@ -70,14 +73,22 @@ const parseMs = (v: unknown): number | null => {
 }
 
 export function parseStatus(text: string): RawStatus | null {
-  let data: unknown
+  const d = jsonObject(text)
+  return d === null ? null : statusFields(d)
+}
+
+/** A JSON text's top-level object, or null when the text is no JSON object. */
+function jsonObject(text: string): Record<string, unknown> | null {
   try {
-    data = JSON.parse(text)
+    const data: unknown = JSON.parse(text)
+    return isObject(data) ? data : null
   } catch {
     return null
   }
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null
-  const d = data as Record<string, unknown>
+}
+
+/** status.json's fields, each checked, from its top-level object. */
+function statusFields(d: Record<string, unknown>): RawStatus {
   return {
     dispatcher: num(d.dispatcher),
     running: list(d.running).map(r => ({
@@ -118,9 +129,8 @@ export const RUN_STATUS_VERSION = 1
 export type Sources = { main: string; logDir: string; archloopLogDir: string }
 
 /** `sources` with each path a string that is not empty, else null. */
-function parseSources(v: unknown): Sources | null {
-  const s = obj(v)
-  if (s === null || Array.isArray(s)) return null
+function parseSources(s: unknown): Sources | null {
+  if (!isObject(s)) return null
   const [main, logDir, archloopLogDir] = [s.main, s.log_dir, s.archloop_log_dir]
   if (typeof main !== 'string' || typeof logDir !== 'string' || typeof archloopLogDir !== 'string') return null
   if (main === '' || logDir === '' || archloopLogDir === '') return null
@@ -134,19 +144,14 @@ function parseSources(v: unknown): Sources | null {
  * The board checks `version` before any other field.
  */
 export function statusRead(text: string): { kind: 'newer' } | { kind: 'status'; raw: RawStatus; sources: Sources | null } | null {
-  let data: unknown
-  try {
-    data = JSON.parse(text)
-  } catch {
-    return null
-  }
-  const d = obj(data)
-  if (d === null || Array.isArray(d)) return null
-  if (Number.isInteger(d.version) && d.version !== RUN_STATUS_VERSION) return { kind: 'newer' }
-  const raw = parseStatus(text)
-  if (raw === null) return null
-  return { kind: 'status', raw, sources: d.version === RUN_STATUS_VERSION ? parseSources(d.sources) : null }
+  const d = jsonObject(text)
+  if (d === null) return null
+  if (isInt(d.version) && d.version !== RUN_STATUS_VERSION) return { kind: 'newer' }
+  return { kind: 'status', raw: statusFields(d), sources: d.version === RUN_STATUS_VERSION ? parseSources(d.sources) : null }
 }
+
+/** One launch of a run: its slot, or null for `slot: none`, and its span, with no end while it is open. */
+type SlotSpan = { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }
 
 /** A run's record as the board reads it: the fields of scripts/run-status.mjs's record that the board draws. */
 export type RunRecord = {
@@ -160,7 +165,7 @@ export type RunRecord = {
   phaseMs: { label: string; ms: number }[]
   /** The milliseconds of each split phase, or null when no time falls in any. */
   phaseSplit: { savor: number; cycles: number; ship: number } | null
-  launchSpans: { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }[]
+  launchSpans: SlotSpan[]
   launches: number
   mode: string | null
   epic: string | null
@@ -177,10 +182,8 @@ export type RunRecord = {
  */
 export type RecordRead = { kind: 'record'; record: RunRecord } | { kind: 'newer' } | { kind: 'none' }
 
-const isInt = (v: unknown): v is number => Number.isInteger(v)
 const isStr = (v: unknown): v is string => typeof v === 'string'
 const isList = (v: unknown, item: (x: unknown) => boolean): v is unknown[] => Array.isArray(v) && v.every(item)
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const PHASE_STATES: readonly unknown[] = ['todo', 'live', 'done']
 const isPhase = (v: unknown): v is Phase => isObject(v) && isStr(v.label) && isStr(v.short) && PHASE_STATES.includes(v.state)
 
@@ -195,7 +198,7 @@ function parseEnd(v: unknown): RunRecord['end'] | undefined {
 }
 
 /** A launch span with both times parsed, or undefined when it is malformed. */
-function parseSpan(v: unknown): RunRecord['launchSpans'][number] | undefined {
+function parseSpan(v: unknown): SlotSpan | undefined {
   if (!isObject(v)) return undefined
   const { slot, start, end, live } = v
   const startMs = parseMs(start)
@@ -218,7 +221,8 @@ export function recordRead(text: string): RecordRead {
   const end = parseEnd(r.end)
   const note = r.note
   const split = r.phase_split
-  const spans = isList(r.launch_spans, x => parseSpan(x) !== undefined) ? r.launch_spans.map(x => parseSpan(x)) : null
+  const parsed = Array.isArray(r.launch_spans) ? r.launch_spans.map(parseSpan) : null
+  const spans = parsed !== null && parsed.every(x => x !== undefined) ? (parsed as SlotSpan[]) : null
   const orNullList = (v: unknown): v is string[] | null => v === null || isList(v, isStr)
   const fits =
     isStr(r.stage) &&
@@ -250,7 +254,7 @@ export function recordRead(text: string): RecordRead {
       phaseSinceMs: r.phase_since === null ? null : parseMs(r.phase_since),
       phaseMs: (r.phase_ms as { label: string; ms: number }[]).map(p => ({ label: p.label, ms: p.ms })),
       phaseSplit: s === null ? null : { savor: s.savor, cycles: s.cycles, ship: s.ship },
-      launchSpans: spans.filter(x => x !== undefined),
+      launchSpans: spans,
       launches: r.launches as number,
       mode: r.mode as string | null,
       epic: r.epic as string | null,
@@ -429,8 +433,8 @@ const QUIET_STAGES = new Set(['savor', 'starting', 'working', 'review low', 'sim
  * phase in flight reads `finishing`.
  */
 export function phaseLine(r: Run): string {
-  // A run with no record draws no phases, and its stage is status.json's alone.
-  if (r.phases.length === 0) return r.stage
+  // A run with no record draws from status.json alone: its stage, and no phases.
+  if (r.source !== 'record') return r.stage
   if (!r.phases.some(p => p.state === 'live')) return 'finishing'
   const parts: string[] = []
   if (!QUIET_STAGES.has(r.stage)) parts.push(r.stage)
@@ -878,8 +882,8 @@ export function buildBoard(
       lane: r.lane,
       startedMs: parseMs(r.started) ?? now,
       cost: Math.max(r.cost, record?.note?.cost ?? 0),
-      stage: read?.kind === 'newer' ? 'newer' : (record?.stage ?? 'starting'),
-      isNewer: read?.kind === 'newer',
+      stage: record?.stage ?? 'starting',
+      source: read === undefined || read.kind === 'none' ? 'status' : read.kind,
       tool: tools[r.brief] ?? '',
       phases,
       phaseSinceMs: record?.phaseSinceMs ?? null,
@@ -978,24 +982,16 @@ export const TIMELINE_AHEAD_MS = 6 * HOUR_MS
 // few seconds after the dispatcher takes the slot.
 const SLOT_MATCH_MS = 5 * MINUTE_MS
 
-/** One launch in a progress file: its slot, or null for `slot: none`, and its span. */
-type SlotSpan = { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }
 
 /**
- * A record's launch spans, each slot a slot number. With `progress` and
- * `mtimeMs`, for a run that is not running, a last span the record leaves open
- * ends, stopped, at the progress file's last stamp, or at `mtimeMs` when no
- * stamp follows its start; without them it stays open.
+ * A record's launch spans, each slot a slot number. With `mtimeMs`, the
+ * progress file's mtime for a run that is not running, a last span the record
+ * leaves open ends there, stopped; without it the span stays open.
  */
-function slotSpans(record: RunRecord | undefined, closeBy: { progress: string; mtimeMs: number } | null = null): SlotSpan[] {
+function slotSpans(record: RunRecord | undefined, mtimeMs: number | null = null): SlotSpan[] {
   const out: SlotSpan[] = (record?.launchSpans ?? []).map(s => ({ ...s, slot: slotNumber(s.slot) }))
   const tail = out[out.length - 1]
-  if (tail !== undefined && tail.endMs === null && closeBy !== null) {
-    const times = lineTimes(closeBy.progress).filter((t): t is number => t !== null)
-    const last = times[times.length - 1] ?? null
-    const at = last !== null && last > tail.startMs ? last : closeBy.mtimeMs
-    if (at > tail.startMs) out[out.length - 1] = { ...tail, endMs: at, isLive: false }
-  }
+  if (tail !== undefined && tail.endMs === null && mtimeMs !== null && mtimeMs > tail.startMs) out[out.length - 1] = { ...tail, endMs: mtimeMs, isLive: false }
   return out
 }
 
@@ -1166,7 +1162,7 @@ export function timelineOf(input: {
   }
   for (const e of endings) {
     const { sitting } = sittingOf(e.base)
-    const spans = slotSpans(e.record, { progress: e.text, mtimeMs: e.mtimeMs }).filter(s => s.slot !== null)
+    const spans = slotSpans(e.record, e.mtimeMs).filter(s => s.slot !== null)
     for (const s of spans) highest = Math.max(highest, s.slot ?? 1)
     const taken = recorded.get(e.base) ?? []
     for (const s of spans) {
@@ -2532,7 +2528,7 @@ export function tileFace(value: string, label: string): TileFace {
  * Spend over a span: a commit's cost over its window, or a ship's overhead over its own. `phase` and
  * `sitting` are the record's, or null when it has none or `sitting` is not a whole number.
  */
-export type Spend = { startMs: number; endMs: number; usd: number; kind: 'commit' | 'ship'; phase: string | null; sitting: number | null }
+export type Spend = { startMs: number; endMs: number; usd: number; kind: 'commit' | 'ship' }
 
 /**
  * The spends in token-ledger's JSON lines: each commit's `cost.usd` and each
@@ -2553,8 +2549,6 @@ export function ledgerSpends(text: string): Spend[] {
     const r = rec as {
       kind?: unknown
       ts?: unknown
-      phase?: unknown
-      sitting?: unknown
       window?: { start?: unknown }
       cost?: { usd?: unknown }
       overhead?: { usd?: unknown }
@@ -2568,8 +2562,6 @@ export function ledgerSpends(text: string): Spend[] {
       endMs,
       usd,
       kind: r.kind === 'commit' ? 'commit' : 'ship',
-      phase: typeof r.phase === 'string' ? r.phase : null,
-      sitting: typeof r.sitting === 'number' && Number.isInteger(r.sitting) ? r.sitting : null,
     })
   }
   return out
@@ -2762,8 +2754,8 @@ export function statusLine(b: Board): string | undefined {
       : runs.map(r =>
           !r.isAlive
             ? `✗ ${r.sitting} launcher gone`
-            : r.phases.length === 0
-              ? `● ${r.sitting} ${r.stage} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
+            : r.source !== 'record'
+              ? `● ${r.sitting} ${r.source === 'newer' ? 'newer' : r.stage} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`
               : `● ${r.sitting} ${miniBar(r.phases)} ${livePhase(r.phases)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`,
         ),
   )

@@ -6,8 +6,8 @@ export type Run = {
   startedMs: number
   cost: number
   stage: string
-  /** Whether the run's record has a version this board does not know, so the card draws no run. */
-  isNewer: boolean
+  /** Where the run is drawn from: its record; `newer`, a record of a version this board does not know, which draws no run; or `status`, status.json alone. */
+  source: 'record' | 'newer' | 'status'
   /** The newest tool call in the run's log, or empty. */
   tool: string
   /** The chain's phases in order, each done, in flight or still to come. */

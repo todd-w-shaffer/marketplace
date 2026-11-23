@@ -217,7 +217,7 @@ const endOf = (text: string, kind: string | null = null, more: object = {}) => (
  * names them, and a null `end` is a run that has not ended.
  */
 function ending(base: string, mtimeMs: number, end: object | null, more: object = {}, text = ''): Ending {
-  const read = recordRead(JSON.stringify({ ...RECORD_BASE, phase_ms: [], phase_split: null, launch_spans: [], named_cycles: 0, launches: 0, ...more, end }))
+  const read = recordRead(recordJson(end, more))
   if (read.kind !== 'record') throw new Error('the fixture is no record')
   return { base, text, mtimeMs, record: read.record }
 }
@@ -629,8 +629,8 @@ const LEDGER = [
 test('the ledger reads as spends', async () => {
   const spends = ledgerSpends(LEDGER)
   expect(spends.length).toBe(4)
-  expect(spends[0]).toEqual({ startMs: Date.parse('2026-11-06T11:00:00Z'), endMs: Date.parse('2026-11-06T12:00:00Z'), usd: 6, kind: 'commit', phase: null, sitting: null })
-  expect(spends[3]).toEqual({ startMs: Date.parse('2026-11-06T12:50:00Z'), endMs: Date.parse('2026-11-06T12:50:00Z'), usd: 2, kind: 'commit', phase: 'plan', sitting: 682 })
+  expect(spends[0]).toEqual({ startMs: Date.parse('2026-11-06T11:00:00Z'), endMs: Date.parse('2026-11-06T12:00:00Z'), usd: 6, kind: 'commit' })
+  expect(spends[3]).toEqual({ startMs: Date.parse('2026-11-06T12:50:00Z'), endMs: Date.parse('2026-11-06T12:50:00Z'), usd: 2, kind: 'commit' })
 })
 
 test('the ledger reads in chunks that cut lines anywhere', async () => {
@@ -2026,7 +2026,7 @@ test("a relaunched run's earlier launches draw on their own slots", () => {
   expect(barsOf(b, 1)).toEqual(['S684 running -30..0'])
 })
 
-test("a run that is not running closes its record's open last span at its last stamp, else its mtime", () => {
+test("a run that is not running closes its record's open last span at its progress file's mtime", () => {
   // The record closed S681's first launch at the next slot line and left the last one open; neither run has ended.
   const endings = [
     ending(
@@ -2039,7 +2039,7 @@ test("a run that is not running closes its record's open last span at its last s
     ending('kickoff-sitting-s690-lone', NOW - 150 * MIN, null, { launch_spans: [spanAt(1, -200, null)] }, stampedAt([[NOW - 200 * MIN, 'slot: 1']])),
   ]
   const b = buildBoard(statusOf({}), new Set(), NOW, { endings, afters: {} })
-  expect(barsOf(b, 2)).toEqual(['S681 stopped -360..-300', 'S681 stopped -300..-240'])
+  expect(barsOf(b, 2)).toEqual(['S681 stopped -360..-300', 'S681 stopped -300..-180'])
   expect(barsOf(b, 1)).toEqual(['S690 stopped -200..-150'])
 })
 

@@ -354,6 +354,60 @@ async function readPlans($: EngineInterface, home: string, main: string): Promis
   return planRead
 }
 
+/** A poll's directory listings: each directory's file mtimes by name, listed once a poll; a failed listing is empty. */
+type Listings = (dir: string) => Promise<ReadonlyMap<string, number>>
+
+function listingsOf($: EngineInterface): Listings {
+  const seen = new Map<string, Promise<ReadonlyMap<string, number>>>()
+  return dir => {
+    let listing = seen.get(dir)
+    if (listing === undefined) {
+      listing = $.fs
+        .list(dir)
+        .then(es => new Map(es.filter(e => e.kind === 'file').map(e => [e.name, e.mtimeMs] as const)))
+        .catch(() => new Map<string, number>())
+      seen.set(dir, listing)
+    }
+    return listing
+  }
+}
+
+/** A file's mtime from its directory's listing, or null when the listing does not hold it. */
+const mtimeOf = async (ls: Listings, dir: string, name: string): Promise<number | null> => (await ls(dir)).get(name) ?? null
+
+/**
+ * A read kept under `name` with the `key` it was read for: the kept value
+ * while the key holds, else `run`'s answer, kept when it is not null. A call
+ * whose key a read in flight already has awaits that read. A read that
+ * rejects answers null, and null keeps nothing, so the next call reads again.
+ */
+function cachedRead<T>(
+  cache: Map<string, { key: string; value: T }>,
+  inFlight: Map<string, Promise<T | null>>,
+  name: string,
+  key: string,
+  run: () => Promise<T | null>,
+): Promise<T | null> {
+  const hit = cache.get(name)
+  if (hit !== undefined && hit.key === key) return Promise.resolve(hit.value)
+  const running = inFlight.get(key)
+  if (running !== undefined) return running
+  const read = run()
+    .then(value => {
+      if (value !== null) cache.set(name, { key, value })
+      return value
+    })
+    .catch(() => null)
+    .finally(() => inFlight.delete(key))
+  inFlight.set(key, read)
+  return read
+}
+
+/** Deletes each entry of `cache` whose name is not in `keep`, so a cache holds what the last poll read. */
+const prune = (cache: Map<string, unknown>, keep: ReadonlySet<string>): void => {
+  for (const name of [...cache.keys()]) if (!keep.has(name)) cache.delete(name)
+}
+
 // Progress files read for RECENT and BLOCKED, by name, kept while their mtime holds.
 const progressCache = new Map<string, { mtimeMs: number; text: string }>()
 // Records read for RECENT and BLOCKED, by run name, kept while their file's mtime holds.
@@ -369,24 +423,21 @@ const recordCache = new Map<string, { mtimeMs: number; read: RecordRead }>()
  */
 async function readEndings(
   $: EngineInterface,
+  ls: Listings,
   dir: string,
   sources: Sources,
+  ownerMs: number | null,
   raw: RawStatus,
   onMain: readonly string[],
   archived: readonly string[],
 ): Promise<{ recent: Ended[]; endings: Ending[] }> {
-  const files = (await $.fs.list(dir).catch(() => []))
-    .filter(e => e.kind === 'file')
-    .map(e => ({ name: e.name, mtimeMs: e.mtimeMs }))
-  const recordMtimes = new Map(
-    (await $.fs.list(sources.logDir).catch(() => [])).filter(e => e.kind === 'file').map(e => [e.name, e.mtimeMs] as const),
-  )
+  const files = [...(await ls(dir))].map(([name, mtimeMs]) => ({ name, mtimeMs }))
+  const recordMtimes = await ls(sources.logDir)
   const running = new Set(raw.running.map(r => `${baseName(r.brief)}.progress`))
   const wanted = new Set(onMain.map(k => `${baseName(k)}.progress`))
   const picked = new Map(recentCandidates(files, raw.running.map(r => r.brief)).map(f => [f.name, f]))
   for (const f of files) if (wanted.has(f.name) && !running.has(f.name)) picked.set(f.name, f)
   const endings: Ending[] = []
-  let ownerMs: number | null | undefined
   for (const f of picked.values()) {
     const base = f.name.replace(/\.progress$/, '')
     let hit = progressCache.get(f.name)
@@ -405,13 +456,12 @@ async function readEndings(
         if (read !== null) recordCache.set(base, { mtimeMs: recordMs, read })
       }
     }
-    if (read === null || read.kind === 'none') {
-      ownerMs ??= await mtimeOf($, `${sources.main}/scripts`, 'run-status.mjs')
-      read = await printedRecord($, sources.main, dir, base, f.mtimeMs, ownerMs)
-    }
+    if (read === null || read.kind === 'none') read = await printedRecord($, ls, sources.main, dir, base, f.mtimeMs, ownerMs)
     if (read?.kind !== 'record') continue
     endings.push({ base, text: hit.text, mtimeMs: f.mtimeMs, record: read.record })
   }
+  prune(progressCache, new Set(picked.keys()))
+  prune(recordCache, new Set([...picked.keys()].map(n => n.replace(/\.progress$/, ''))))
   return { recent: recentOf(endings, raw.finished, new Set(archived)), endings }
 }
 
@@ -539,17 +589,8 @@ let lastRead: Pick<BriefsRead, 'cycles' | 'epics' | 'recordedEpics' | 'archived'
   planTitles: {},
 }
 
-/**
- * The briefs on deck, each brief's cycle count and epic, the epics
- * `sittings.json` records, and each plan's epic titles, from one
- * `git ls-tree -r origin/main docs/briefs/ docs/plans/` in the checkout.
- * Each blob the listing names is read at once, and a running brief that has
- * left the listing, or whose brief blob could not be read, reads its cycles
- * and epic from `cyclesCache`. A failed listing reads no deck and gives the
- * last listing's cycles, epics, recorded epics, archived sittings and plan titles.
- */
 // Each brief key's facts, under the blob shas and the owner's mtime they were printed for.
-const factsCache = new Map<string, { key: string; facts: BriefFacts }>()
+const factsCache = new Map<string, { key: string; value: BriefFacts }>()
 // The fact reads in flight, by key, so an overlapping poll awaits them.
 const factsInFlight = new Map<string, Promise<BriefFacts | null>>()
 
@@ -561,29 +602,28 @@ const factsInFlight = new Map<string, Promise<BriefFacts | null>>()
  * that exits non-zero, whatever its stdout, rejects, or prints a record with
  * no mode is not kept, and the next poll reads it again.
  */
-async function printedFacts($: EngineInterface, main: string, briefKey: string, shas: readonly string[], ownerMs: number | null): Promise<BriefFacts | null> {
-  const key = JSON.stringify([...shas, ownerMs])
-  const hit = factsCache.get(briefKey)
-  if (hit !== undefined && hit.key === key) return hit.facts
-  const running = factsInFlight.get(key)
-  if (running !== undefined) return running
+function printedFacts($: EngineInterface, main: string, briefKey: string, shas: readonly string[], ownerMs: number | null): Promise<BriefFacts | null> {
   const cats = shas.map((_, i) => `git cat-file blob "\${${i + 2}}"`).join(' && ')
   const script = `set -o pipefail; { ${cats}; } | node "$1" --print /dev/null /dev/stdin`
-  const read = $.process
-    .run(['sh', '-c', script, 'sh', `${main}/scripts/run-status.mjs`, ...shas], { cwd: main, timeoutMs: 10000 })
-    .then(r => {
-      const printed = r.exitCode === 0 ? recordRead(r.stdout) : null
-      const facts = printed?.kind === 'record' ? briefFacts(printed.record) : null
-      if (facts !== null) factsCache.set(briefKey, { key, facts })
-      return facts
-    })
-    .catch(() => null)
-    .finally(() => factsInFlight.delete(key))
-  factsInFlight.set(key, read)
-  return read
+  return cachedRead(factsCache, factsInFlight, briefKey, JSON.stringify([...shas, ownerMs]), async () => {
+    const r = await $.process.run(['sh', '-c', script, 'sh', `${main}/scripts/run-status.mjs`, ...shas], { cwd: main, timeoutMs: 10000 })
+    const printed = r.exitCode === 0 ? recordRead(r.stdout) : null
+    return printed?.kind === 'record' ? briefFacts(printed.record) : null
+  })
 }
 
-async function readBriefs($: EngineInterface, cwd: string, raw: RawStatus): Promise<BriefsRead> {
+/**
+ * The briefs on deck, each brief's cycle count and epic, the epics
+ * `sittings.json` records, and each plan's epic titles, from one
+ * `git ls-tree -r origin/main docs/briefs/ docs/plans/` in the checkout.
+ * Each brief's facts are what `printedFacts` prints, one brief after
+ * another, and each plan and the registry is read at once. A running brief
+ * that has left the listing, or whose facts could not be read, reads its
+ * cycles and epic from `cyclesCache`. A failed listing reads no deck and
+ * gives the last listing's cycles, epics, recorded epics, archived sittings
+ * and plan titles.
+ */
+async function readBriefs($: EngineInterface, cwd: string, ownerMs: number | null, raw: RawStatus): Promise<BriefsRead> {
   const running = raw.running.map(r => r.brief)
   const keys = running.map(briefKey)
   const ls = await $.process.run(['git', 'ls-tree', '-r', 'origin/main', 'docs/briefs/', 'docs/plans/'], { cwd, timeoutMs: 5000 })
@@ -609,18 +649,17 @@ async function readBriefs($: EngineInterface, cwd: string, raw: RawStatus): Prom
   const next = new Map<string, string>()
   const texts = new Map(await Promise.all(briefsBlobs(blobs).map(async sha => [sha, await blobText($, cwd, sha, next)] as const)))
   blobCache = next
-  // Each brief's facts, one read after another.
-  const byKey = cycleBlobMap(blobs)
-  const ownerMs = await mtimeOf($, `${cwd}/scripts`, 'run-status.mjs')
+  const listed = cycleBlobMap(blobs)
+  const briefKeys = cycleKeys(briefFiles(blobs), running)
   const facts = new Map<string, BriefFacts>()
-  for (const k of cycleKeys(briefFiles(blobs), running)) {
-    const shas = byKey.get(k) ?? []
+  for (const k of briefKeys) {
+    const shas = listed.get(k) ?? []
     if (shas.length === 0) continue
     const read = await printedFacts($, cwd, k, shas, ownerMs)
     if (read !== null) facts.set(k, read)
   }
+  prune(factsCache, briefKeys)
   const read = briefsRead(blobs, k => facts.get(k), sha => texts.get(sha) ?? null, running, raw.queued.map(r => r.brief))
-  const listed = cycleBlobMap(blobs)
   for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
   for (const k of keys) {
     const kept = { ...cyclesCache.get(k) }
@@ -645,15 +684,9 @@ let seen: Set<number> | null = null
 // Records `--print` printed, by run name, each with the key it was printed
 // under: the progress file's mtime, the brief's path and mtime, and the
 // owner's mtime. A failed `--print` keeps no entry.
-const printCache = new Map<string, { key: string; read: RecordRead }>()
+const printCache = new Map<string, { key: string; value: RecordRead }>()
 // The `--print` in flight for each key, so an overlapping poll awaits it.
 const printInFlight = new Map<string, Promise<RecordRead | null>>()
-
-/** A file's mtime from the listing of its directory, or null when the listing does not hold it. */
-async function mtimeOf($: EngineInterface, dir: string, name: string): Promise<number | null> {
-  const hit = (await $.fs.list(dir).catch(() => [])).find(e => e.kind === 'file' && e.name === name)
-  return hit === undefined ? null : hit.mtimeMs
-}
 
 /**
  * The brief `--print` reads for the run named `base`: `docs/briefs/<file>`
@@ -661,12 +694,12 @@ async function mtimeOf($: EngineInterface, dir: string, name: string): Promise<n
  * archive keeps each brief under its name without `kickoff-sitting-`. Its
  * mtime is null when neither path holds it, and `--print` then reads no brief.
  */
-async function briefOnDisk($: EngineInterface, main: string, base: string): Promise<{ path: string; mtimeMs: number | null }> {
+async function briefOnDisk(ls: Listings, main: string, base: string): Promise<{ path: string; mtimeMs: number | null }> {
   const file = `${base}.md`
-  const live = await mtimeOf($, `${main}/docs/briefs`, file)
+  const live = await mtimeOf(ls, `${main}/docs/briefs`, file)
   if (live !== null) return { path: `${main}/docs/briefs/${file}`, mtimeMs: live }
   const archive = `${main}/docs/archive/${base.replace(/^kickoff-sitting-/, '')}`
-  const archived = await mtimeOf($, archive, file)
+  const archived = await mtimeOf(ls, archive, file)
   return archived === null ? { path: `${main}/docs/briefs/${file}`, mtimeMs: null } : { path: `${archive}/${file}`, mtimeMs: archived }
 }
 
@@ -679,30 +712,22 @@ async function briefOnDisk($: EngineInterface, main: string, base: string): Prom
  */
 async function printedRecord(
   $: EngineInterface,
+  ls: Listings,
   main: string,
   dir: string,
   base: string,
   progressMs: number | null,
   ownerMs: number | null,
 ): Promise<RecordRead | null> {
-  const brief = await briefOnDisk($, main, base)
-  const key = JSON.stringify([progressMs, brief.path, brief.mtimeMs, ownerMs])
-  const hit = printCache.get(base)
-  if (hit !== undefined && hit.key === key) return hit.read
-  const running = printInFlight.get(key)
-  if (running !== undefined) return running
-  const read = $.process
-    .run(['node', `${main}/scripts/run-status.mjs`, '--print', `${dir}/${base}.progress`, brief.path], { cwd: main, timeoutMs: 10000 })
-    .then(r => {
-      const printed = r.exitCode === 0 ? recordRead(r.stdout) : null
-      if (printed === null || printed.kind === 'none') return null
-      printCache.set(base, { key, read: printed })
-      return printed
+  const brief = await briefOnDisk(ls, main, base)
+  return cachedRead(printCache, printInFlight, base, JSON.stringify([progressMs, brief.path, brief.mtimeMs, ownerMs]), async () => {
+    const r = await $.process.run(['node', `${main}/scripts/run-status.mjs`, '--print', `${dir}/${base}.progress`, brief.path], {
+      cwd: main,
+      timeoutMs: 10000,
     })
-    .catch(() => null)
-    .finally(() => printInFlight.delete(key))
-  printInFlight.set(key, read)
-  return read
+    const printed = r.exitCode === 0 ? recordRead(r.stdout) : null
+    return printed === null || printed.kind === 'none' ? null : printed
+  })
 }
 
 /**
@@ -711,9 +736,15 @@ async function printedRecord(
  * has a version the board does not know reads `newer` and is not printed. A
  * run with neither is absent, and draws from status.json alone.
  */
-async function readRunningRecords($: EngineInterface, main: string, dir: string, raw: RawStatus): Promise<Record<string, RecordRead>> {
+async function readRunningRecords(
+  $: EngineInterface,
+  ls: Listings,
+  main: string,
+  dir: string,
+  ownerMs: number | null,
+  raw: RawStatus,
+): Promise<Record<string, RecordRead>> {
   const out: Record<string, RecordRead> = {}
-  let ownerMs: number | null | undefined
   for (const run of raw.running) {
     const text = run.runRecord === undefined ? undefined : await $.fs.read(run.runRecord).catch(() => undefined)
     const read = text === undefined ? null : recordRead(text)
@@ -722,8 +753,7 @@ async function readRunningRecords($: EngineInterface, main: string, dir: string,
       continue
     }
     const base = baseName(run.brief)
-    ownerMs ??= await mtimeOf($, `${main}/scripts`, 'run-status.mjs')
-    const printed = await printedRecord($, main, dir, base, await mtimeOf($, dir, `${base}.progress`), ownerMs)
+    const printed = await printedRecord($, ls, main, dir, base, await mtimeOf(ls, dir, `${base}.progress`), ownerMs)
     if (printed !== null) out[run.brief] = printed
   }
   return out
@@ -753,12 +783,14 @@ async function poll($: EngineInterface): Promise<void> {
     return
   }
   const { raw, sources } = status
+  const ls = listingsOf($)
+  const ownerMs = await mtimeOf(ls, `${sources.main}/scripts`, 'run-status.mjs')
   const loop = await readLoop($, sources.archloopLogDir).catch(() => null)
-  const { onDeck, cycles, afters, splits, epics, recordedEpics, archived, planTitles } = await readBriefs($, sources.main, raw).catch(
+  const { onDeck, cycles, afters, splits, epics, recordedEpics, archived, planTitles } = await readBriefs($, sources.main, ownerMs, raw).catch(
     (): BriefsRead => ({ onDeck: [], cycles: {}, afters: {}, splits: {}, epics: {}, recordedEpics: {}, archived: [], planTitles: {} }),
   )
 
-  const records = await readRunningRecords($, sources.main, dir, raw).catch(() => ({}))
+  const records = await readRunningRecords($, ls, sources.main, dir, ownerMs, raw).catch(() => ({}))
   const tools: Record<string, string> = {}
   const marks: Record<string, string> = {}
   for (const run of raw.running) {
@@ -768,10 +800,12 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const { recent, endings } = await readEndings($, dir, sources, raw, Object.keys(afters), archived).catch(() => ({
+  const { recent, endings } = await readEndings($, ls, dir, sources, ownerMs, raw, Object.keys(afters), archived).catch(() => ({
     recent: [] as Ended[],
     endings: [] as Ending[],
   }))
+  // The --print fallback keeps the runs this poll drew, running or not.
+  prune(printCache, new Set([...raw.running.map(r => baseName(r.brief)), ...endings.map(e => e.base)]))
   const now = await $.clock.now()
   const offset = $.process
     .run(['date', '+%z'], { timeoutMs: 5000 })
@@ -1285,7 +1319,7 @@ export const register: Register = on => {
                     <Text color={F.text}>{money(r.cost)}</Text>
                   </Text>
                 </Box>
-                {r.isNewer ? (
+                {r.source === 'newer' ? (
                   <Text color={F.yellow}>{RECORD_NEWER}</Text>
                 ) : r.isAlive ? (
                   <Box flexDirection="column" marginTop={1}>
