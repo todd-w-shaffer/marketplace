@@ -11,7 +11,6 @@ import {
   supersededBy,
   foldSummary,
   isFolded,
-  lastEnd,
   LOG_MARK_LINES,
   LOG_MARKS,
   LOG_TAIL_BYTES,
@@ -34,7 +33,6 @@ import {
   hoursMinutes,
   historyTag,
   addPlanCosts,
-  launchCount,
   RECENT_SPLIT_CELLS,
   finishedToast,
   isLoopLanding,
@@ -308,80 +306,65 @@ async function readSpend(
   return { days: daySums(ledger.spends, now, offset), plans: { ...ledger.plans } }
 }
 
-// Launch counts read from `.launches` files, by name, kept while their mtime holds.
-const launchCache = new Map<string, { mtimeMs: number; count: number }>()
-
-/**
- * Each stopped run's launch count, by run name, from its `.launches` file,
- * which the launcher appends a line to at each launch and no launch empties.
- * `mtimes` is the log directory's listing; a run whose file it lacks, or
- * whose file cannot be read, is absent.
- */
-async function readLaunchCounts(
-  $: EngineInterface,
-  dir: string,
-  endings: readonly Ending[],
-  mtimes: ReadonlyMap<string, number>,
-): Promise<Record<string, number>> {
-  const out: Record<string, number> = {}
-  const misses: { base: string; name: string; mtimeMs: number }[] = []
-  for (const e of endings) {
-    if (lastEnd(e.text)?.isLive !== false) continue
-    const name = `${e.base}.launches`
-    const mtimeMs = mtimes.get(name)
-    if (mtimeMs === undefined) continue
-    const hit = launchCache.get(name)
-    if (hit !== undefined && hit.mtimeMs === mtimeMs) out[e.base] = hit.count
-    else misses.push({ base: e.base, name, mtimeMs })
-  }
-  await Promise.all(
-    misses.map(async m => {
-      const text = await $.fs.read(`${dir}/${m.name}`).catch(() => undefined)
-      if (text === undefined) return
-      const count = launchCount(text)
-      launchCache.set(m.name, { mtimeMs: m.mtimeMs, count })
-      out[m.base] = count
-    }),
-  )
-  return out
-}
-
 // Progress files read for RECENT and BLOCKED, by name, kept while their mtime holds.
 const progressCache = new Map<string, { mtimeMs: number; text: string }>()
+// Records read for RECENT and BLOCKED, by run name, kept while their file's mtime holds.
+const recordCache = new Map<string, { mtimeMs: number; read: RecordRead }>()
 
 /**
- * The progress files RECENT and BLOCKED read: the newest sittings', and each
+ * The finished runs RECENT and BLOCKED read: the newest sittings', and each
  * brief's on `origin/main`, since a stop that waits for a person can be older
  * than every recent run. None that runs: a run truncates its file at start.
+ * Each run's record is `<sources.log_dir>/<name>.run.json`, else what
+ * `--print` prints for it; a run with neither, or with a newer record, is
+ * not an ending.
  */
 async function readEndings(
   $: EngineInterface,
   dir: string,
+  sources: Sources,
   raw: RawStatus,
   onMain: readonly string[],
   archived: readonly string[],
-): Promise<{ recent: Ended[]; endings: Ending[]; mtimes: Map<string, number> }> {
+): Promise<{ recent: Ended[]; endings: Ending[] }> {
   const files = (await $.fs.list(dir).catch(() => []))
     .filter(e => e.kind === 'file')
     .map(e => ({ name: e.name, mtimeMs: e.mtimeMs }))
+  const recordMtimes = new Map(
+    (await $.fs.list(sources.logDir).catch(() => [])).filter(e => e.kind === 'file').map(e => [e.name, e.mtimeMs] as const),
+  )
   const running = new Set(raw.running.map(r => `${baseName(r.brief)}.progress`))
   const wanted = new Set(onMain.map(k => `${baseName(k)}.progress`))
   const picked = new Map(recentCandidates(files, raw.running.map(r => r.brief)).map(f => [f.name, f]))
   for (const f of files) if (wanted.has(f.name) && !running.has(f.name)) picked.set(f.name, f)
-  const texts: { name: string; mtimeMs: number; text: string }[] = []
+  const endings: Ending[] = []
+  let ownerMs: number | null | undefined
   for (const f of picked.values()) {
+    const base = f.name.replace(/\.progress$/, '')
     let hit = progressCache.get(f.name)
     if (hit === undefined || hit.mtimeMs !== f.mtimeMs) {
       hit = { mtimeMs: f.mtimeMs, text: await $.fs.read(`${dir}/${f.name}`).catch(() => '') }
       progressCache.set(f.name, hit)
     }
-    texts.push({ ...f, text: hit.text })
+    let read: RecordRead | null = null
+    const recordMs = recordMtimes.get(`${base}.run.json`)
+    if (recordMs !== undefined) {
+      const known = recordCache.get(base)
+      if (known !== undefined && known.mtimeMs === recordMs) read = known.read
+      else {
+        const text = await $.fs.read(`${sources.logDir}/${base}.run.json`).catch(() => undefined)
+        read = text === undefined ? null : recordRead(text)
+        if (read !== null) recordCache.set(base, { mtimeMs: recordMs, read })
+      }
+    }
+    if (read === null || read.kind === 'none') {
+      ownerMs ??= await mtimeOf($, `${sources.main}/scripts`, 'run-status.mjs')
+      read = await printedRecord($, sources.main, dir, base, f.mtimeMs, ownerMs)
+    }
+    if (read?.kind !== 'record') continue
+    endings.push({ base, text: hit.text, mtimeMs: f.mtimeMs, record: read.record })
   }
-  return {
-    recent: recentOf(texts, raw.finished, new Set(archived)),
-    endings: texts.map(t => ({ base: t.name.replace(/\.progress$/, ''), text: t.text, mtimeMs: t.mtimeMs })),
-    mtimes: new Map(files.map(f => [f.name, f.mtimeMs])),
-  }
+  return { recent: recentOf(endings, raw.finished, new Set(archived)), endings }
 }
 
 /**
@@ -392,7 +375,7 @@ async function readEndings(
 async function readHandoffs($: EngineInterface, main: string, endings: readonly Ending[]): Promise<Record<string, string>> {
   const out: Record<string, string> = {}
   for (const e of endings) {
-    const kind = lastEnd(e.text)?.kind
+    const kind = e.record.end?.kind
     if (kind !== 'decision' && kind !== 'split') continue
     const tree = `${main}/.claude/worktrees/${e.base.replace(/^kickoff-sitting-/, '')}`
     const text = await $.fs.read(`${tree}/handoff/${e.base}.md`).catch(() => '')
@@ -444,11 +427,11 @@ async function readDeployStages(
 ): Promise<{ stages: Record<string, string>; live: string }> {
   const out: Record<string, string> = {}
   let newestLive = Number.NEGATIVE_INFINITY
-  for (const e of endings) if (lastEnd(e.text)?.isLive) newestLive = Math.max(newestLive, e.mtimeMs)
-  const reds = endings.filter(e => e.mtimeMs > newestLive && deployRunOf(lastEnd(e.text)?.outcome ?? '') !== '')
+  for (const e of endings) if (e.record.end?.live === true) newestLive = Math.max(newestLive, e.mtimeMs)
+  const reds = endings.filter(e => e.mtimeMs > newestLive && e.record.end !== null && deployRunOf(e.record.end) !== '')
   const live = reds.length === 0 ? liveDeployCache.run : await readLiveDeploy($, main, now)
   for (const e of endings) {
-    const run = deployRunOf(lastEnd(e.text)?.outcome ?? '')
+    const run = e.record.end === null ? '' : deployRunOf(e.record.end)
     if (run === '') continue
     const known = deployCache.get(run)
     const reask =
@@ -685,35 +668,31 @@ async function poll($: EngineInterface): Promise<void> {
   )
 
   const records = await readRunningRecords($, sources.main, dir, raw).catch(() => ({}))
-  const progress: Record<string, string> = {}
   const tools: Record<string, string> = {}
   const marks: Record<string, string> = {}
   for (const run of raw.running) {
-    progress[run.brief] = await $.fs.read(`${dir}/${baseName(run.brief)}.progress`).catch(() => '')
     tools[run.brief] = await readLastTool($, `${dir}/${baseName(run.brief)}.log`)
     const read = await readLogMarks($, `${dir}/${baseName(run.brief)}.log`)
     if (read !== undefined) marks[run.brief] = read
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const { recent, endings, mtimes } = await readEndings($, dir, raw, Object.keys(afters), archived).catch(() => ({
+  const { recent, endings } = await readEndings($, dir, sources, raw, Object.keys(afters), archived).catch(() => ({
     recent: [] as Ended[],
     endings: [] as Ending[],
-    mtimes: new Map<string, number>(),
   }))
   const now = await $.clock.now()
   const offset = $.process
     .run(['date', '+%z'], { timeoutMs: 5000 })
     .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
     .catch(() => '')
-  const [handoffs, launches, deploys, utcOffset, read] = await Promise.all([
+  const [handoffs, deploys, utcOffset, read] = await Promise.all([
     readHandoffs($, sources.main, endings).catch(() => ({})),
-    readLaunchCounts($, dir, endings, mtimes).catch(() => ({})),
     readDeployStages($, sources.main, endings, now).catch(() => ({ stages: {}, live: '' })),
     offset,
     readSpend($, home, now, offset).catch(() => null),
   ])
-  const next = buildBoard(raw, progress, alive, now, {
+  const next = buildBoard(raw, alive, now, {
     loop,
     records,
     recent,
@@ -729,7 +708,6 @@ async function poll($: EngineInterface): Promise<void> {
     handoffs,
     deployStages: deploys.stages,
     liveDeploy: deploys.live,
-    launches,
     splits,
     epics,
     recordedEpics,

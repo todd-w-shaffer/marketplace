@@ -91,8 +91,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   each takes the slot where it can start soonest, no earlier than the projected end of each `After:` sitting.
   Idle slot time is a faint `⣀` track. A sitting number sits inside its bar, mantle on the bar's colour, where
   it fits, else beside it; a bar clipped at the window start reads `◂ S677`. A run's slot comes from status.json's
-  `slot`, `slot_taken` and `slot_released`, else from the stamped `slot: <k>` line in its progress file to the next
-  `landed:` or `finished:` stamp, so a run the finished list dropped keeps its slot; a run that names no slot goes
+  `slot`, `slot_taken` and `slot_released`, else from each of its record's `launch_spans`, so a run the finished
+  list dropped keeps its slot; a span the record leaves open on a run that is not running ends at the progress
+  file's last stamp, else its mtime; a run that names no slot goes
   on the lowest slot free over its span. `you` is a red bar from the oldest decision stop's finish to now,
   `S684 ? 19m`, with `+N` for each other one. `held` is a dashed yellow strip from now, `3 held · ~3h12m`: every
   brief BLOCKED holds and every queued entry a `cause` holds, at the median each. With no median there are no
@@ -100,9 +101,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   Under on deck, RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
   the sitting and its whole name where the pane is wide enough, then its time, a six-cell phase split (savor
   lavender, cycles green with simplify and the xhigh review, ship blue, with a legend in the card head), the cost in
-  whole dollars, the plan cost, and how long ago it ended (`14m`, `5h`, `3d`). The split divides the time between
-  the progress file's `at:` stamps by phase, so a relaunch's wait counts nowhere; a file with no stamps draws the
-  grey `⣀` baseline. The plan cost is dim, `+$6`, from the ledger's `phase: "plan"` commit records that carry the
+  whole dollars, the plan cost, and how long ago it ended (`14m`, `5h`, `3d`). The split is the record's
+  `phase_split` rounded to six cells by largest remainder, so a relaunch's wait counts nowhere; a record with no
+  split draws the grey `⣀` baseline, and the phase medians read its `phase_ms`. The plan cost is dim, `+$6`, from the ledger's `phase: "plan"` commit records that carry the
   sitting, `+—` when it holds none, bright when it passes the build's cost, and absent when the ledger cannot be
   read. A run over twice the median draws its time in peach. Under a rule, a totals row reads `10 live in 12h ·
   median 1h04m`: the count of every listed run and the oldest one's age, then the median time, the total time under
@@ -110,8 +111,10 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   runs with minutes; the cost sums the unrounded costs, then rounds,
   so it can differ from the rows' sum. A stop and a `shipped; deploy failed` run are left
   out: they belong to BLOCKED, unless the sitting's claim in `docs/briefs/sittings.json` records an `archived` day: a run
-  finished by hand after it stopped reads `rescued`, with the stopped run's time and cost. RECENT comes from each sitting's `.progress` file, whose last `finished:` line is its latest
-  outcome, so it survives a dispatcher restart, which empties status.json's finished list. ON DECK, between the queue and RECENT, lists each brief on
+  finished by hand after it stopped reads `rescued`, with the stopped run's time and cost. RECENT comes from each sitting's record,
+  `<sources.log_dir>/<name>.run.json`, whose `end` is its latest outcome, so it survives a dispatcher restart, which
+  empties status.json's finished list. A run with no record the board can read draws what `--print` prints for it,
+  and a record with no `end` draws in neither RECENT nor BLOCKED. ON DECK, between the queue and RECENT, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
   group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow
   `enrich` (no Mode line yet: it needs a pass before autopilot), and red `needs you` (marked
@@ -133,10 +136,11 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   § "Stop only for these" (`savor found a failed premise · nothing pushed · 19m · $13.12`); two numbers join with
   `and`, a number off the table reads `stop N` after the stop words, or after the stage where it broke when the line
   names no known number, and a handoff with no stop line keeps that stage. After the cost come the plan cost and
-  which launch stopped, where each exists: `$13.12 +$11.36 plan · 1st launch`, the launch counted from the
-  `launch:` lines of the run's `.launches` file, which no launch empties. A split leaves out stop 7, which its
+  which launch stopped, where each exists: `$13.12 +$11.36 plan · 1st launch`, the launch count the
+  record's `launches`. A split leaves out stop 7, which its
   headline says; a broken run with no stop line reads the launcher's outcome sentence. The kind is
-  status.json's `finished[].kind`, else the `kind:` line above the progress file's last `finished:` line. A queued
+  status.json's `finished[].kind` when it is not null, else the record's `end.kind`, and a red deploy's run is the
+  record's `end.deploy_run`. A queued
   entry is held by status.json's `queued[].cause`; a dispatcher that writes no `cause` key is read through the
   `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never
   appears on deck. A red deploy's strip reads its latest attempt with `gh run view`: once for a run older than the

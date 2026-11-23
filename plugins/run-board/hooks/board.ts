@@ -369,125 +369,6 @@ const unquoted = (command: string): string => command.replace(/'[^']*'|"(?:\\.|[
 /** Whether a progress line is a `bash: ` line whose command runs a push. */
 const isPushLine = (line: string): boolean => line.startsWith('bash: ') && PUSH_COMMAND.test(unquoted(line.slice(6)))
 
-/** Whether a push line runs commit-skill's `ship-run`, rather than `push:checked` itself. */
-const SHIP_RUN = /(^|[\s/;&|(])ship-run([\s;&|)<>]|$)/
-const isShipRunLine = (line: string): boolean => isPushLine(line) && SHIP_RUN.test(unquoted(line.slice(6)))
-// The `cycle k` that a `/commit` line's text names.
-const CYCLE_NAMED = /\bcycle (\d+)/i
-
-/**
- * Where a run is in the fixed chain, from its progress file: step 0's savor
- * when the run has one, each cycle, then simplify, the xhigh review, the ship
- * and the archive.
- *
- * The savor runs from a `sittings:savor launch` line to the next `/commit`,
- * which holds its edits and counts toward no cycle, or to the launcher's
- * `savored:` line, which a savor that made no edits ends on.
- * Cycle k is done when a `/commit` naming `cycle k` (or, naming none, the
- * next cycle) is followed by a `code-review low` line. The ship starts at
- * `/ship` or a push, and the archive at the first `/commit` after the ship's
- * push, unless a `ship-run` follows that commit inside the same `/ship`, with
- * no `skill: commit-skill:ship` line between them: then it was /ship's own
- * commit, its docs or the cleanup after a dirty tree. A later step marks every earlier one done. `cycles` is the brief's
- * count; without it the count is the highest cycle the progress file names.
- */
-export function phasesOf(progress: string, cycles?: number): Phase[] {
-  let savor: 'none' | 'live' | 'done' = 'none'
-  let done = 0
-  let pending: number | null = null
-  let named = 0
-  let cut = false
-  let simplify = false
-  let xhigh = false
-  let ship = false
-  let shipPushed = false
-  let archive = false
-  // The archive's commit, with no /ship begun since: a ship-run now means the commit was the ship's.
-  let archiveOpen = false
-  let finished = false
-  for (const line of progress.split('\n')) {
-    const commit = COMMIT_LINE.exec(line)
-    if (commit) {
-      if (savor === 'live') savor = 'done'
-      else if (shipPushed && !archive) archive = archiveOpen = true
-      else if (!simplify && !ship) {
-        const k = CYCLE_NAMED.exec(commit[1] ?? '')
-        pending = k ? Number(k[1]) : done + 1
-        named = Math.max(named, pending)
-      }
-    } else if (/^skill: code-review low\b/.test(line)) {
-      if (pending !== null) done = Math.max(done, pending)
-      pending = null
-    } else if (/^skill: sittings:savor launch\b/.test(line)) {
-      if (savor === 'none') savor = 'live'
-    } else if (line.startsWith('savored: ')) {
-      if (savor === 'live') savor = 'done'
-    } else if (line.startsWith('cut: ')) cut = true
-    else if (/^skill: simplify\b/.test(line)) simplify = true
-    else if (/^skill: code-review xhigh\b/.test(line)) xhigh = true
-    else if (/^skill: commit-skill:ship\b/.test(line)) {
-      ship = true
-      archiveOpen = false
-    } else if (isPushLine(line)) {
-      if (ship) shipPushed = true
-      ship = true
-      if (archiveOpen && isShipRunLine(line)) archive = archiveOpen = false
-    } else if (line.startsWith('finished: shipped')) finished = true
-  }
-  const n = cycles !== undefined && cycles > 0 ? cycles : Math.max(named, done + 1, 1)
-  const live = finished
-    ? n + 4
-    : archive
-      ? n + 3
-      : ship
-        ? n + 2
-        : xhigh
-          ? n + 1
-          : simplify || cut || done >= n
-            ? n
-            : done
-  const names: [string, string][] = [
-    ...Array.from({ length: n }, (_, i): [string, string] => [`cycle ${i + 1}`, `c${i + 1}`]),
-    ['simplify', 'simpl'],
-    ['review xhigh', 'xhigh'],
-    ['shipping', 'ship'],
-    ['archiving', 'arch'],
-  ]
-  const phases = names.map(([label, short], i): Phase => {
-    const state: PhaseState = savor === 'live' ? 'todo' : i < live ? 'done' : i === live ? 'live' : 'todo'
-    return { label, short, state }
-  })
-  if (savor === 'none') return phases
-  return [{ label: 'savor', short: 'savor', state: savor }, ...phases]
-}
-
-/**
- * The highest `cycle k` that a cycle commit in a progress file names, or 0
- * when none names one. A cycle commit is a `/commit` that `phasesOf` counts
- * toward a cycle: after the savor closes, and before `/simplify`, `/ship` or
- * a push. A cycle commit that names no cycle adds nothing, so this is not
- * `phasesOf`'s count.
- */
-export function namedCycles(progress: string): number {
-  let most = 0
-  let savor: 'none' | 'live' | 'done' = 'none'
-  let after = false
-  for (const line of progress.split('\n')) {
-    const commit = COMMIT_LINE.exec(line)
-    if (commit) {
-      if (savor === 'live') savor = 'done'
-      else if (!after) {
-        const k = CYCLE_NAMED.exec(commit[1] ?? '')
-        if (k) most = Math.max(most, Number(k[1]))
-      }
-    } else if (/^skill: sittings:savor launch\b/.test(line)) {
-      if (savor === 'none') savor = 'live'
-    } else if (line.startsWith('savored: ')) {
-      if (savor === 'live') savor = 'done'
-    } else if (/^skill: (simplify|commit-skill:ship)\b/.test(line) || isPushLine(line)) after = true
-  }
-  return most
-}
 
 // The stamp the launcher writes above each progress write: `at: 2026-11-21T09:39:39Z`.
 const STAMP = /^at: (.*)$/
@@ -510,48 +391,13 @@ export function lineTimes(progress: string): (number | null)[] {
 // How many cells RECENT's phase split takes.
 export const RECENT_SPLIT_CELLS = 6
 
-type SplitPhase = keyof PhaseSplit | 'none'
-
 /**
- * The phase a run is in after `line`, by the lines `phasesOf` reads. A `slot:`
- * line starts a launch and a `finished:` line ends one, and between them and
- * the launch's first step the run is in no phase. The savor runs from its
- * `sittings:savor launch` line to its own `/commit` or the `savored:` line.
- * The ship starts at `/ship` or a push. Every other step, simplify and the
- * xhigh review included, is the cycles.
+ * A run's split milliseconds as RECENT_SPLIT_CELLS cells of savor, cycles and
+ * ship, by largest remainder, ties to the earlier phase. Null when no time
+ * falls in any of the three.
  */
-function nextSplitPhase(phase: SplitPhase, line: string): SplitPhase {
-  if (line.startsWith('slot: ') || line.startsWith('finished: ')) return 'none'
-  if (line === '' || line.startsWith('kind: ')) return phase
-  if (/^skill: sittings:savor launch\b/.test(line)) return phase === 'none' ? 'savor' : phase
-  if (phase === 'savor') return line.startsWith('savored: ') || COMMIT_LINE.test(line) ? 'cycles' : 'savor'
-  if (/^skill: commit-skill:ship\b/.test(line) || isPushLine(line)) return 'ship'
-  return phase === 'none' ? 'cycles' : phase
-}
-
-/**
- * A run's time as RECENT_SPLIT_CELLS cells of savor, cycles and ship. The
- * time from one stamp to the next belongs to the phase the lines under the
- * first one leave the run in, so time in no phase, such as a relaunch's wait,
- * counts nowhere. Cells round by largest remainder, ties to the earlier phase.
- * Null when the file holds no time in any phase, as a file with no `at:`
- * lines does.
- */
-export function phaseSplit(progress: string): PhaseSplit | null {
-  const lines = progress.split('\n')
-  const times = lineTimes(progress)
-  const ms: PhaseSplit = { savor: 0, cycles: 0, ship: 0 }
-  let phase: SplitPhase = 'none'
-  let from: number | null = null
-  lines.forEach((line, i) => {
-    if (!STAMP.test(line)) {
-      phase = nextSplitPhase(phase, line)
-      return
-    }
-    const at = times[i] ?? null
-    if (from !== null && at !== null && phase !== 'none') ms[phase] += Math.max(0, at - from)
-    from = at
-  })
+export function splitCells(ms: PhaseSplit | null): PhaseSplit | null {
+  if (ms === null) return null
   const keys = ['savor', 'cycles', 'ship'] as const
   const total = ms.savor + ms.cycles + ms.ship
   if (total <= 0) return null
@@ -564,46 +410,6 @@ export function phaseSplit(progress: string): PhaseSplit | null {
     left--
   }
   return { savor: cells[0] ?? 0, cycles: cells[1] ?? 0, ship: cells[2] ?? 0 }
-}
-
-/**
- * Each line's live phase label, by `phasesOf` over the lines up to it, or null
- * when no phase is live. Progress files run to tens of lines, so reading each
- * prefix costs nothing that matters, and `phasesOf` stays the one reader of
- * what a phase is.
- */
-function liveLabels(lines: readonly string[], cycles?: number): (string | null)[] {
-  return lines.map((_, i) => phasesOf(lines.slice(0, i + 1).join('\n'), cycles).find(p => p.state === 'live')?.label ?? null)
-}
-
-/**
- * A run's milliseconds in each phase, by phase label. The time from one stamp
- * to the next belongs to the phase the lines under the first one leave live.
- * Time after a `finished:` line and before the next `slot:` line, a
- * relaunch's wait, counts in no phase. A file with no `at:` lines gives no
- * phases.
- */
-export function phaseDurations(progress: string): Record<string, number> {
-  const lines = progress.split('\n')
-  const times = lineTimes(progress)
-  // The cycles the run named, so the time after its last low review is not booked to one more cycle.
-  const labels = liveLabels(lines, namedCycles(progress) || undefined)
-  const out: Record<string, number> = {}
-  let from: number | null = null
-  let label: string | null = null
-  let paused = false
-  lines.forEach((line, i) => {
-    if (STAMP.test(line)) {
-      const at = times[i] ?? null
-      if (from !== null && at !== null && label !== null && !paused) out[label] = (out[label] ?? 0) + Math.max(0, at - from)
-      from = at
-      return
-    }
-    if (line.startsWith('finished: ')) paused = true
-    else if (line.startsWith('slot: ')) paused = false
-    label = labels[i] ?? null
-  })
-  return out
 }
 
 /** The key a phase's median pools under: every cycle is one sample of `cycle`. */
@@ -1016,7 +822,6 @@ export function buildLoop(name: string, files: readonly LoopFile[], progress: st
 
 export function buildBoard(
   raw: RawStatus,
-  progress: Readonly<Record<string, string>>,
   alive: ReadonlySet<number>,
   now: number,
   extra: {
@@ -1047,8 +852,6 @@ export function buildBoard(
     liveDeploy?: string
     /** Each sitting's plan cost by sitting, from token-ledger, or null when it could not be read. */
     plans?: Readonly<Record<string, number>> | null
-    /** Each run's launch count from its `.launches` file, by run name. */
-    launches?: Readonly<Record<string, number>>
     /** How many briefs were split from each sitting, by sitting. */
     splits?: Readonly<Record<string, number>>
     /** Each brief's `Epic:` value by its key: every brief on `origin/main`, and each running one after its archive. */
@@ -1068,7 +871,6 @@ export function buildBoard(
     deployStages: extra.deployStages,
     liveDeploy: extra.liveDeploy,
     plans,
-    launches: extra.launches,
   })
   const recent = (extra.recent ?? []).map(d => ({ ...d, plan: planOf(plans, d.sitting) }))
   // A held brief, and a stopped one, sits under BLOCKED and never on deck.
@@ -1151,7 +953,7 @@ export function buildBoard(
     timeline: timelineOf({
       raw,
       running,
-      progress,
+      records: extra.records ?? {},
       endings: extra.endings ?? [],
       blocks,
       onDeck,
@@ -1170,7 +972,7 @@ export const RECORD_NEWER = 'the record is newer than the board'
 
 /** A board that draws `notice` alone: no run, no queue, no loop and no deck. */
 export function noticeBoard(notice: string, now: number): Board {
-  const empty = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), now)
+  const empty = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, new Set(), now)
   return { ...empty, notice }
 }
 
@@ -1190,51 +992,19 @@ const SLOT_MATCH_MS = 5 * MINUTE_MS
 type SlotSpan = { slot: number | null; startMs: number; endMs: number | null; isLive: boolean }
 
 /**
- * Each launch a progress file records: a stamped `slot: <k>` line, to the
- * stamp of the launch's first `landed:` or `finished:` line, or to nothing
- * while the launch has neither. A launch is live unless its `finished:` line
- * says the run never went live. A `slot:` line with no stamp above it opens
- * no launch.
- *
- * A launch with neither line ends, stopped, at the next `slot:` line's stamp.
- * With `mtimeMs`, for a file whose run has ended, the last such launch ends,
- * stopped, at the file's last stamp, or at `mtimeMs` when no stamp follows its
- * own; without it, the last launch stays open.
+ * A record's launch spans, each slot a slot number. With `progress` and
+ * `mtimeMs`, for a run that is not running, a last span the record leaves open
+ * ends, stopped, at the progress file's last stamp, or at `mtimeMs` when no
+ * stamp follows its start; without them it stays open.
  */
-function slotSpans(progress: string, mtimeMs: number | null = null): SlotSpan[] {
-  const times = lineTimes(progress)
-  const out: SlotSpan[] = []
-  let open: SlotSpan | null = null
-  const close = (span: SlotSpan, at: number | null) => {
-    if (span.endMs !== null || at === null || at <= span.startMs) return
-    span.endMs = at
-    span.isLive = false
-  }
-  progress.split('\n').forEach((line, i) => {
-    const at = times[i] ?? null
-    const slot = /^slot: (\S+)/.exec(line)
-    if (slot) {
-      if (open !== null) {
-        close(open, at)
-        out.push(open)
-      }
-      open = at === null ? null : { slot: slotNumber(Number(slot[1])), startMs: at, endMs: null, isLive: true }
-      return
-    }
-    if (open === null) return
-    const isFinished = line.startsWith('finished: ')
-    if (!isFinished && !line.startsWith('landed: ')) return
-    if (open.endMs === null) open.endMs = at
-    if (isFinished) open.isLive = LIVE.test(line.slice('finished: '.length))
-  })
-  // The callback assigns `open`, which the compiler does not follow.
-  const tail = open as SlotSpan | null
-  if (tail !== null) {
-    if (mtimeMs !== null) {
-      const last = times[times.length - 1] ?? null
-      close(tail, last !== null && last > tail.startMs ? last : mtimeMs)
-    }
-    out.push(tail)
+function slotSpans(record: RunRecord | undefined, closeBy: { progress: string; mtimeMs: number } | null = null): SlotSpan[] {
+  const out: SlotSpan[] = (record?.launchSpans ?? []).map(s => ({ ...s, slot: slotNumber(s.slot) }))
+  const tail = out[out.length - 1]
+  if (tail !== undefined && tail.endMs === null && closeBy !== null) {
+    const times = lineTimes(closeBy.progress).filter((t): t is number => t !== null)
+    const last = times[times.length - 1] ?? null
+    const at = last !== null && last > tail.startMs ? last : closeBy.mtimeMs
+    if (at > tail.startMs) out[out.length - 1] = { ...tail, endMs: at, isLive: false }
   }
   return out
 }
@@ -1252,18 +1022,19 @@ function finishedAt(progress: string): number | null {
  * `finished:` line's, or, in a file with no stamps, its outcome's minutes
  * back from the file's mtime. Null when neither gives a span.
  */
-function unslottedSpan(progress: string, mtimeMs: number): { startMs: number; endMs: number; isLive: boolean } | null {
-  const end = lastEnd(progress)
+function unslottedSpan(e: Ending): { startMs: number; endMs: number; isLive: boolean } | null {
+  const { text: progress, mtimeMs } = e
+  const { end } = e.record
   if (end === null) return null
   const stamps = lineTimes(progress).filter((t): t is number => t !== null)
   const first = stamps[0]
   if (first !== undefined) {
     const last = finishedAt(progress) ?? stamps[stamps.length - 1] ?? first
-    return last > first ? { startMs: first, endMs: last, isLive: end.isLive } : null
+    return last > first ? { startMs: first, endMs: last, isLive: end.live } : null
   }
-  const totals = TOTALS.exec(end.outcome)
+  const totals = TOTALS.exec(end.text)
   if (totals === null) return null
-  return { startMs: mtimeMs - Number(totals[2]) * MINUTE_MS, endMs: mtimeMs, isLive: end.isLive }
+  return { startMs: mtimeMs - Number(totals[2]) * MINUTE_MS, endMs: mtimeMs, isLive: end.live }
 }
 
 const overlaps = (a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }): boolean =>
@@ -1316,7 +1087,8 @@ export function timelineOf(input: {
   raw: RawStatus
   /** `raw.running` as buildBoard read it, in the same order. */
   running: readonly Pick<Run, 'startedMs'>[]
-  progress: Readonly<Record<string, string>>
+  /** Each running brief's record as the board read it. */
+  records: Readonly<Record<string, RecordRead>>
   endings: readonly Ending[]
   blocks: readonly Block[]
   onDeck: readonly Deck[]
@@ -1326,7 +1098,7 @@ export function timelineOf(input: {
   now: number
   utcOffset: string
 }): Timeline {
-  const { raw, progress, endings, blocks, onDeck, afters, median, now } = input
+  const { raw, records, endings, blocks, onDeck, afters, median, now } = input
   const startMs = now - TIMELINE_BACK_MS
   const endMs = now + TIMELINE_AHEAD_MS
   const medianMs = median === null ? null : median * MINUTE_MS
@@ -1357,7 +1129,8 @@ export function timelineOf(input: {
 
   raw.running.forEach((r, i) => {
     const { sitting } = sittingOf(r.brief)
-    const spans = slotSpans(progress[r.brief] ?? '').filter(s => s.slot !== null)
+    const read = records[r.brief]
+    const spans = slotSpans(read?.kind === 'record' ? read.record : undefined).filter(s => s.slot !== null)
     const last = spans[spans.length - 1]
     // A run whose start does not parse starts at now, so it draws no bar.
     const started = input.running[i]?.startedMs ?? now
@@ -1386,11 +1159,13 @@ export function timelineOf(input: {
     placed.push({ slot, bar: bar(sitting, 'running', from, end, liveEnd, isOver) })
     ends.set(sitting, end)
   })
+  // Whether each ended run went live, by run name, from its record.
+  const endedLive = new Map(endings.flatMap(e => (e.record.end === null ? [] : [[e.base, e.record.end.live] as const])))
   // A finished record whose slot was never released, by run name: its progress file ends it.
   const unreleased = new Map<string, { slot: number; takenMs: number; tone: BarTone }[]>()
   for (const f of raw.finished) {
     if (f.slot == null || f.slotTakenMs == null) continue
-    const tone: BarTone = LIVE.test(outcomeOf(f)) ? 'live' : 'stopped'
+    const tone: BarTone = (endedLive.get(baseName(f.brief)) ?? (f.status === 0 && f.kind === null)) ? 'live' : 'stopped'
     if (f.slotReleasedMs == null) {
       const base = baseName(f.brief)
       unreleased.set(base, [...(unreleased.get(base) ?? []), { slot: f.slot, takenMs: f.slotTakenMs, tone }])
@@ -1401,7 +1176,7 @@ export function timelineOf(input: {
   }
   for (const e of endings) {
     const { sitting } = sittingOf(e.base)
-    const spans = slotSpans(e.text, e.mtimeMs).filter(s => s.slot !== null)
+    const spans = slotSpans(e.record, { progress: e.text, mtimeMs: e.mtimeMs }).filter(s => s.slot !== null)
     for (const s of spans) highest = Math.max(highest, s.slot ?? 1)
     const taken = recorded.get(e.base) ?? []
     for (const s of spans) {
@@ -1416,7 +1191,7 @@ export function timelineOf(input: {
     }
     unreleased.delete(e.base)
     if (spans.length > 0 || recorded.has(e.base)) continue
-    const span = unslottedSpan(e.text, e.mtimeMs)
+    const span = unslottedSpan(e)
     if (span !== null) unslotted.push({ sitting, tone: span.isLive ? 'live' : 'stopped', startMs: span.startMs, endMs: span.endMs })
   }
   const slots = Array.from({ length: highest }, (_, i) => i + 1)
@@ -1470,8 +1245,7 @@ export function timelineOf(input: {
   // the one blockedOf reads: its newest by mtime that did not go live.
   const endingOf = new Map<string, Ending>()
   for (const e of endings) {
-    const end = lastEnd(e.text)
-    if (end === null || end.isLive) continue
+    if (e.record.end === null || e.record.end.live) continue
     const { sitting } = sittingOf(e.base)
     const known = endingOf.get(sitting)
     if (known === undefined || known.mtimeMs < e.mtimeMs) endingOf.set(sitting, e)
@@ -2285,79 +2059,54 @@ export function recentCandidates(files: readonly ProgressFile[], running: readon
 }
 
 /**
- * The newest sittings live in production, one each, from their progress
- * files' last `finished:` line. A stop and a red deploy are left out: they
- * belong to BLOCKED. A run that did not go live but whose sitting is in
- * `archived` was finished by hand: it is listed as `rescued`, with the
- * totals of the run that stopped. These files outlive the dispatcher, whose finished list
- * starts empty each time one starts. The lane comes from that list while it
- * still holds the run, and the cycle count from `namedCycles`: an archived
- * brief has left docs/briefs/, so no brief is read.
+ * The newest sittings live in production, one each, from their records'
+ * `end`. A stop and a red deploy are left out: they belong to BLOCKED. A run
+ * that did not go live but whose sitting is in `archived` was finished by
+ * hand: it is listed as `rescued`, with the totals of the run that stopped.
+ * The records outlive the dispatcher, whose finished list starts empty each
+ * time one starts. The lane comes from that list while it still holds the
+ * run, and the cycle count from the record's `named_cycles`.
  */
-export function recentOf(
-  files: readonly (ProgressFile & { text: string })[],
-  finished: RawStatus['finished'],
-  archived: ReadonlySet<string> = new Set(),
-): Ended[] {
+export function recentOf(endings: readonly Ending[], finished: RawStatus['finished'], archived: ReadonlySet<string> = new Set()): Ended[] {
   const laneOf = new Map<string, string>()
   for (const f of [...finished].sort((a, b) => a.entry - b.entry)) laneOf.set(baseName(f.brief), f.lane)
   const out: Ended[] = []
-  for (const f of [...files].sort((a, b) => b.mtimeMs - a.mtimeMs)) {
-    const end = lastEnd(f.text)
+  for (const e of [...endings].sort((a, b) => b.mtimeMs - a.mtimeMs)) {
+    const { end } = e.record
     if (end === null) continue
-    const base = f.name.replace(/\.progress$/, '')
-    const sitting = sittingOf(base)
-    if (!end.isLive && !archived.has(sitting.sitting)) continue
-    const totals = TOTALS.exec(end.outcome)
+    const sitting = sittingOf(e.base)
+    if (!end.live && !archived.has(sitting.sitting)) continue
+    const totals = TOTALS.exec(end.text)
     out.push({
       ...sitting,
-      lane: laneOf.get(base) ?? '',
-      detail: outcomeDetail(end.isLive ? end.outcome : `rescued${totals?.[0] ?? ''}`),
+      lane: laneOf.get(e.base) ?? '',
+      detail: outcomeDetail(end.live ? end.text : `rescued${totals?.[0] ?? ''}`),
       minutes: totals === null ? null : Number(totals[2]),
       usd: totals === null ? null : Number(totals[1]),
-      endedMs: f.mtimeMs,
-      split: phaseSplit(f.text),
-      phaseMs: phaseDurations(f.text),
+      endedMs: e.mtimeMs,
+      split: splitCells(e.record.phaseSplit),
+      phaseMs: Object.fromEntries(e.record.phaseMs.map(p => [p.label, p.ms])),
       plan: 'unread',
-      cycles: namedCycles(f.text),
+      cycles: e.record.namedCycles,
     })
     if (out.length === RECENT_LIMIT) break
   }
   return out
 }
 
-/** A run's last end in its progress file: the outcome, the kind written above it, and whether production is live. */
-export type RunEnd = { outcome: string; kind: string; isLive: boolean }
-
-// An outcome that put the run live in production. `shipped; deploy failed`
-// pushed code that never went live.
-const LIVE = /^shipped; production is live\b/
+/** A run's end as its record states it. */
+export type RecordEnd = NonNullable<RunRecord['end']>
 
 /**
- * The last `finished:` line of a progress file, or null when it has none.
- * The kind is the `kind:` line directly above it, as scripts/autopilot.sh
- * writes it. A file without that line reads `deploy-red` for a failed deploy
- * and `run-broke` for any other end that is not live.
+ * A sitting that is not running, as the poll read it: its run name, its
+ * progress file's text and mtime, and its record. The text is read only for
+ * the strip and the stamps. A record with no end draws on the timeline alone,
+ * and RECENT and BLOCKED skip it.
  */
-export function lastEnd(progress: string): RunEnd | null {
-  const lines = progress.split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i] ?? ''
-    if (!line.startsWith('finished: ')) continue
-    const outcome = line.slice('finished: '.length)
-    const isLive = LIVE.test(outcome)
-    const above = /^kind: (\S+)/.exec(lines[i - 1] ?? '')
-    const kind = isLive ? '' : (above?.[1] ?? (outcome.startsWith('shipped;') ? 'deploy-red' : 'run-broke'))
-    return { outcome, kind, isLive }
-  }
-  return null
-}
+export type Ending = { base: string; text: string; mtimeMs: number; record: RunRecord }
 
-/** The run a failed deploy names: `shipped; deploy failed (run 44071838536).` gives `44071838536`. */
-export const deployRunOf = (outcome: string): string => /deploy failed \(run (\d+)\)/.exec(outcome)?.[1] ?? ''
-
-/** A sitting's progress file as the poll read it: its run name, text and mtime. */
-export type Ending = { base: string; text: string; mtimeMs: number }
+/** The run a red deploy names, as text, or empty when the end names none. */
+export const deployRunOf = (end: RecordEnd): string => (end.deployRun === null ? '' : String(end.deployRun))
 
 /** Each kind's tag, by who acts. */
 export const KIND_TAG: Record<BlockKind, string> = { decision: '? you', split: '÷ plan', 'deploy-red': '✗ code', 'run-broke': '! run' }
@@ -2469,10 +2218,8 @@ export function blockedOf(input: {
   liveDeploy?: string
   /** Each sitting's plan cost, or null when the ledger could not be read. */
   plans?: Readonly<Record<string, number>> | null
-  /** Each run's launch count from its `.launches` file, by run name. */
-  launches?: Readonly<Record<string, number>>
 }): { blocks: Block[]; drawn: Set<string> } {
-  const { raw, endings, afters, handoffs = {}, deployStages = {}, liveDeploy = '', plans = null, launches = {} } = input
+  const { raw, endings, afters, handoffs = {}, deployStages = {}, liveDeploy = '', plans = null } = input
   const running = new Set(raw.running.map(r => sittingOf(r.brief).sitting))
   const queued = new Map(raw.queued.map(q => [sittingOf(q.brief).sitting, q]))
   const onMain = new Map(Object.keys(afters).map(k => [sittingOf(k).sitting, k]))
@@ -2483,25 +2230,27 @@ export function blockedOf(input: {
   const statusKind = new Map<string, string | null>()
   for (const f of [...raw.finished].sort((a, b) => a.entry - b.entry)) statusKind.set(baseName(f.brief), f.kind)
 
-  type Info = { slug: string; base: string; text: string; mtimeMs: number; end: RunEnd; kind: BlockKind }
+  type Info = { slug: string; base: string; text: string; mtimeMs: number; end: RecordEnd; launches: number; kind: BlockKind }
   const ends = new Map<string, Info>()
   let newestLive = Number.NEGATIVE_INFINITY
   for (const e of endings) {
-    const end = lastEnd(e.text)
+    const { end } = e.record
     if (end === null) continue
-    if (end.isLive) {
+    if (end.live) {
       newestLive = Math.max(newestLive, e.mtimeMs)
       continue
     }
     const { sitting, slug } = sittingOf(e.base)
     const known = ends.get(sitting)
     if (known !== undefined && known.mtimeMs >= e.mtimeMs) continue
-    ends.set(sitting, { slug, base: e.base, text: e.text, mtimeMs: e.mtimeMs, end, kind: blockKind(statusKind.get(e.base) ?? end.kind) })
+    // status.json's kind when it is not null, else the record's.
+    const kind = blockKind(statusKind.get(e.base) ?? end.kind ?? '')
+    ends.set(sitting, { slug, base: e.base, text: e.text, mtimeMs: e.mtimeMs, end, launches: e.record.launches, kind })
   }
   const stuck = new Map<string, Info>()
   for (const [s, i] of ends) {
     if (running.has(s) || queued.has(s)) continue
-    const run = deployRunOf(i.end.outcome)
+    const run = deployRunOf(i.end)
     const redDeploy = i.mtimeMs > newestLive && deployStages[run] !== DEPLOY_LIVE && !supersededBy(run, liveDeploy)
     if (i.kind === 'deploy-red' ? redDeploy : onMain.has(s)) stuck.set(s, i)
   }
@@ -2509,7 +2258,7 @@ export function blockedOf(input: {
   // A root is a stuck sitting, or `run N` for a red deploy no stuck sitting names.
   const rootOfCause = (c: Cause): string => {
     if ('run' in c) {
-      for (const [s, i] of stuck) if (i.kind === 'deploy-red' && deployRunOf(i.end.outcome) === String(c.run)) return s
+      for (const [s, i] of stuck) if (i.kind === 'deploy-red' && deployRunOf(i.end) === String(c.run)) return s
       return `run ${c.run}`
     }
     return sittingOf(c.sitting).sitting
@@ -2554,7 +2303,7 @@ export function blockedOf(input: {
       slug: slugOf.get(h.sitting) ?? stuck.get(h.sitting)?.slug ?? '',
       after: afterOf(h.sitting),
     }))
-    const history = { plan: planOf(plans, root), launches: info === undefined ? null : (launches[info.base] ?? null) }
+    const history = { plan: planOf(plans, root), launches: info === undefined || info.launches <= 0 ? null : info.launches }
     blocks.push({ ...blockFace(root, info, kind, holds, handoffs, deployStages), ...history })
   }
   blocks.sort((a, b) => b.holds.length - a.holds.length || b.endedMs - a.endedMs)
@@ -2640,17 +2389,17 @@ export function chainLine(k: Pick<Block, 'holds'>): { count: string; chain: stri
 /** A block's words by kind: its headline, the line of why, the strip and the next line. */
 function blockFace(
   root: string,
-  info: { slug: string; base: string; text: string; mtimeMs: number; end: RunEnd } | undefined,
+  info: { slug: string; base: string; text: string; mtimeMs: number; end: RecordEnd } | undefined,
   kind: BlockKind,
   holds: Held[],
   handoffs: Readonly<Record<string, string>>,
   deployStages: Readonly<Record<string, string>>,
 ): Omit<Block, 'plan' | 'launches'> {
-  const outcome = info?.end.outcome ?? ''
+  const outcome = info?.end.text ?? ''
   const totals = TOTALS.exec(outcome)
   const sentence = totals === null ? outcome : outcome.slice(0, totals.index)
   const spent = totals === null ? [] : [hoursMinutes(Number(totals[2])), `$${totals[1] ?? ''}`]
-  const run = deployRunOf(outcome) || (root.startsWith('run ') ? root.slice('run '.length) : '')
+  const run = (info === undefined ? '' : deployRunOf(info.end)) || (root.startsWith('run ') ? root.slice('run '.length) : '')
   const handoff = info === undefined ? '' : (handoffs[info.base] ?? '')
   const strip = info === undefined ? [] : stripOf(info.text, kind, deployStages[run] ?? '')
   const broke = strip.find(p => p.state === 'broke')?.stage
@@ -2682,8 +2431,6 @@ function blockFace(
   return { ...base, headline: `${root}: the run broke`, why: stops.length > 0 ? why : sentence, next: `read the log, then relaunch ${root}` }
 }
 
-/** How many launches a `.launches` file records: one `launch: <n> <fresh|relaunch> slot <k> at <UTC time>` line each. */
-export const launchCount = (text: string): number => text.split('\n').filter(l => /^launch: \d+ /.test(l)).length
 
 const ORDINAL_SUFFIX: Record<number, string> = { 1: 'st', 2: 'nd', 3: 'rd' }
 

@@ -38,8 +38,8 @@ import {
   logEventsOf,
   phaseLine,
   phaseName,
+  splitCells,
   recordRead,
-  phasesOf,
   queueTree,
   parseStatus,
   recentCandidates,
@@ -55,19 +55,14 @@ import {
   DEPLOY_LIVE,
   foldSummary,
   isFolded,
-  lastEnd,
   liveDepths,
   historyTag,
-  launchCount,
   lineTimes,
-  phaseDurations,
-  phaseSplit,
   planCosts,
   splitCounts,
   TIMELINE_AHEAD_MS,
   TIMELINE_BACK_MS,
   daySums,
-  namedCycles,
   planBlobs,
   planHeadings,
   recordedEpics,
@@ -76,7 +71,7 @@ import {
   sparkGlyphs,
 } from '../hooks/board'
 import type { Deck, Ended, Run } from '../types'
-import type { RecordRead } from '../hooks/board'
+import type { Ending, RecordRead } from '../hooks/board'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -106,11 +101,148 @@ const S300 = [
 
 const NOW = Date.parse('2026-10-31T16:49:25Z')
 
+// ---------- the run record ----------
+
+// A record as scripts/run-status.mjs writes it: pasted from
+// ~/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.run.json.
+const RECORD_BASE = {
+  version: 1,
+  stage: 'finished',
+  phases: [
+    { label: 'savor', short: 'savor', state: 'done' },
+    { label: 'cycle 1', short: 'c1', state: 'done' },
+    { label: 'cycle 2', short: 'c2', state: 'done' },
+    { label: 'simplify', short: 'simpl', state: 'done' },
+    { label: 'review xhigh', short: 'xhigh', state: 'done' },
+    { label: 'shipping', short: 'ship', state: 'done' },
+    { label: 'archiving', short: 'arch', state: 'done' },
+  ],
+  end: {
+    outcome: 'shipped',
+    text: 'shipped; production is live (run 45194059532). ($23.27, 73 min, peak 226k context, effort medium, agents low-xhigh)',
+    kind: null,
+    live: true,
+    deploy_run: null,
+  },
+  note: { text: 'S727 has shipped and is archived. The new `POST /api/gallery/:galleryId/edits` door is on `main` at 2d2f29a38..52c68e7bf', cost: 9 },
+  named_cycles: 2,
+  phase_since: null,
+  phase_ms: [
+    { label: 'cycle 1', ms: 478000 },
+    { label: 'savor', ms: 480000 },
+    { label: 'cycle 2', ms: 1070000 },
+    { label: 'simplify', ms: 595000 },
+    { label: 'review xhigh', ms: 1370000 },
+    { label: 'shipping', ms: 243000 },
+    { label: 'archiving', ms: 200000 },
+  ],
+  phase_split: { savor: 480000, cycles: 3473000, ship: 443000 },
+  launch_spans: [{ slot: 2, start: '2026-11-23T13:15:56Z', end: '2026-11-23T14:25:34Z', live: true }],
+  stops: [],
+  handoff: null,
+  brief: 'docs/briefs/kickoff-sitting-s727-gallery-edit-batch.md',
+  mode: 'autopilot',
+  epic: 'gallery-panels/E11',
+  after: ['S725', 'S752'],
+  split_from: [],
+  cycles: 2,
+  landed: true,
+  launches: 1,
+  progress: '/Users/toddwshaffer/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.progress',
+  log: '/Users/toddwshaffer/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.log',
+}
+
+// The record `--print` answers, as
+// `node scripts/run-status.mjs --print ~/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.progress docs/archive/s727-gallery-edit-batch/kickoff-sitting-s727-gallery-edit-batch.md`
+// printed it: the written record with the brief path it was given.
+const PRINT_BASE = { ...RECORD_BASE, brief: 'docs/archive/s727-gallery-edit-batch/kickoff-sitting-s727-gallery-edit-batch.md' }
+
+// A running chain at the xhigh review.
+const XHIGH_PHASES = [
+  { label: 'cycle 1', short: 'c1', state: 'done' },
+  { label: 'cycle 2', short: 'c2', state: 'done' },
+  { label: 'simplify', short: 'simpl', state: 'done' },
+  { label: 'review xhigh', short: 'xhigh', state: 'live' },
+  { label: 'shipping', short: 'ship', state: 'todo' },
+  { label: 'archiving', short: 'arch', state: 'todo' },
+]
+/** A running run's record, from the base: at the xhigh review for nine minutes, $3 in. */
+const runningRecord = (more: object = {}) => ({
+  ...RECORD_BASE,
+  stage: 'review xhigh',
+  phases: XHIGH_PHASES,
+  end: null,
+  phase_since: new Date(NOW - 9 * 60000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  note: { text: 'reviewing', cost: 3 },
+  launch_spans: [{ slot: 1, start: new Date(NOW - 30 * 60000).toISOString().replace(/\.\d{3}Z$/, 'Z'), end: null, live: true }],
+  ...more,
+})
+
+/**
+ * The fixed chain over `cycles` cycles, each phase before index `live` done,
+ * that one live and the rest to come: the phases a record lists.
+ */
+function phasesAt(cycles: number, live: number) {
+  const names: [string, string][] = [
+    ...Array.from({ length: cycles }, (_, i): [string, string] => [`cycle ${i + 1}`, `c${i + 1}`]),
+    ['simplify', 'simpl'],
+    ['review xhigh', 'xhigh'],
+    ['shipping', 'ship'],
+    ['archiving', 'arch'],
+  ]
+  return names.map(([label, short], i) => ({ label, short, state: i < live ? 'done' : i === live ? 'live' : 'todo' }))
+}
+
+/** A running record read through the board's reader, from `runningRecord(more)`. */
+function runRead(more: object = {}): RecordRead {
+  const read = recordRead(JSON.stringify(runningRecord(more)))
+  if (read.kind !== 'record') throw new Error('the fixture is no record')
+  return read
+}
+
+
+/** A record's end: shipped with production live when `kind` is null, else a stop of that kind. */
+const endOf = (text: string, kind: string | null = null, more: object = {}) => ({
+  outcome: /^[a-z-]+/.exec(text)?.[0] ?? 'unknown',
+  text,
+  kind,
+  live: kind === null,
+  deploy_run: null,
+  ...more,
+})
+
+/**
+ * A run that is not running, as the poll reads it: its run name, the record
+ * the base gives with `end` and `more`, read through the board's reader, its
+ * progress text and mtime. The record holds no spans or timings unless `more`
+ * names them, and a null `end` is a run that has not ended.
+ */
+function ending(base: string, mtimeMs: number, end: object | null, more: object = {}, text = ''): Ending {
+  const read = recordRead(JSON.stringify({ ...RECORD_BASE, phase_ms: [], phase_split: null, launch_spans: [], named_cycles: 0, launches: 0, ...more, end }))
+  if (read.kind !== 'record') throw new Error('the fixture is no record')
+  return { base, text, mtimeMs, record: read.record }
+}
+
+/** A record file's text: the base with `end` and `more`, and no spans or timings unless `more` names them. */
+const recordJson = (end: object | null, more: object = {}): string =>
+  JSON.stringify({ ...RECORD_BASE, phase_ms: [], phase_split: null, launch_spans: [], named_cycles: 0, launches: 0, ...more, end })
+
+/** A stamp `minutes` from NOW, as a record writes it. */
+const stampAt = (minutes: number): string => new Date(NOW + minutes * 60000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+
+/** A launch span as a record states it, its times in minutes from NOW; a null end leaves it open. */
+const spanAt = (slot: number | null, from: number, to: number | null, live = true) => ({
+  slot,
+  start: stampAt(from),
+  end: to === null ? null : stampAt(to),
+  live,
+})
+
 test('a board reads runs, queue, outcomes and liveness', async () => {
   const raw = parseStatus(STATUS)
   expect(raw === null).toBe(false)
   if (raw === null) return
-  const b = buildBoard(raw, {}, new Set([5147, 21491]), NOW, { records: { [S300_BRIEF]: S300_READ() } })
+  const b = buildBoard(raw, new Set([5147, 21491]), NOW, { records: { [S300_BRIEF]: S300_READ() } })
   expect(b.isDispatcherLive).toBe(true)
   expect(b.running.map(r => `${r.sitting}:${r.stage}:${r.isAlive}`)).toEqual([
     'S299:starting:false',
@@ -128,7 +260,7 @@ test('a board reads runs, queue, outcomes and liveness', async () => {
 })
 
 test('nothing running or queued clears the status line', async () => {
-  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW)
+  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, new Set(), NOW)
   expect(statusLine(b)).toBe(undefined)
 })
 
@@ -141,7 +273,7 @@ test('a free slot has no card and no idle part on the hint line', async () => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
   const oneRun = { ...raw, running: raw.running.filter(r => r.lane === 'epic'), queued: [] }
-  const b = buildBoard(oneRun, {}, new Set([5147, 79762]), NOW)
+  const b = buildBoard(oneRun, new Set([5147, 79762]), NOW)
   // S299 has no record, so it draws from status.json alone.
   expect(statusLine(b)).toBe('● S299 starting 1h06m │ $7.65')
   expect(lanesOf(b).map(l => `${l.lane}:${l.runs.length}`)).toEqual(['epic:1'])
@@ -196,71 +328,10 @@ const S393 = [
   "woke for a background task: success, 65 turns, $10.62 so far: Cycle 2's build is running.",
 ].join('\n')
 
-const states = (progress: string, cycles?: number): string =>
-  phasesOf(progress, cycles)
-    .map(p => `${p.short}:${p.state}`)
-    .join(' ')
-
-test('phases follow the chain: each cycle closes on its low review, then simplify, xhigh, ship, archive', async () => {
-  expect(states(S393, 2)).toBe('c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
-  expect(states(S395, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:live ship:todo arch:todo')
-  // A /commit inside /ship comes before its push, so the run is still shipping.
-  const shipping = `${S395}\nskill: commit-skill:ship\nskill: commit-skill:commit uncommitted docs`
-  expect(states(shipping, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:live arch:todo')
-  // The archive's /commit comes after the ship's push.
-  const archiving = `${shipping}\nbash: npm run push:checked -- origin HEAD:main 2>&1 | tail\nskill: commit-skill:commit archive S395`
-  expect(states(archiving, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live')
-  expect(states(`${archiving}\npushes: 1a2b\nfinished: shipped; production is live (run 1).`, 3)).toBe(
-    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:done',
-  )
-})
-
-test('a ship-run call is a push: the archive after it, --finish and the strip', async () => {
-  const shipping = `${S395}\nskill: commit-skill:ship\nbash: ship-run --to-default`
-  expect(states(`${shipping}\nskill: commit-skill:commit archive S395`, 3)).toBe(
-    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
-  )
-  // /ship's docs commit sits between its two calls, so the run is still shipping.
-  const docs = `${shipping}\nskill: commit-skill:commit docs sync\nbash: ship-run --finish --to-default`
-  expect(states(docs, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:live arch:todo')
-  expect(states(`${docs}\nskill: commit-skill:commit archive S395`, 3)).toBe(
-    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
-  )
-  // The archive's own /ship runs ship-run and --finish: the run stays archiving.
-  const archiveShip = `${docs}\nskill: commit-skill:commit archive S395\nskill: commit-skill:ship\nbash: ship-run`
-  expect(states(archiveShip, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live')
-  expect(states(`${archiveShip}\nbash: ship-run --finish`, 3)).toBe(
-    'c1:done c2:done c3:done simpl:done xhigh:done ship:done arch:live',
-  )
-  // A ship-run that found the tree dirty, then /ship's /commit and its second ship-run: still shipping.
-  const dirty = `${shipping}\nskill: commit-skill:commit leftover\nbash: ship-run --to-default`
-  expect(states(dirty, 3)).toBe('c1:done c2:done c3:done simpl:done xhigh:done ship:live arch:todo')
+test('a ship-run call is a push in the strip', async () => {
   expect(stripOf(`${S395}\nbash: ship-run`, 'run-broke').map(c => `${c.stage}:${c.state}`)).toEqual([
     'savor:skip', 'cycles:done', 'push:broke', 'staging:todo', 'prod:todo',
   ])
-})
-
-test('a run with step 0 opens on a savor phase that its own commit closes', async () => {
-  const savoring = 'skill: sittings:savor launch docs/briefs/kickoff-sitting-s608-gallery-id.md'
-  expect(states(savoring, 2)).toBe('savor:live c1:todo c2:todo simpl:todo xhigh:todo ship:todo arch:todo')
-  // The step-0 commit names no cycle and gets no low review: it closes the savor, not cycle 1.
-  const saved = `${savoring}\nskill: commit-skill:commit S608 step 0: savor at launch edits\ncommit: docs(briefs): tighten S608`
-  expect(states(saved, 2)).toBe('savor:done c1:live c2:todo simpl:todo xhigh:todo ship:todo arch:todo')
-  const cycle1 = `${saved}\nskill: commit-skill:commit S608 cycle 1: the id\nskill: code-review low a b`
-  expect(states(cycle1, 2)).toBe('savor:done c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
-  // Session 2 re-reads the same progress file, so its stages still follow the savor.
-  expect(states(`${cycle1}\nskill: code-review xhigh a b`, 2)).toBe(
-    'savor:done c1:done c2:done simpl:done xhigh:live ship:todo arch:todo',
-  )
-  expect(phaseLine({ phases: phasesOf(savoring, 2), stage: 'savor', tool: 'Agent: systems' } as Run)).toBe('Agent: systems')
-})
-
-test('a savor file closes a savor that made no edits, so the first cycle commit counts as cycle 1', async () => {
-  const savoring = 'skill: sittings:savor launch docs/briefs/kickoff-sitting-s620-x.md'
-  const handed = `${savoring}\nsavored: session 0 handed over in /x.savored; session 1 starts at cycle 1 in /w`
-  expect(states(handed, 2)).toBe('savor:done c1:live c2:todo simpl:todo xhigh:todo ship:todo arch:todo')
-  const cycle1 = `${handed}\nskill: commit-skill:commit S620 cycle 1: the id\nskill: code-review low a b`
-  expect(states(cycle1, 2)).toBe('savor:done c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
 })
 
 test('bar blocks fit the pane, between 3 and 9 columns', async () => {
@@ -284,22 +355,6 @@ test('a phase label is the longest of its names that fits, never a cut word', as
   expect(label('cycle 2', 8)).toBe('cycle 2')
   expect(label('cycle 2', 6)).toBe('c2')
   expect(label('cycle 12', 2)).toBe('c1')
-})
-
-test('phases fall back when the cycle count or the cycle number is missing', async () => {
-  expect(states('')).toBe('c1:live simpl:todo xhigh:todo ship:todo arch:todo')
-  expect(states('skill: commit-skill:commit the panel draws\nskill: code-review low a b', 2)).toBe(
-    'c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo',
-  )
-  // A fix to cycle 1 after its low review names cycle 1, so cycle 2 is still in flight.
-  const fix = 'skill: commit-skill:commit S1 cycle 1\nskill: code-review low a b\nskill: commit-skill:commit S1 cycle 1 review fixes\nskill: code-review low b c'
-  expect(states(fix, 2)).toBe('c1:done c2:live simpl:todo xhigh:todo ship:todo arch:todo')
-  // A later step implies the earlier ones, whatever the count says.
-  expect(states('skill: code-review xhigh a b')).toBe('c1:done simpl:done xhigh:live ship:todo arch:todo')
-  // Session 1 ended its cycles: the run waits on the cut, headed for simplify.
-  expect(states(S393 + '\nskill: commit-skill:commit S393 cycle 2\nskill: code-review low c d', 2)).toBe(
-    'c1:done c2:done simpl:live xhigh:todo ship:todo arch:todo',
-  )
 })
 
 test('a brief counts its cycles by heading or bold line, and a directory brief reads every file', async () => {
@@ -333,7 +388,6 @@ test('a running card and the hint line show the phase, the stage and the newest 
         { entry: 5, brief: s395, lane: 'fix', pid: 21491, started: '2026-10-31T15:11:36Z', cost: 0 },
       ],
     },
-    {},
     new Set([5147, 79762, 21491]),
     NOW,
     {
@@ -374,7 +428,7 @@ test('the clock reads in the local offset, to the minute, on a 12-hour face', as
 test('the cost in flight adds every run and the loop', async () => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
-  const b = buildBoard(raw, {}, new Set([5147]), NOW, { utcOffset: '-0500', records: { [S300_BRIEF]: S300_READ() } })
+  const b = buildBoard(raw, new Set([5147]), NOW, { utcOffset: '-0500', records: { [S300_BRIEF]: S300_READ() } })
   expect(inFlight(b)).toBe(17.72)
   expect(b.clock).toBe('11:49 AM')
 })
@@ -594,7 +648,6 @@ test('a live loop shows its stage, and tags a landing of its own', async () => {
   const at = Date.parse('2026-11-01T14:31:00Z')
   const idle = buildBoard(
     { dispatcher: null, running: [], queued: [], finished: [] },
-    {},
     new Set(),
     at,
     { loop: buildLoop('2026-11-01-1417', [file('p1/review.log', 1)], 'turn ended: success, 3 turns, $3.20 so far', at) },
@@ -608,7 +661,6 @@ test('a live loop shows its stage, and tags a landing of its own', async () => {
       queued: [],
       finished: [],
     },
-    {},
     new Set([1, 7]),
     at,
     {
@@ -658,19 +710,15 @@ test('recent reads the last finished line of each sitting, newest first, and ski
     'kickoff-sitting-s339-background-suite.progress',
     'kickoff-sitting-s336-no-outcome.progress',
   ])
-  const text: Record<string, string> = {
-    'kickoff-sitting-s337-gallery-arrange-page.progress':
-      'commit: x\nfinished: shipped; production is live (run 41585826609). ($32.71, 108 min, peak 360k context)',
-    // A refusal appended after an earlier ship is the sitting's last outcome.
-    'kickoff-sitting-s339-background-suite.progress':
-      'finished: shipped; production is live (run 1). ($1.00, 5 min)\nfinished: stopped: the brief is still in docs/briefs. Read the handoff.',
-    'kickoff-sitting-s336-no-outcome.progress': 'skill: simplify x',
-  }
-  // A deploy that failed shipped code but put nothing live, so it is no ship.
-  text['kickoff-sitting-s338-red-deploy.progress'] =
-    'kind: deploy-red\nfinished: shipped; deploy failed (run 44071838536). ($80.79, 140 min)'
+  // A run whose record has no end is no ending, so S336 is not among them.
+  const ends = [
+    ending('kickoff-sitting-s337-gallery-arrange-page', 40, endOf('shipped; production is live (run 41585826609). ($32.71, 108 min, peak 360k context)')),
+    ending('kickoff-sitting-s339-background-suite', 30, endOf('stopped: the brief is still in docs/briefs. Read the handoff.', 'run-broke')),
+    // A deploy that failed shipped code but put nothing live, so it is no ship.
+    ending('kickoff-sitting-s338-red-deploy', 35, endOf('shipped; deploy failed (run 44071838536). ($80.79, 140 min)', 'deploy-red', { deploy_run: 44071838536 })),
+  ]
   const recent = recentOf(
-    [...picked, { name: 'kickoff-sitting-s338-red-deploy.progress', mtimeMs: 35 }].map(f => ({ ...f, text: text[f.name] ?? '' })),
+    ends,
     [{ entry: 51, brief: 'docs/briefs/kickoff-sitting-s337-gallery-arrange-page.md', lane: 'epic', status: 0, outcome: '', kind: null }],
   )
   // RECENT lists only runs live in production: a stop and a red deploy are left out.
@@ -689,12 +737,9 @@ test('a stopped run whose claim records an archive reads as rescued in RECENT', 
     }),
   )
   expect(archivedSittings(claims)).toEqual(['S721'])
-  const stop = 'kind: run-broke\nfinished: stopped: the brief is still in docs/briefs. Read the handoff. ($26.47, 70 min, peak 254k context)'
+  const stop = endOf('stopped: the brief is still in docs/briefs. Read the handoff. ($26.47, 70 min, peak 254k context)', 'run-broke')
   const recent = recentOf(
-    [
-      { name: 'kickoff-sitting-s721-landing-outcomes.progress', mtimeMs: 20, text: stop },
-      { name: 'kickoff-sitting-s722-step-up-controls.progress', mtimeMs: 30, text: stop },
-    ],
+    [ending('kickoff-sitting-s721-landing-outcomes', 20, stop), ending('kickoff-sitting-s722-step-up-controls', 30, stop)],
     [],
     new Set(archivedSittings(claims)),
   )
@@ -780,9 +825,9 @@ test('a queued entry carries its brief\'s After sittings', async () => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
   const key = briefKey('docs/briefs/kickoff-sitting-s301-time-limit-record.md')
-  const b = buildBoard(raw, {}, new Set(), NOW, { afters: { [key]: ['S299', 'S290'] } })
+  const b = buildBoard(raw, new Set(), NOW, { afters: { [key]: ['S299', 'S290'] } })
   expect(b.queued.map(q => q.after)).toEqual([['S299', 'S290']])
-  expect(buildBoard(raw, {}, new Set(), NOW).queued.map(q => q.after)).toEqual([[]])
+  expect(buildBoard(raw, new Set(), NOW).queued.map(q => q.after)).toEqual([[]])
 })
 
 const RUNNING = [
@@ -944,15 +989,18 @@ const S625_STATUS = {
     { entry: 283, brief: `${BRIEFS}s626-gallery-arrange-page.md`, lane: '', status: 1, outcome: 'autopilot: kickoff-sitting-s626-gallery-arrange-page refused: S625 stopped before it shipped.', kind: null },
   ],
 }
+const S625_END = endOf('stopped: the brief is still in docs/briefs. Read the handoff. ($9.56, 12 min, peak 159k context)', 'decision')
 const S625_ENDINGS = [
-  { base: 'kickoff-sitting-s624-gallery-sort', text: 'finished: shipped; production is live (run 44101392229). ($70.28, 114 min)', mtimeMs: 10 },
-  { base: 'kickoff-sitting-s625-gallery-arrange-doors', text: S625_PROGRESS, mtimeMs: 20 },
-  { base: 'kickoff-sitting-s626-gallery-arrange-page', text: 'finished: refused: S625 stopped before it shipped (stopped: the brief is still in docs/briefs. Read the handoff.).', mtimeMs: 21 },
+  ending('kickoff-sitting-s624-gallery-sort', 10, endOf('shipped; production is live (run 44101392229). ($70.28, 114 min)')),
+  ending('kickoff-sitting-s625-gallery-arrange-doors', 20, S625_END, {}, S625_PROGRESS),
+  ending('kickoff-sitting-s626-gallery-arrange-page', 21, endOf('refused: S625 stopped before it shipped (stopped: the brief is still in docs/briefs. Read the handoff.).', 'run-broke')),
 ]
+/** A red deploy's end, naming deploy run `run`. */
+const redEnd = (text: string, run: number) => endOf(text, 'deploy-red', { deploy_run: run })
 const heldDeck = (sitting: string, slug: string): Deck => ({ sitting, slug, lane: 'epic', epic: 'gallery', after: '', mode: 'ready' })
 
 test("S625's decision stop is one block that holds S626 and S627, which leave on deck", async () => {
-  const b = buildBoard(S625_STATUS, {}, new Set([927]), NOW, {
+  const b = buildBoard(S625_STATUS, new Set([927]), NOW, {
     endings: S625_ENDINGS,
     afters: S625_AFTERS,
     handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': S625_HANDOFF },
@@ -961,7 +1009,7 @@ test("S625's decision stop is one block that holds S626 and S627, which leave on
   expect(b.blocked.length).toBe(1)
   const k = b.blocked[0]
   if (k === undefined) throw new Error('no block')
-  // The kind comes from the progress file's `kind:` line: status.json has none.
+  // The kind comes from the record's end: status.json has none.
   expect(`${KIND_TAG[k.kind]} ${k.headline}`).toBe(
     '? you S625 asks: how long does an empty panel the photographer added last, and what may the sort do to it?',
   )
@@ -986,7 +1034,7 @@ test('a relaunched sitting is no longer stuck, and its chain waits in the queue'
       { entry: 290, brief: `${BRIEFS}s626-gallery-arrange-page.md`, lane: '', reason: 'S625' },
     ],
   }
-  const b = buildBoard(raw, {}, new Set(), NOW, { endings: S625_ENDINGS, afters: S625_AFTERS })
+  const b = buildBoard(raw, new Set(), NOW, { endings: S625_ENDINGS, afters: S625_AFTERS })
   expect(b.blocked).toEqual([])
 })
 
@@ -1005,10 +1053,16 @@ test("the dispatcher's cause holds a queued entry, and a null cause holds none",
   )
   if (raw === null) throw new Error('no status')
   const endings = [
-    { base: 'kickoff-sitting-s625-gallery-arrange-doors', text: S625_PROGRESS, mtimeMs: 20 },
-    { base: 'kickoff-sitting-s623-gallery-pins', text: 'bash: npm run push:checked\nkind: deploy-red\nfinished: shipped; deploy failed (run 77). ($80.79, 140 min)', mtimeMs: 30 },
+    ending('kickoff-sitting-s625-gallery-arrange-doors', 20, S625_END, {}, S625_PROGRESS),
+    ending(
+      'kickoff-sitting-s623-gallery-pins',
+      30,
+      redEnd('shipped; deploy failed (run 77). ($80.79, 140 min)', 77),
+      {},
+      'bash: npm run push:checked\nkind: deploy-red\nfinished: shipped; deploy failed (run 77). ($80.79, 140 min)',
+    ),
   ]
-  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: S625_AFTERS, deployStages: { '77': 'staging' } })
+  const b = buildBoard(raw, new Set(), NOW, { endings, afters: S625_AFTERS, deployStages: { '77': 'staging' } })
   expect(b.blocked.map(k => `${k.kind} ${k.sitting} holds ${k.holds.map(h => `${h.sitting}<${h.parent}`).join(',')}`)).toEqual([
     'decision S625 holds S626<S625,S627<S626',
     'deploy-red S623 holds S641<S623',
@@ -1021,19 +1075,18 @@ test("the dispatcher's cause holds a queued entry, and a null cause holds none",
 
 test('a red deploy stops being stuck once a later run goes live', async () => {
   const endings = [
-    { base: 'kickoff-sitting-s623-gallery-pins', text: 'finished: shipped; deploy failed (run 77). ($8.00, 14 min)', mtimeMs: 30 },
-    { base: 'kickoff-sitting-s624-gallery-sort', text: 'finished: shipped; production is live (run 78). ($8.00, 14 min)', mtimeMs: 40 },
+    ending('kickoff-sitting-s623-gallery-pins', 30, redEnd('shipped; deploy failed (run 77). ($8.00, 14 min)', 77)),
+    ending('kickoff-sitting-s624-gallery-sort', 40, endOf('shipped; production is live (run 78). ($8.00, 14 min)')),
   ]
-  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { endings })
+  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, new Set(), NOW, { endings })
   expect(b.blocked).toEqual([])
-  expect(lastEnd(endings[0]?.text ?? '')).toEqual({ outcome: 'shipped; deploy failed (run 77). ($8.00, 14 min)', kind: 'deploy-red', isLive: false })
 })
 
 test('a red deploy stops being stuck once a re-run of its own run passes', async () => {
-  const endings = [{ base: 'kickoff-sitting-s658-dispatch-holds-on-held-gate', text: 'finished: shipped; deploy failed (run 77). ($8.00, 14 min)', mtimeMs: 30 }]
+  const endings = [ending('kickoff-sitting-s658-dispatch-holds-on-held-gate', 30, redEnd('shipped; deploy failed (run 77). ($8.00, 14 min)', 77))]
   const raw = { dispatcher: null, running: [], queued: [], finished: [] }
-  expect(buildBoard(raw, {}, new Set(), NOW, { endings, deployStages: { '77': 'staging' } }).blocked.map(b => b.sitting)).toEqual(['S658'])
-  expect(buildBoard(raw, {}, new Set(), NOW, { endings, deployStages: { '77': DEPLOY_LIVE } }).blocked).toEqual([])
+  expect(buildBoard(raw, new Set(), NOW, { endings, deployStages: { '77': 'staging' } }).blocked.map(b => b.sitting)).toEqual(['S658'])
+  expect(buildBoard(raw, new Set(), NOW, { endings, deployStages: { '77': DEPLOY_LIVE } }).blocked).toEqual([])
   expect(deployStateOf('success', [])).toBe(DEPLOY_LIVE)
   expect(deployStateOf('failure', ['Deploy to Staging & E2E'])).toBe('staging')
 })
@@ -1041,10 +1094,10 @@ test('a red deploy stops being stuck once a re-run of its own run passes', async
 // S689's run 44933073127 failed in production, and run 44934802905, shipped by
 // hand from an interactive session, went live on main with no autopilot end after it.
 test('a red deploy stops being stuck once a newer deploy run on main goes live', async () => {
-  const endings = [{ base: 'kickoff-sitting-s689-nav-residues', text: 'finished: shipped; deploy failed (run 44933073127). ($8.00, 14 min)', mtimeMs: 30 }]
+  const endings = [ending('kickoff-sitting-s689-nav-residues', 30, redEnd('shipped; deploy failed (run 44933073127). ($8.00, 14 min)', 44933073127))]
   const raw = { dispatcher: null, running: [], queued: [], finished: [] }
   const deployStages = { '44933073127': 'prod' }
-  const blocked = (liveDeploy: string) => buildBoard(raw, {}, new Set(), NOW, { endings, deployStages, liveDeploy }).blocked.map(b => b.sitting)
+  const blocked = (liveDeploy: string) => buildBoard(raw, new Set(), NOW, { endings, deployStages, liveDeploy }).blocked.map(b => b.sitting)
   expect(blocked('')).toEqual(['S689'])
   expect(blocked('44933073127')).toEqual(['S689'])
   expect(blocked('44930000000')).toEqual(['S689'])
@@ -1063,12 +1116,12 @@ test('recent and on deck fold themselves while BLOCKED shows, unless set by hand
 })
 
 test("the pane draws S625's block above a folded recent, and a header press keeps the fold", async ($, on) => {
-  const endings = [...S625_ENDINGS, { base: 'kickoff-sitting-s629-board-blocked-hold', text: 'finished: shipped; production is live (run 9). ($27.48, 72 min)', mtimeMs: 5 }]
-  const b = buildBoard(S625_STATUS, {}, new Set([927]), NOW, {
+  const endings = [...S625_ENDINGS, ending('kickoff-sitting-s629-board-blocked-hold', 5, endOf('shipped; production is live (run 9). ($27.48, 72 min)'))]
+  const b = buildBoard(S625_STATUS, new Set([927]), NOW, {
     endings,
     afters: S625_AFTERS,
     handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': S625_HANDOFF },
-    recent: recentOf(endings.map(x => ({ name: `${x.base}.progress`, mtimeMs: x.mtimeMs, text: x.text })), []),
+    recent: recentOf(endings, []),
   })
   const { ui, sets } = await mountBoard($, on, b)
   expect((await ui.find({ type: 'Text', text: /^ \? you $/ })) === undefined).toBe(false)
@@ -1187,9 +1240,18 @@ const S684_DECK: Deck[] = [
   deckOf('S696', 'ready', 'S694, S695'),
   deckOf('S697', 'ready', 'S694, S695'),
 ]
-const s684Board = (extra: Parameters<typeof buildBoard>[4] = {}) =>
-  buildBoard(S684_STATUS, {}, new Set([1, 11]), NOW, {
-    endings: [{ base: 'kickoff-sitting-s684-home-gallery-sections', text: S684_PROGRESS, mtimeMs: 20 }],
+/** S684's board; `launches` is the launch count its record states. */
+const s684Board = (extra: Parameters<typeof buildBoard>[3] = {}, launches = 0) =>
+  buildBoard(S684_STATUS, new Set([1, 11]), NOW, {
+    endings: [
+      ending(
+        'kickoff-sitting-s684-home-gallery-sections',
+        20,
+        endOf('stopped: the brief is still in docs/briefs. Read the handoff. ($13.12, 19 min, peak 150k context)', 'decision'),
+        { launches },
+        S684_PROGRESS,
+      ),
+    ],
     afters: S684_AFTERS,
     handoffs: { 'kickoff-sitting-s684-home-gallery-sections': S684_HANDOFF },
     onDeck: S684_DECK,
@@ -1234,7 +1296,7 @@ test('the pane draws the blocked card first, its chain on one line, and no hold 
 
 test('a stop reads in words from the table, a number off it reads stop N, and two numbers join', async () => {
   const whyWith = (stop: string): string =>
-    buildBoard(S625_STATUS, {}, new Set(), NOW, {
+    buildBoard(S625_STATUS, new Set(), NOW, {
       endings: S625_ENDINGS,
       afters: S625_AFTERS,
       handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': `# x\n\n${stop}\n` },
@@ -1251,8 +1313,10 @@ test('only a line that starts with the marker is a stop line', () => {
 
 test('a broken run reads its stop in words, and a split leaves out the stop its headline says', () => {
   const blockOf = (kind: string, stop: string) =>
-    buildBoard(S625_STATUS, {}, new Set(), NOW, {
-      endings: S625_ENDINGS.map(e => (e.text === S625_PROGRESS ? { ...e, text: S625_PROGRESS.replace('kind: decision', `kind: ${kind}`) } : e)),
+    buildBoard(S625_STATUS, new Set(), NOW, {
+      endings: S625_ENDINGS.map(e =>
+        e.text === S625_PROGRESS ? ending(e.base, e.mtimeMs, { ...S625_END, kind }, {}, S625_PROGRESS.replace('kind: decision', `kind: ${kind}`)) : e,
+      ),
       afters: S625_AFTERS,
       handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': `# x\n\n${stop}\n` },
     }).blocked[0]
@@ -1264,7 +1328,7 @@ test('a broken run reads its stop in words, and a split leaves out the stop its 
 })
 
 test('a folded queue card with nothing queued names only the holds', () => {
-  const b = buildBoard(S625_STATUS, {}, new Set([927]), NOW, {
+  const b = buildBoard(S625_STATUS, new Set([927]), NOW, {
     endings: S625_ENDINGS,
     afters: S625_AFTERS,
     handoffs: { 'kickoff-sitting-s625-gallery-arrange-doors': S625_HANDOFF },
@@ -1284,7 +1348,7 @@ test('a ring of After lines inside a block draws each hold once', async () => {
     finished: [],
   }
   const afters = { ...S625_AFTERS, [`${BRIEFS}s626-gallery-arrange-page.md`]: ['S627'], [`${BRIEFS}s627-gallery-arrange-options.md`]: ['S626'] }
-  const b = buildBoard(raw, {}, new Set(), NOW, { endings: S625_ENDINGS, afters })
+  const b = buildBoard(raw, new Set(), NOW, { endings: S625_ENDINGS, afters })
   expect(b.blocked[0]?.holds.map(h => h.sitting).sort()).toEqual(['S626', 'S627'])
   const rows = queueTree(b.running, b.queued, b.blocked).map(r => r.sitting)
   expect(rows.filter(s => s === 'S626').length).toBe(1)
@@ -1292,8 +1356,8 @@ test('a ring of After lines inside a block draws each hold once', async () => {
 })
 
 test('a red deploy that holds nothing draws no queue root and no chain line', async ($, on) => {
-  const endings = [{ base: 'kickoff-sitting-s658-dispatch-holds-on-held-gate', text: 'finished: shipped; deploy failed (run 77). ($8.00, 14 min)', mtimeMs: 30 }]
-  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { endings, deployStages: { '77': 'staging' } })
+  const endings = [ending('kickoff-sitting-s658-dispatch-holds-on-held-gate', 30, redEnd('shipped; deploy failed (run 77). ($8.00, 14 min)', 77))]
+  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, new Set(), NOW, { endings, deployStages: { '77': 'staging' } })
   expect(b.blocked.map(k => k.sitting)).toEqual(['S658'])
   expect(queueTree(b.running, b.queued, b.blocked)).toEqual([])
   const { ui } = await mountBoard($, on, b)
@@ -1308,7 +1372,7 @@ test('the header draws three figures and one spend line, and a running card has 
   // The October commit is 11 days back and the only day of spend; the November ones are after now.
   const spends = ledgerSpends(LEDGER)
   const spend = { days: daySums(spends, NOW, '') }
-  const b = buildBoard(raw, { 'docs/briefs/kickoff-sitting-s300-loop-run-record.md': S300 }, new Set([5147, 21491]), NOW, { spend })
+  const b = buildBoard(raw, new Set([5147, 21491]), NOW, { spend, records: { [S300_BRIEF]: S300_READ() } })
   const { ui } = await mountBoard($, on, b)
   expect(await has(ui, `spend ▁▁█${'▁'.repeat(11)}`)).toBe(true)
   expect(await has(ui, '$0 today · $9 14d')).toBe(true)
@@ -1322,7 +1386,7 @@ test('the header draws three figures and one spend line, and a running card has 
 test('spend that could not be read draws no spend line', async ($, on) => {
   const raw = parseStatus(STATUS)
   if (raw === null) throw new Error('status did not parse')
-  const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([5147]), NOW, { spend: null }))
+  const { ui } = await mountBoard($, on, buildBoard(raw, new Set([5147]), NOW, { spend: null }))
   expect(await has(ui, 'spend ')).toBe(false)
   expect(await has(ui, '14d')).toBe(false)
   expect((await ui.findAll({ type: 'Text' })).some((t: { text?: string }) => /[▁-█]/.test(t.text ?? ''))).toBe(false)
@@ -1382,8 +1446,8 @@ const endedOf = (rows: [string, number | null, number | null][]): Ended[] =>
     cycles: 0,
     phaseMs: {},
   }))
-const recentBoard = (recent: Ended[], extra: Parameters<typeof buildBoard>[4] = {}) =>
-  buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, {}, new Set(), NOW, { recent, ...extra })
+const recentBoard = (recent: Ended[], extra: Parameters<typeof buildBoard>[3] = {}) =>
+  buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, new Set(), NOW, { recent, ...extra })
 
 test('recent ends in a totals row: count, span, median, total time and the unrounded spend', async ($, on) => {
   const { ui } = await mountBoard($, on, recentBoard(endedOf(PROPOSED_RECENT)))
@@ -1425,105 +1489,21 @@ const T0 = Date.parse('2026-10-31T10:00:00Z')
 const stamped = (rows: readonly [number, string][]): string =>
   rows.flatMap(([minute, line]) => [`at: ${new Date(T0 + minute * 60000).toISOString().replace(/\.000Z$/, 'Z')}`, line]).join('\n')
 
-// 10m of savor over six lines, 40m of cycles over three, simplify and the
-// xhigh review among them, and 10m of ship over two: the lines alone would
-// split the cells 3-2-1.
-const PHASED: [number, string][] = [
-  [0, 'slot: 1'],
-  [0, 'skill: sittings:savor launch /w/docs/briefs/kickoff-sitting-s682-dom-wait-quiet.md'],
-  [2, 'turn ended: success, 9 turns, $1.00 so far: Reviewers are running.'],
-  [4, 'woke for a background task: success, 1 turns, $1.00 so far: One reviewer is done.'],
-  [6, 'woke for a background task: success, 1 turns, $1.00 so far: Two reviewers are done.'],
-  [8, 'woke for a background task: success, 1 turns, $1.00 so far: Step 0 is done.'],
-  [10, 'savored: session 0 handed over in /x.savored; session 1 starts at cycle 1 in /w'],
-  [30, 'skill: simplify Changed paths over a..HEAD'],
-  [45, 'skill: code-review xhigh git diff a b'],
-  [50, 'skill: commit-skill:ship'],
-  [55, 'bash: npm run push:checked -- origin HEAD:main 2>&1 | tail'],
-  [60, 'finished: shipped; production is live (run 1). ($22.40, 60 min)'],
-]
-
 test('each line takes the time of the nearest at line above it', () => {
   const text = `commit: before any stamp\n${stamped([[0, 'slot: 1'], [5, 'skill: simplify x']])}\nbash: under the last stamp`
   expect(lineTimes(text)).toEqual([null, T0, T0, T0 + 300000, T0 + 300000, T0 + 300000])
 })
 
-test("a run's time splits into savor, cycles and ship cells by the at lines, not by the line count", () => {
-  expect(phaseSplit(stamped(PHASED))).toEqual({ savor: 1, cycles: 4, ship: 1 })
-  // Cells round by largest remainder: 7m, 46m and 7m give 0.7, 4.6 and 0.7 cells.
-  const odd: [number, string][] = [
-    [0, 'skill: sittings:savor launch /w/b.md'],
-    [7, 'savored: session 0 handed over'],
-    [53, 'skill: commit-skill:ship'],
-    [60, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
-  ]
-  expect(phaseSplit(stamped(odd))).toEqual({ savor: 1, cycles: 4, ship: 1 })
-  // A relaunch's wait between the stop and the next slot line counts in no phase.
-  const relaunched: [number, string][] = [
-    [0, 'slot: 1'],
-    [0, 'skill: sittings:savor launch /w/b.md'],
-    [10, 'savored: session 0 handed over'],
-    [30, 'kind: decision'],
-    [30, 'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($5.00, 30 min)'],
-    [150, 'slot: 1'],
-    [150, 'turn ended: success, 9 turns, $1.00 so far: Cycle 2 is building.'],
-    [170, 'skill: commit-skill:ship'],
-    [180, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
-  ]
-  expect(phaseSplit(stamped(relaunched))).toEqual({ savor: 1, cycles: 4, ship: 1 })
-  // A file with no at lines has no times.
-  expect(phaseSplit(PHASED.map(([, line]) => line).join('\n'))).toBe(null)
+test("a run's split milliseconds round to six cells by largest remainder, ties to the earlier phase", () => {
+  expect(splitCells({ savor: 10 * 60000, cycles: 40 * 60000, ship: 10 * 60000 })).toEqual({ savor: 1, cycles: 4, ship: 1 })
+  // 7m, 46m and 7m give 0.7, 4.6 and 0.7 cells.
+  expect(splitCells({ savor: 7 * 60000, cycles: 46 * 60000, ship: 7 * 60000 })).toEqual({ savor: 1, cycles: 4, ship: 1 })
+  // Three even thirds: the earlier phases take the ties.
+  expect(splitCells({ savor: 1, cycles: 1, ship: 1 })).toEqual({ savor: 2, cycles: 2, ship: 2 })
+  expect(splitCells({ savor: 0, cycles: 0, ship: 0 })).toBe(null)
+  expect(splitCells(null)).toBe(null)
 })
 
-test("each phase's time comes from the at lines, and a relaunch's wait counts in no phase", () => {
-  expect(phaseDurations(stamped(PHASED))).toEqual({
-    savor: 10 * 60000,
-    'cycle 1': 20 * 60000,
-    simplify: 15 * 60000,
-    'review xhigh': 5 * 60000,
-    shipping: 10 * 60000,
-  })
-  const relaunched: [number, string][] = [
-    [0, 'slot: 1'],
-    [0, 'skill: sittings:savor launch /w/b.md'],
-    [10, 'savored: session 0 handed over'],
-    [30, 'kind: decision'],
-    [30, 'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($5.00, 30 min)'],
-    [150, 'slot: 1'],
-    [160, 'skill: commit-skill:ship'],
-    [170, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
-  ]
-  expect(phaseDurations(stamped(relaunched))).toEqual({ savor: 10 * 60000, 'cycle 1': 30 * 60000, shipping: 10 * 60000 })
-  expect(phaseDurations(PHASED.map(([, line]) => line).join('\n'))).toEqual({})
-  // The time from the last cycle's low review to /simplify is no cycle 3: the run named two, and the running card,
-  // which knows the brief's count, books that time to simplify.
-  const twoCycles: [number, string][] = [
-    [0, 'slot: 1'],
-    [10, 'skill: commit-skill:commit S1 cycle 1: a'],
-    [10, 'skill: code-review low a..b'],
-    [35, 'skill: commit-skill:commit S1 cycle 2: b'],
-    [35, 'skill: code-review low b..c'],
-    [50, 'skill: simplify over a..HEAD'],
-    [60, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
-  ]
-  expect(phaseDurations(stamped(twoCycles))).toEqual({
-    'cycle 1': 10 * 60000,
-    'cycle 2': 25 * 60000,
-    simplify: 25 * 60000,
-  })
-})
-
-// S692 started 16:34; cycle 1 opened at 16:40, so at 16:49:25 it is 9m in.
-const S692_IN_CYCLE_ONE = {
-  [`${BRIEFS}s692-design-tokens.md`]: [
-    'at: 2026-10-31T16:34:00Z',
-    'skill: sittings:savor launch /w/b.md',
-    'at: 2026-10-31T16:40:00Z',
-    'savored: session 0 handed over',
-    'at: 2026-10-31T16:45:00Z',
-    'bash: npm test',
-  ].join('\n'),
-}
 // RECENT with one run per figure, each spending that many minutes in cycle 1.
 const recentWithCycles = (minutes: number[]): Ended[] =>
   endedOf(minutes.map((_, i): [string, number, number] => [`S60${i}`, 60, 10])).map((d, i) => ({
@@ -1532,7 +1512,7 @@ const recentWithCycles = (minutes: number[]): Ended[] =>
   }))
 // S692 started 16:34, and its record opened cycle 1 at 16:40.
 const phaseClockBoard = (recent: Ended[]) =>
-  buildBoard(S684_STATUS, {}, new Set([1, 11]), NOW, {
+  buildBoard(S684_STATUS, new Set([1, 11]), NOW, {
     cycles: { [`${BRIEFS}s692-design-tokens.md`]: 3 },
     recent,
     records: { [`${BRIEFS}s692-design-tokens.md`]: runRead({ phases: phasesAt(3, 0), phase_since: '2026-10-31T16:40:00Z', note: null }) },
@@ -1561,9 +1541,11 @@ test('with no recent run timing the phase, the time in phase stays peach', async
 })
 
 test('recent draws each run as a phase split, and a file with no times as the grey baseline', async ($, on) => {
+  const live = endOf('shipped; production is live (run 1). ($22.40, 60 min)')
+  // 10m of savor, 40m of cycles and 10m of ship, as a record states them; a record with no split draws the baseline.
   const files = [
-    { name: 'kickoff-sitting-s682-dom-wait-quiet.progress', mtimeMs: NOW - 2 * HOUR, text: stamped(PHASED) },
-    { name: 'kickoff-sitting-s683-doc-tests-read-map.progress', mtimeMs: NOW - 3 * HOUR, text: PHASED.map(([, line]) => line).join('\n') },
+    ending('kickoff-sitting-s682-dom-wait-quiet', NOW - 2 * HOUR, live, { phase_split: { savor: 600000, cycles: 2400000, ship: 600000 } }),
+    ending('kickoff-sitting-s683-doc-tests-read-map', NOW - 3 * HOUR, live),
   ]
   const recent = recentOf(files, [])
   expect(recent.map(d => d.split)).toEqual([{ savor: 1, cycles: 4, ship: 1 }, null])
@@ -1640,17 +1622,16 @@ const S684_RUN = 'kickoff-sitting-s684-home-gallery-sections'
 
 test('the blocked why-line gives the plan cost and which launch stopped', async ($, on) => {
   const plans = planCosts(ledgerSpends(S684_PLAN_LEDGER))
-  const once = s684Board({ plans, launches: { [S684_RUN]: launchCount('launch: 1 fresh slot 1 at 2026-10-31T16:00:00Z\n') } })
+  const once = s684Board({ plans }, 1)
   expect(historyTag(once.blocked[0] ?? { plan: 'unread', launches: null })).toBe('+$11.36 plan · 1st launch')
   const { ui } = await mountBoard($, on, once)
   expect(await has(ui, '$13.12 +$11.36 plan · 1st launch')).toBe(true)
   await ui.unmount()
-  // The second launch emptied the progress file; the launch log keeps both.
-  const twice = s684Board({ plans, launches: { [S684_RUN]: launchCount('launch: 1 fresh slot 1 at 2026-10-31T12:00:00Z\nlaunch: 2 fresh slot 2 at 2026-10-31T16:00:00Z\n') } })
+  // The second launch emptied the progress file; the record counts both launches.
+  const twice = s684Board({ plans }, 2)
   expect(historyTag(twice.blocked[0] ?? { plan: 'unread', launches: null })).toBe('+$11.36 plan · 2nd launch')
-  // No launch log gives no launch tag; no plan commit gives no plan tag.
+  // A record of no launch gives no launch tag; no plan commit gives no plan tag.
   expect(historyTag(s684Board({ plans: {} }).blocked[0] ?? { plan: 'unread', launches: null })).toBe('')
-  expect(launchCount('launch: 1 fresh slot 1 at x\nlaunch: 2 relaunch slot 1 at y\nlaunch: 3 relaunch slot 2 at z\n')).toBe(3)
 })
 
 const SPLIT_BRIEFS = [
@@ -1667,7 +1648,7 @@ test("a split parent's queue row reads how many briefs were split from it", asyn
   // A sittings.json that does not parse counts only the live briefs.
   expect(splitCounts(headed, sittingsClaims('{"claims": '))).toEqual({ S686: 1 })
   const raw = { dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] }
-  const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set([1]), NOW, { splits }))
+  const { ui } = await mountBoard($, on, buildBoard(raw, new Set([1]), NOW, { splits }))
   expect(await has(ui, 'S686 dashboard-rail split ×2')).toBe(true)
   await ui.unmount()
 })
@@ -1713,13 +1694,22 @@ const S684_STOP = [
   ]),
   'finished: stopped: the brief is still in docs/briefs. Read the handoff. ($13.12, 19 min)',
 ].join('\n')
+/** S684's stop as its record states it: one launch on slot 2, from 40m back to its stop 19m back. */
+const S684_ENDING = () =>
+  ending(
+    S684_RUN,
+    NOW - 19 * MIN,
+    endOf('stopped: the brief is still in docs/briefs. Read the handoff. ($13.12, 19 min)', 'decision'),
+    { launch_spans: [spanAt(2, -40, -19, false)] },
+    S684_STOP,
+  )
 const tlBoard = (recent: Ended[] = endedOf(PROPOSED_RECENT)) => {
   const raw = parseStatus(TL_STATUS)
   if (raw === null) throw new Error('status did not parse')
-  return buildBoard(raw, {}, new Set([1, 11]), NOW, {
+  return buildBoard(raw, new Set([1, 11]), NOW, {
     recent,
     afters: TL_AFTERS,
-    endings: [{ base: S684_RUN, text: S684_STOP, mtimeMs: NOW - 19 * MIN }],
+    endings: [S684_ENDING()],
     utcOffset: '-0500',
   })
 }
@@ -1766,17 +1756,24 @@ test('a run reads its slot from its record, else its stamped slot line, else the
   )
   if (raw === null) throw new Error('status did not parse')
   const done = 'finished: shipped; production is live (run 1). ($9.00, 40 min)'
+  const live = endOf(done.slice('finished: '.length))
   const endings = [
-    // The record takes the span its stamp matches, so S677 draws once.
-    { base: 'kickoff-sitting-s677-drafts', text: stampedAt([[NOW - 9 * HOUR + 3000, 'slot: 1'], [NOW - 7 * HOUR, done]]), mtimeMs: NOW - 7 * HOUR },
-    // The finished list no longer holds S681: its stamped slot line places it.
-    { base: 'kickoff-sitting-s681-dropped', text: stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 5 * HOUR, 'landed: a..b'], [NOW - 290 * MIN, done]]), mtimeMs: NOW - 290 * MIN },
+    // The status record takes the span its stamp matches, so S677 draws once.
+    ending('kickoff-sitting-s677-drafts', NOW - 7 * HOUR, live, { launch_spans: [spanAt(1, -540 + 0.05, -420)] }, stampedAt([[NOW - 9 * HOUR + 3000, 'slot: 1'], [NOW - 7 * HOUR, done]])),
+    // The finished list no longer holds S681: its record's span places it.
+    ending(
+      'kickoff-sitting-s681-dropped',
+      NOW - 290 * MIN,
+      live,
+      { launch_spans: [spanAt(2, -360, -300)] },
+      stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 5 * HOUR, 'landed: a..b'], [NOW - 290 * MIN, done]]),
+    ),
     // Neither: slot 1 holds S677 then, so slot 2 takes it.
-    { base: 'kickoff-sitting-s679-null-slot', text: stampedAt([[NOW - 470 * MIN, 'slot: none'], [NOW - 430 * MIN, done]]), mtimeMs: NOW - 430 * MIN },
+    ending('kickoff-sitting-s679-null-slot', NOW - 430 * MIN, live, { launch_spans: [spanAt(null, -470, -430)] }, stampedAt([[NOW - 470 * MIN, 'slot: none'], [NOW - 430 * MIN, done]])),
     // Neither, and no slot is free over its span: not drawn.
-    { base: 'kickoff-sitting-s678-no-room', text: stampedAt([[NOW - 460 * MIN, 'skill: simplify x'], [NOW - 440 * MIN, done]]), mtimeMs: NOW - 440 * MIN },
+    ending('kickoff-sitting-s678-no-room', NOW - 440 * MIN, live, {}, stampedAt([[NOW - 460 * MIN, 'skill: simplify x'], [NOW - 440 * MIN, done]])),
   ]
-  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: {} })
+  const b = buildBoard(raw, new Set(), NOW, { endings, afters: {} })
   expect(barsOf(b, 1)).toEqual(['S677 live -540..-420', 'S688 live -120..-60'])
   expect(barsOf(b, 2)).toEqual(['S679 live -470..-430', 'S681 live -360..-300'])
 })
@@ -1792,8 +1789,8 @@ test('a slot past the most a dispatcher runs reads as no slot, on a record and o
   )
   if (raw === null) throw new Error('status did not parse')
   const done = 'finished: shipped; production is live (run 1). ($9.00, 40 min)'
-  const endings = [{ base: 'kickoff-sitting-s681-dropped', text: stampedAt([[NOW - 6 * HOUR, 'slot: 99999999'], [NOW - 5 * HOUR, done]]), mtimeMs: NOW - 5 * HOUR }]
-  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: {} })
+  const endings = [ending('kickoff-sitting-s681-dropped', NOW - 5 * HOUR, endOf(done.slice('finished: '.length)), { launch_spans: [spanAt(99999999, -360, -300)] })]
+  const b = buildBoard(raw, new Set(), NOW, { endings, afters: {} })
   expect(b.timeline.slots.map(l => l.slot)).toEqual([1])
 })
 
@@ -1883,12 +1880,22 @@ const POLL_FILES: Record<string, string> = {
   [`${LOGS}/kickoff-sitting-s681-dropped.progress`]: stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 5 * HOUR, 'finished: shipped; production is live (run 2). ($9.00, 60 min)']]),
   [`${LOGS}/${S684_RUN}.progress`]: S684_STOP,
   [`${LOGS}/${S684_RUN}.launches`]: 'launch: 1 fresh slot 2 at 2026-10-31T16:09:25Z\n',
+  // Each run's record beside its progress file, at the log directory status.json's `sources` names.
+  [`${LOGS}/kickoff-sitting-s682-dom-wait-quiet.run.json`]: recordJson(endOf('shipped; production is live (run 1). ($22.40, 60 min)'), { launch_spans: [spanAt(1, -180, -120)] }),
+  [`${LOGS}/kickoff-sitting-s681-dropped.run.json`]: recordJson(endOf('shipped; production is live (run 2). ($9.00, 60 min)'), { launch_spans: [spanAt(2, -360, -300)] }),
+  [`${LOGS}/${S684_RUN}.run.json`]: recordJson(endOf('stopped: the brief is still in docs/briefs. Read the handoff. ($13.12, 19 min)', 'decision'), {
+    launches: 1,
+    launch_spans: [spanAt(2, -40, -19, false)],
+  }),
 }
 const POLL_MTIMES: Record<string, number> = {
   'kickoff-sitting-s682-dom-wait-quiet.progress': NOW - 2 * HOUR,
   'kickoff-sitting-s681-dropped.progress': NOW - 5 * HOUR,
   [`${S684_RUN}.progress`]: NOW - 19 * MIN,
   [`${S684_RUN}.launches`]: NOW - 40 * MIN,
+  'kickoff-sitting-s682-dom-wait-quiet.run.json': NOW - 2 * HOUR,
+  'kickoff-sitting-s681-dropped.run.json': NOW - 5 * HOUR,
+  [`${S684_RUN}.run.json`]: NOW - 19 * MIN,
   'status.json': NOW,
 }
 
@@ -1948,12 +1955,13 @@ test('a finished record whose slot was never released draws once, to its span en
       { entry: 2, brief: `${BRIEFS}s682-no-slot-line.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 1, slot_taken: iso(NOW - 4 * HOUR), slot_released: null },
     ],
   })
+  const live = endOf(DONE_LIVE.slice('finished: '.length))
   const endings = [
-    { base: 'kickoff-sitting-s681-dropped', text: stampedAt([[NOW - 4 * HOUR + 3000, 'slot: 2'], [NOW - 3 * HOUR, DONE_LIVE]]), mtimeMs: NOW - 3 * HOUR },
-    // No `slot:` line to match: the record draws to the file's mtime.
-    { base: 'kickoff-sitting-s682-no-slot-line', text: stampedAt([[NOW - 4 * HOUR, 'skill: simplify x'], [NOW - 150 * MIN, DONE_LIVE]]), mtimeMs: NOW - 150 * MIN },
+    ending('kickoff-sitting-s681-dropped', NOW - 3 * HOUR, live, { launch_spans: [spanAt(2, -240 + 0.05, -180)] }, stampedAt([[NOW - 4 * HOUR + 3000, 'slot: 2'], [NOW - 3 * HOUR, DONE_LIVE]])),
+    // No span to match: the status record draws to the file's mtime.
+    ending('kickoff-sitting-s682-no-slot-line', NOW - 150 * MIN, live, {}, stampedAt([[NOW - 4 * HOUR, 'skill: simplify x'], [NOW - 150 * MIN, DONE_LIVE]])),
   ]
-  const b = buildBoard(raw, {}, new Set(), NOW, { endings, afters: {} })
+  const b = buildBoard(raw, new Set(), NOW, { endings, afters: {} })
   expect(barsOf(b, 2)).toEqual(['S681 live -240..-180'])
   expect(barsOf(b, 1)).toEqual(['S682 live -240..-150'])
 })
@@ -1967,26 +1975,26 @@ test("a relaunched run's earlier launches draw on their own slots", () => {
   const raw = statusOf({
     running: [{ entry: 5, brief, lane: '', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 1, slot: 1, slot_taken: iso(NOW - 30 * MIN), slot_released: null }],
   })
-  const text = stampedAt([
-    [NOW - 4 * HOUR, 'slot: 2'],
-    [NOW - 2 * HOUR, 'finished: stopped: the brief is still in docs/briefs. ($5.00, 120 min)'],
-    [NOW - 30 * MIN, 'slot: 1'],
-  ])
-  const b = buildBoard(raw, { [brief]: text }, new Set([11]), NOW, { endings: [], afters: {} })
+  // Its record: a launch on slot 2 that stopped two hours back, and the launch in flight on slot 1.
+  const records = { [brief]: runRead({ launch_spans: [spanAt(2, -240, -120, false), spanAt(1, -30, null)] }) }
+  const b = buildBoard(raw, new Set([11]), NOW, { records, endings: [], afters: {} })
   expect(barsOf(b, 2)).toEqual(['S684 stopped -240..-120'])
   expect(barsOf(b, 1)).toEqual(['S684 running -30..0'])
 })
 
-test('a slot span with nothing after it closes at the next slot line, else the last stamp, else the mtime', () => {
+test("a run that is not running closes its record's open last span at its last stamp, else its mtime", () => {
+  // The record closed S681's first launch at the next slot line and left the last one open; neither run has ended.
   const endings = [
-    {
-      base: 'kickoff-sitting-s681-dropped',
-      text: stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 330 * MIN, 'skill: x'], [NOW - 5 * HOUR, 'slot: 2'], [NOW - 4 * HOUR, 'skill: y']]),
-      mtimeMs: NOW - 3 * HOUR,
-    },
-    { base: 'kickoff-sitting-s690-lone', text: stampedAt([[NOW - 200 * MIN, 'slot: 1']]), mtimeMs: NOW - 150 * MIN },
+    ending(
+      'kickoff-sitting-s681-dropped',
+      NOW - 3 * HOUR,
+      null,
+      { launch_spans: [spanAt(2, -360, -300, false), spanAt(2, -300, null)] },
+      stampedAt([[NOW - 6 * HOUR, 'slot: 2'], [NOW - 330 * MIN, 'skill: x'], [NOW - 5 * HOUR, 'slot: 2'], [NOW - 4 * HOUR, 'skill: y']]),
+    ),
+    ending('kickoff-sitting-s690-lone', NOW - 150 * MIN, null, { launch_spans: [spanAt(1, -200, null)] }, stampedAt([[NOW - 200 * MIN, 'slot: 1']])),
   ]
-  const b = buildBoard(statusOf({}), {}, new Set(), NOW, { endings, afters: {} })
+  const b = buildBoard(statusOf({}), new Set(), NOW, { endings, afters: {} })
   expect(barsOf(b, 2)).toEqual(['S681 stopped -360..-300', 'S681 stopped -300..-240'])
   expect(barsOf(b, 1)).toEqual(['S690 stopped -200..-150'])
 })
@@ -2005,13 +2013,10 @@ test("you starts at the stop of the ending BLOCKED reads, the sitting's newest",
   const raw = parseStatus(TL_STATUS)
   if (raw === null) throw new Error('status did not parse')
   const older = `${stampedAt([[NOW - 4 * HOUR, 'skill: x'], [NOW - 3 * HOUR, 'kind: decision']])}\nfinished: stopped: an older stop. ($1.00, 60 min)`
-  const b = buildBoard(raw, {}, new Set([1, 11]), NOW, {
+  const b = buildBoard(raw, new Set([1, 11]), NOW, {
     recent: endedOf(PROPOSED_RECENT),
     afters: TL_AFTERS,
-    endings: [
-      { base: 'kickoff-sitting-s684-an-older-slug', text: older, mtimeMs: NOW - 3 * HOUR },
-      { base: S684_RUN, text: S684_STOP, mtimeMs: NOW - 19 * MIN },
-    ],
+    endings: [ending('kickoff-sitting-s684-an-older-slug', NOW - 3 * HOUR, endOf('stopped: an older stop. ($1.00, 60 min)', 'decision'), {}, older), S684_ENDING()],
     utcOffset: '-0500',
   })
   expect(b.timeline.you?.sitting).toBe('S684 ? 19m')
@@ -2021,7 +2026,7 @@ test('a running record whose slot_taken does not parse draws on its slot from it
   const raw = statusOf({
     running: [{ entry: 5, brief: `${BRIEFS}s692-design-tokens.md`, lane: '', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 1, slot: 2, slot_taken: 'not a time', slot_released: null }],
   })
-  const b = buildBoard(raw, {}, new Set([11]), NOW, { recent: endedOf(PROPOSED_RECENT), endings: [], afters: {} })
+  const b = buildBoard(raw, new Set([11]), NOW, { recent: endedOf(PROPOSED_RECENT), endings: [], afters: {} })
   expect(barsOf(b, 1)).toEqual([])
   expect(barsOf(b, 2)).toEqual(['S692 running -30..34 live to 0'])
 })
@@ -2043,7 +2048,7 @@ test('a lane label of two digits keeps a space before its track', async ($, on) 
   const raw = statusOf({
     finished: [{ entry: 1, brief: `${BRIEFS}s677-drafts.md`, lane: '', status: 0, outcome: LIVE_OUTCOME, kind: null, slot: 16, slot_taken: iso(NOW - 2 * HOUR), slot_released: iso(NOW - HOUR) }],
   })
-  const { ui } = await mountBoard($, on, buildBoard(raw, {}, new Set(), NOW, { endings: [], afters: {} }))
+  const { ui } = await mountBoard($, on, buildBoard(raw, new Set(), NOW, { endings: [], afters: {} }))
   const texts = (await (ui as Ui).findAll({ type: 'Text' })).map(t => t.text ?? '')
   const lanes = texts.filter(t => /^slot \d+/.test(t) && t.length > 8)
   expect(lanes.length).toBe(16)
@@ -2152,17 +2157,17 @@ const fromTree = (ls: string, blobs: Readonly<Record<string, string>>, raw: Para
     raw.queued.map(r => r.brief),
   )
 
-// Four live runs: $7.70 over 1 cycle, $30 over 2, $10 over 2, and $1 whose commits name no cycle.
-const COST_FILES = [
-  ['s601-one', 'skill: commit-skill:commit S601 cycle 1: a\nskill: code-review low a b', '$7.70'],
-  ['s602-two', 'skill: commit-skill:commit S602 cycle 1: a\nskill: code-review low a b\nskill: commit-skill:commit S602 cycle 2: b', '$30.00'],
-  ['s603-two', 'skill: commit-skill:commit S603 cycle 2: b\nskill: commit-skill:commit S603 cycle 1 review fixes', '$10.00'],
-  ['s604-fix', 'skill: commit-skill:commit the one fix\nskill: code-review low a b', '$1.00'],
-].map(([name, text, usd], i) => ({
-  name: `kickoff-sitting-${name}.progress`,
-  mtimeMs: NOW - (i + 1) * HOUR,
-  text: `${text}\nfinished: shipped; production is live (run 1). (${usd ?? ''}, 30 min)`,
-}))
+// Four live runs: $7.70 over 1 cycle, $30 over 2, $10 over 2, and $1 whose commits name no cycle, each its record's `named_cycles`.
+const COST_FILES = (
+  [
+    ['s601-one', 1, '$7.70'],
+    ['s602-two', 2, '$30.00'],
+    ['s603-two', 2, '$10.00'],
+    ['s604-fix', 0, '$1.00'],
+  ] as const
+).map(([name, named, usd], i) =>
+  ending(`kickoff-sitting-${name}`, NOW - (i + 1) * HOUR, endOf(`shipped; production is live (run 1). (${usd}, 30 min)`), { named_cycles: named }),
+)
 
 const EPIC_STATUS = {
   dispatcher: 1,
@@ -2179,10 +2184,12 @@ const epicBoard = (opts: { sittings?: string; recent?: Ended[]; drop?: string } 
   const raw = statusOf(EPIC_STATUS)
   const tree = fromTree(EPIC_LS, { ...EPIC_BLOBS, e515: opts.sittings ?? EPIC_SITTINGS }, raw)
   const cycles = Object.fromEntries(Object.entries(tree.cycles).filter(([k]) => k !== opts.drop))
-  return buildBoard(raw, {}, new Set([1, 11]), NOW, {
+  return buildBoard(raw, new Set([1, 11]), NOW, {
     ...tree,
     cycles,
-    endings: [{ base: S684_RUN, text: S684_PROGRESS, mtimeMs: NOW - 19 * MIN }],
+    endings: [
+      ending(S684_RUN, NOW - 19 * MIN, endOf('stopped: the brief is still in docs/briefs. Read the handoff. ($13.12, 19 min, peak 150k context)', 'decision'), {}, S684_PROGRESS),
+    ],
     recent: opts.recent ?? recentOf(COST_FILES, []),
     records: { [`${BRIEFS}s693-token-export.md`]: runRead({ phases: phasesAt(2, 0), note: null }) },
   })
@@ -2220,13 +2227,6 @@ const PEACH = '#f5a97f'
 const YELLOW = '#eed49f'
 const SURFACE2 = '#5b6078'
 const OVERLAY1 = '#8087a2'
-
-test('namedCycles is the highest cycle a /commit line names, and recent writes it on each run', () => {
-  expect(namedCycles('skill: commit-skill:commit S1 cycle 2: b\nskill: commit-skill:commit S1 cycle 1 review fixes')).toBe(2)
-  expect(namedCycles('skill: commit-skill:commit the fix\nskill: code-review low a b')).toBe(0)
-  expect(namedCycles('turn ended: success, 3 turns, $1.00 so far: cycle 4 is next')).toBe(0)
-  expect(recentOf(COST_FILES, []).map(d => [d.sitting, d.cycles])).toEqual([['S601', 1], ['S602', 2], ['S603', 2], ['S604', 0]])
-})
 
 test('the epics card names each epic by its plan title, a cell per sitting, shipped over total, and the next state', async ($, on) => {
   const b = epicBoard()
@@ -2372,7 +2372,7 @@ test('spend sums by local day over 14 days, today last, and scales its bars to t
 
 test('the header draws the 14-day sparkline, today peach, then today and 14d', async ($, on) => {
   const spend = { days: daySums(SPARK_SPENDS, SPARK_NOW, '-1000') }
-  const b = buildBoard(statusOf({ dispatcher: 1 }), {}, new Set([1]), SPARK_NOW, { spend, utcOffset: '-1000' })
+  const b = buildBoard(statusOf({ dispatcher: 1 }), new Set([1]), SPARK_NOW, { spend, utcOffset: '-1000' })
   const { ui } = await mountBoard($, on, b)
   expect(await has(ui, 'spend ▁▁▁▁▁▁▁▁▃▃▄▄██')).toBe(true)
   expect(await has(ui, '$568 today · $7.1k 14d')).toBe(true)
@@ -2441,22 +2441,6 @@ test('one poll counts every brief, reads epics from sittings.json and the plan, 
   await second.unmount()
 })
 
-test('namedCycles counts only the cycle commits, not the savor, simplify, review fix or archive commits', () => {
-  const savor = ['skill: sittings:savor launch x', 'skill: commit-skill:commit Step 0 of S701: savor edits split its cycle 3 into S703', 'skill: commit-skill:commit Cycle 1 of S701: x'].join('\n')
-  expect(namedCycles(savor)).toBe(1)
-  const tail = [
-    'skill: commit-skill:commit Cycle 1 of S701: x',
-    'skill: code-review low a b',
-    'skill: simplify x',
-    'skill: commit-skill:commit simplify cycle 2 of the fix list',
-    'skill: code-review xhigh a b',
-    'skill: commit-skill:commit xhigh fixes to cycle 4',
-    'bash: npm run push:checked -- origin HEAD:main',
-    'skill: commit-skill:commit archive: split its cycle 5 into S703',
-  ].join('\n')
-  expect(namedCycles(tail)).toBe(1)
-})
-
 // An issue brief on dashboard/E1 beside S700 on deck on the same epic.
 const ISSUE_BRIEF = 'docs/briefs/kickoff-527-fix-thing.md'
 const ISSUE_LS = [`100644 blob a527\t${ISSUE_BRIEF}`, `100644 blob a700\t${BRIEFS}s700-rail-polish.md`, '100644 blob e901\tdocs/plans/dashboard.md'].join('\n')
@@ -2466,10 +2450,10 @@ test('an issue brief keys its epic state by its #number, queued or running', asy
   const queued = statusOf({ dispatcher: 1, queued: [{ entry: 1, brief: ISSUE_BRIEF, lane: '', reason: 'a free slot', cause: null }] })
   // An issue number sorts after every sitting, so the queued state shows on an epic #527 holds alone.
   const alone = ISSUE_LS.split('\n').filter(l => !l.includes('s700')).join('\n')
-  const q = buildBoard(queued, {}, new Set([1]), NOW, fromTree(alone, ISSUE_BLOBS, queued))
+  const q = buildBoard(queued, new Set([1]), NOW, fromTree(alone, ISSUE_BLOBS, queued))
   expect(q.epics.map(e => `${e.label} ${e.cells.join(',')} ${e.next?.kind} ${e.next?.sitting}`)).toEqual(['nav todo queued #527'])
   const running = statusOf({ dispatcher: 1, running: [{ entry: 1, brief: ISSUE_BRIEF, lane: '1', pid: 11, started: iso(NOW - 30 * MIN), session_cost: 2 }] })
-  const r = buildBoard(running, {}, new Set([1, 11]), NOW, fromTree(ISSUE_LS, ISSUE_BLOBS, running))
+  const r = buildBoard(running, new Set([1, 11]), NOW, fromTree(ISSUE_LS, ISSUE_BLOBS, running))
   expect(r.epics.map(e => `${e.label} ${e.cells.join(',')} ${e.next?.kind} ${e.next?.sitting}`)).toEqual(['nav running,todo running #527'])
   const { ui } = await mountBoard($, on, r)
   expect(await epicCells(ui, 'nav')).toEqual([`■ ${PEACH}`, `□ ${SURFACE2}`])
@@ -2575,83 +2559,6 @@ test('a running brief whose Epic line leaves origin/main leaves the epics card',
   await second.unmount()
 })
 
-// ---------- the run record ----------
-
-// A record as scripts/run-status.mjs writes it: pasted from
-// ~/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.run.json.
-const RECORD_BASE = {
-  version: 1,
-  stage: 'finished',
-  phases: [
-    { label: 'savor', short: 'savor', state: 'done' },
-    { label: 'cycle 1', short: 'c1', state: 'done' },
-    { label: 'cycle 2', short: 'c2', state: 'done' },
-    { label: 'simplify', short: 'simpl', state: 'done' },
-    { label: 'review xhigh', short: 'xhigh', state: 'done' },
-    { label: 'shipping', short: 'ship', state: 'done' },
-    { label: 'archiving', short: 'arch', state: 'done' },
-  ],
-  end: {
-    outcome: 'shipped',
-    text: 'shipped; production is live (run 45194059532). ($23.27, 73 min, peak 226k context, effort medium, agents low-xhigh)',
-    kind: null,
-    live: true,
-    deploy_run: null,
-  },
-  note: { text: 'S727 has shipped and is archived. The new `POST /api/gallery/:galleryId/edits` door is on `main` at 2d2f29a38..52c68e7bf', cost: 9 },
-  named_cycles: 2,
-  phase_since: null,
-  phase_ms: [
-    { label: 'cycle 1', ms: 478000 },
-    { label: 'savor', ms: 480000 },
-    { label: 'cycle 2', ms: 1070000 },
-    { label: 'simplify', ms: 595000 },
-    { label: 'review xhigh', ms: 1370000 },
-    { label: 'shipping', ms: 243000 },
-    { label: 'archiving', ms: 200000 },
-  ],
-  phase_split: { savor: 480000, cycles: 3473000, ship: 443000 },
-  launch_spans: [{ slot: 2, start: '2026-11-23T13:15:56Z', end: '2026-11-23T14:25:34Z', live: true }],
-  stops: [],
-  handoff: null,
-  brief: 'docs/briefs/kickoff-sitting-s727-gallery-edit-batch.md',
-  mode: 'autopilot',
-  epic: 'gallery-panels/E11',
-  after: ['S725', 'S752'],
-  split_from: [],
-  cycles: 2,
-  landed: true,
-  launches: 1,
-  progress: '/Users/toddwshaffer/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.progress',
-  log: '/Users/toddwshaffer/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.log',
-}
-
-// The record `--print` answers, as
-// `node scripts/run-status.mjs --print ~/Library/Logs/shootsfilm-autopilot/kickoff-sitting-s727-gallery-edit-batch.progress docs/archive/s727-gallery-edit-batch/kickoff-sitting-s727-gallery-edit-batch.md`
-// printed it: the written record with the brief path it was given.
-const PRINT_BASE = { ...RECORD_BASE, brief: 'docs/archive/s727-gallery-edit-batch/kickoff-sitting-s727-gallery-edit-batch.md' }
-
-// A running chain at the xhigh review.
-const XHIGH_PHASES = [
-  { label: 'cycle 1', short: 'c1', state: 'done' },
-  { label: 'cycle 2', short: 'c2', state: 'done' },
-  { label: 'simplify', short: 'simpl', state: 'done' },
-  { label: 'review xhigh', short: 'xhigh', state: 'live' },
-  { label: 'shipping', short: 'ship', state: 'todo' },
-  { label: 'archiving', short: 'arch', state: 'todo' },
-]
-/** A running run's record, from the base: at the xhigh review for nine minutes, $3 in. */
-const runningRecord = (more: object = {}) => ({
-  ...RECORD_BASE,
-  stage: 'review xhigh',
-  phases: XHIGH_PHASES,
-  end: null,
-  phase_since: iso(NOW - 9 * MIN),
-  note: { text: 'reviewing', cost: 3 },
-  launch_spans: [{ slot: 1, start: iso(NOW - 30 * MIN), end: null, live: false }],
-  ...more,
-})
-
 // Every path the board reads from status.json's `sources`, each off its default.
 const SOURCES = { main: '/src/main', log_dir: '/src/logs', archloop_log_dir: '/src/loop' }
 const S758 = 'kickoff-sitting-s758-run-board-reads-record'
@@ -2686,8 +2593,9 @@ async function pollPane(
   $: any,
   on: any,
   files: Record<string, string>,
-  run: (argv: Argv, cwd: string | undefined) => RunAnswer = () => undefined,
+  run: (argv: Argv, cwd: string | undefined) => RunAnswer | Promise<RunAnswer> = () => undefined,
   mtimes: Record<string, number> = {},
+  gate?: Promise<void>,
 ) {
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, { HOME })
@@ -2706,9 +2614,9 @@ async function pollPane(
     return entries.size === 0 ? { deny: 'no such directory' } : { value: [...entries.values()] }
   })
   const calls: { argv: Argv; cwd: string | undefined }[] = []
-  on('process.run', (_: unknown, e: { argv: Argv; init?: { cwd?: string } }) => {
+  on('process.run', async (_: unknown, e: { argv: Argv; init?: { cwd?: string } }) => {
     calls.push({ argv: e.argv, cwd: e.init?.cwd })
-    const answer = run(e.argv, e.init?.cwd)
+    const answer = await run(e.argv, e.init?.cwd)
     const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (answer !== undefined) return out(answer.stdout, answer.exitCode)
     const [cmd = ''] = e.argv
@@ -2717,7 +2625,7 @@ async function pollPane(
     return out('', 1)
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(0)
+  if (gate === undefined) await clock.advance(0)
   const mount = () =>
     $.ui.mount({
       plugin: 'run-board',
@@ -2726,7 +2634,7 @@ async function pollPane(
       surface: 'terminal',
       props: { title: 'Autopilot runs', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
     })
-  return { ui: await mount(), calls, clock, mount }
+  return { ui: gate === undefined ? await mount() : undefined, calls, clock, mount }
 }
 
 /** The bar labels drawn lit: peach and bold, the phase in flight. */
@@ -2734,28 +2642,6 @@ const litLabels = async (ui: Ui): Promise<string[]> =>
   (await ui.findAll({ type: 'Text' }))
     .filter(t => t.props?.color === PEACH && (t.props as { bold?: boolean } | undefined)?.bold === true)
     .map(t => (t.text ?? '').trim())
-
-/**
- * The fixed chain over `cycles` cycles, each phase before index `live` done,
- * that one live and the rest to come: the phases a record lists.
- */
-function phasesAt(cycles: number, live: number) {
-  const names: [string, string][] = [
-    ...Array.from({ length: cycles }, (_, i): [string, string] => [`cycle ${i + 1}`, `c${i + 1}`]),
-    ['simplify', 'simpl'],
-    ['review xhigh', 'xhigh'],
-    ['shipping', 'ship'],
-    ['archiving', 'arch'],
-  ]
-  return names.map(([label, short], i) => ({ label, short, state: i < live ? 'done' : i === live ? 'live' : 'todo' }))
-}
-
-/** A running record read through the board's reader, from `runningRecord(more)`. */
-function runRead(more: object = {}): RecordRead {
-  const read = recordRead(JSON.stringify(runningRecord(more)))
-  if (read.kind !== 'record') throw new Error('the fixture is no record')
-  return read
-}
 
 const isPrint = (argv: Argv): boolean => argv[0] === 'node' && argv.includes('--print')
 
@@ -2866,5 +2752,168 @@ test("status.json's sources name the main checkout and the loop's log directory"
   )
   expect(await has(ui, '2026-10-31-1600')).toBe(true)
   expect([...new Set(calls.filter(c => c.argv[0] === 'git').map(c => c.cwd))]).toEqual([SOURCES.main])
+  await ui.unmount()
+})
+
+// ---------- finished runs from their records ----------
+
+test("a finished run's block kind is status.json's kind when it is not null, else the record's, and a red one matches its own run", () => {
+  const red = 'kickoff-sitting-s761-red-run'
+  const split = 'kickoff-sitting-s762-split-run'
+  const raw = statusOf({
+    finished: [
+      { entry: 1, brief: `${BRIEFS}s761-red-run.md`, lane: '', status: 0, outcome: 'x', kind: null, slot: 2, slot_taken: iso(NOW - 2 * HOUR), slot_released: iso(NOW - HOUR) },
+      { entry: 2, brief: `${BRIEFS}s762-split-run.md`, lane: '', status: 1, outcome: 'x', kind: 'split', slot: null, slot_taken: null, slot_released: null },
+    ],
+  })
+  // The outcome's first word is `shipped`: a board that keys the kind on it reads no red deploy.
+  const redEnd = { outcome: 'shipped', text: 'shipped; deploy failed (run 45149929776). ($8.00, 14 min)', kind: 'deploy-red', live: false, deploy_run: 45149929776 }
+  const b = buildBoard(raw, new Set(), NOW, {
+    endings: [ending(red, NOW - HOUR, redEnd), ending(split, NOW - 2 * HOUR, endOf('stopped: over the ceiling. ($3.00, 9 min)', 'decision'))],
+    afters: { [`${BRIEFS}s762-split-run.md`]: [] },
+    deployStages: { '45149929776': 'prod' },
+  })
+  expect(b.blocked.map(k => `${k.sitting} ${k.kind}`).sort()).toEqual(['S761 deploy-red', 'S762 split'])
+  expect(b.blocked.find(k => k.sitting === 'S761')?.why).toBe('deploy failed · at production · run 45149929776 · 14m · $8.00')
+  // Its bar takes the record's liveness: not live.
+  expect(barsOf(b, 2)).toEqual(['S761 stopped -120..-60'])
+})
+
+test('a docs-only ship is live: RECENT lists it and BLOCKED does not', () => {
+  const docs = { outcome: 'shipped', text: 'shipped; no deploy, because the run pushed docs only. ($2.00, 6 min)', kind: null, live: true, deploy_run: null }
+  const endings = [ending('kickoff-sitting-s763-docs-only', NOW - HOUR, docs)]
+  expect(recentOf(endings, []).map(d => `${d.sitting} ${d.minutes} ${d.usd}`)).toEqual(['S763 6 2'])
+  expect(buildBoard(statusOf({}), new Set(), NOW, { endings, afters: { [`${BRIEFS}s763-docs-only.md`]: [] } }).blocked).toEqual([])
+})
+
+test("RECENT's medians read the record's phase_ms, and a record with no end draws in neither RECENT nor BLOCKED", () => {
+  const live = endOf('shipped; production is live (run 1). ($9.00, 40 min)')
+  const timed = ending('kickoff-sitting-s764-timed', NOW - HOUR, live, { phase_ms: [{ label: 'cycle 1', ms: 600000 }, { label: 'simplify', ms: 120000 }] })
+  expect(recentOf([timed], []).map(d => d.phaseMs)).toEqual([{ 'cycle 1': 600000, simplify: 120000 }])
+  const open = ending('kickoff-sitting-s765-no-end', NOW - HOUR, null)
+  expect(recentOf([open], [])).toEqual([])
+  expect(buildBoard(statusOf({}), new Set(), NOW, { endings: [open], afters: { [`${BRIEFS}s765-no-end.md`]: [] } }).blocked).toEqual([])
+})
+
+// A finished run that the board finds by name, S761, with no record off its `run_record`.
+const FIN = 'kickoff-sitting-s761-finished-run'
+const FIN_LIVE = endOf('shipped; production is live (run 3). ($12.00, 42 min)')
+const finishedStatus = () =>
+  JSON.stringify({
+    version: 1,
+    sources: SOURCES,
+    dispatcher: 1,
+    running: [],
+    queued: [],
+    finished: [{ entry: 4, brief: `docs/briefs/${FIN}.md`, lane: '', status: 0, outcome: 'x', kind: null, slot: null, slot_taken: null, slot_released: null, run_record: '/elsewhere/s761.run.json' }],
+  })
+/** The files a poll of S761 reads: status.json, its progress file, its brief and the owner, each at NOW unless `mtimes` says. */
+const finFiles = (more: Record<string, string> = {}): Record<string, string> => ({
+  [`${LOGS}/status.json`]: finishedStatus(),
+  [`${LOGS}/${FIN}.progress`]: stampedAt([[NOW - 2 * HOUR, 'slot: 1'], [NOW - HOUR, 'finished: shipped; production is live (run 3). ($12.00, 42 min)']]),
+  [`${SOURCES.main}/docs/briefs/${FIN}.md`]: '# S761',
+  [`${SOURCES.main}/scripts/run-status.mjs`]: '',
+  ...more,
+})
+// What `--print` printed for S761, from the base as `--print` prints it.
+const FIN_PRINTED = JSON.stringify({ ...PRINT_BASE, end: FIN_LIVE, launch_spans: [] })
+const isFinPrint = (argv: Argv): boolean =>
+  isPrint(argv) && argv[1] === `${SOURCES.main}/scripts/run-status.mjs` && argv[3] === `${LOGS}/${FIN}.progress` && argv[4] === `${SOURCES.main}/docs/briefs/${FIN}.md`
+
+test("a finished run's record sits at <sources.log_dir>/<name>.run.json, off LOG_DIR and off its run_record", async ($, on) => {
+  const stopped = recordJson(endOf('stopped: read the handoff. ($1.00, 3 min)', 'decision'))
+  const { ui, calls } = await pollPane($, on, finFiles({
+    [`${SOURCES.log_dir}/${FIN}.run.json`]: recordJson(FIN_LIVE),
+    [`${LOGS}/${FIN}.run.json`]: stopped,
+    '/elsewhere/s761.run.json': stopped,
+  }))
+  expect(await has(ui, '42m')).toBe(true)
+  expect(calls.filter(c => isPrint(c.argv))).toEqual([])
+  await ui.unmount()
+})
+
+for (const [name, files] of [
+  ['a run with no record', () => finFiles()],
+  // A record that predates phase_ms is an old record: its own end, a stop, never draws.
+  [
+    'a run whose record has no phase_ms',
+    () => finFiles({ [`${SOURCES.log_dir}/${FIN}.run.json`]: JSON.stringify({ ...JSON.parse(recordJson(endOf('stopped: x. ($1.00, 3 min)', 'run-broke'))), phase_ms: undefined }) }),
+  ],
+] as const) {
+  test(`${name} draws what --print prints, run in the main checkout`, async ($, on) => {
+    const { ui, calls } = await pollPane($, on, files(), argv => (isFinPrint(argv) ? { exitCode: 0, stdout: FIN_PRINTED } : undefined))
+    expect(await has(ui, '42m')).toBe(true)
+    expect(calls.filter(c => isFinPrint(c.argv)).map(c => c.cwd)).toEqual([SOURCES.main])
+    await ui.unmount()
+  })
+}
+
+for (const [name, answer] of [
+  ['exits 1, its stdout a record', { exitCode: 1, stdout: FIN_PRINTED }],
+  ['exits 0 with no stdout', { exitCode: 0, stdout: '' }],
+  ['exits 0 with stdout that is no JSON', { exitCode: 0, stdout: 'TypeError: x is not a function' }],
+] as const) {
+  test(`a --print that ${name} draws the run from status.json alone`, async ($, on) => {
+    const { ui } = await pollPane($, on, finFiles(), argv => (isFinPrint(argv) ? answer : undefined))
+    expect(await has(ui, '42m')).toBe(false)
+    await ui.unmount()
+  })
+}
+
+test('--print runs once per progress mtime, brief mtime and owner mtime, and again after it fails', async ($, on) => {
+  const mtimes: Record<string, number> = {}
+  let fails = false
+  const { clock, calls } = await pollPane($, on, finFiles(), argv => (isFinPrint(argv) ? (fails ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: FIN_PRINTED }) : undefined), mtimes)
+  const printed = () => calls.filter(c => isFinPrint(c.argv)).length
+  await clock.advance(5000)
+  expect(printed()).toBe(1)
+  for (const path of [`${LOGS}/${FIN}.progress`, `${SOURCES.main}/docs/briefs/${FIN}.md`, `${SOURCES.main}/scripts/run-status.mjs`]) {
+    mtimes[path] = (mtimes[path] ?? NOW) + 1000
+    const before = printed()
+    await clock.advance(5000)
+    expect(printed()).toBe(before + 1)
+  }
+  // A failed --print keeps nothing: the next poll asks again.
+  fails = true
+  mtimes[`${LOGS}/${FIN}.progress`] = NOW + 9000
+  const before = printed()
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(printed()).toBe(before + 2)
+})
+
+test('a red end with no deploy run asks gh for no run', async ($, on) => {
+  const broke = endOf('stopped: the hook stayed red. ($4.00, 11 min)', 'run-broke')
+  const { calls } = await pollPane($, on, finFiles({ [`${SOURCES.log_dir}/${FIN}.run.json`]: recordJson(broke) }))
+  expect(calls.filter(c => c.argv[0] === 'gh' && c.argv[1] === 'run' && c.argv[2] === 'view')).toEqual([])
+})
+
+test('two polls that overlap on one slow --print run it once', async ($, on) => {
+  let release = () => {}
+  const gate = new Promise<void>(r => (release = r))
+  const { clock, calls, mount } = await pollPane(
+    $,
+    on,
+    finFiles(),
+    async argv => {
+      if (!isFinPrint(argv)) return undefined
+      await gate
+      return { exitCode: 0, stdout: FIN_PRINTED }
+    },
+    {},
+    gate,
+  )
+  // The test clock does not wait for a poll, so the second starts while the first's --print is held.
+  const first = clock.advance(0)
+  await new Promise(r => setTimeout(r, 20))
+  const second = clock.advance(5000)
+  await new Promise(r => setTimeout(r, 20))
+  release()
+  await first
+  await second
+  await new Promise(r => setTimeout(r, 20))
+  expect(calls.filter(c => isFinPrint(c.argv)).length).toBe(1)
+  const ui = await mount()
+  expect(await has(ui, '42m')).toBe(true)
   await ui.unmount()
 })
