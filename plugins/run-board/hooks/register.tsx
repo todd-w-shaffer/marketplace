@@ -32,7 +32,8 @@ import {
   elapsed,
   hoursMinutes,
   historyTag,
-  addPlanCosts,
+  briefFacts,
+  cycleKeys,
   RECENT_SPLIT_CELLS,
   finishedToast,
   isLoopLanding,
@@ -66,7 +67,7 @@ import {
   laneCells,
   nowCell,
 } from './board'
-import type { BriefsRead, CellTone, Ending, LoopFile, RawStatus, RecordRead, Sources, Spend, TimelineCell } from './board'
+import type { BriefFacts, BriefsRead, CellTone, Ending, LoopFile, RawStatus, RecordRead, Sources, Spend, TimelineCell } from './board'
 
 // Catppuccin Macchiato (catppuccin.com/palette). Every colour the board
 // paints comes from here, the pane's own ground included, so the pane reads
@@ -253,12 +254,11 @@ const LEDGER = '.claude/token-ledger.jsonl'
 // chunks.
 const LEDGER_CHUNK_BYTES = 3 * 1024 * 1024
 
-// The ledger as read so far, and each sitting's plan cost over the spends
-// read. It only grows, by a line per /commit and /ship, so each poll reads
-// only the bytes past `offset`; a file shorter than `offset` was replaced,
-// and is read again from the start.
-type Ledger = { offset: number; partial: string; spends: Spend[]; plans: Record<string, number> }
-const emptyLedger = (): Ledger => ({ offset: 0, partial: '', spends: [], plans: {} })
+// The ledger as read so far. It only grows, by a line per /commit and /ship,
+// so each poll reads only the bytes past `offset`; a file shorter than
+// `offset` was replaced, and is read again from the start.
+type Ledger = { offset: number; partial: string; spends: Spend[] }
+const emptyLedger = (): Ledger => ({ offset: 0, partial: '', spends: [] })
 let ledger: Ledger = emptyLedger()
 
 // The ledger read in flight. A poll that starts while another reads awaits
@@ -283,7 +283,6 @@ async function readLedger($: EngineInterface, path: string): Promise<boolean> {
       offset: ledger.offset + count,
       partial: read.partial,
       spends: [...ledger.spends, ...read.spends],
-      plans: addPlanCosts({ ...ledger.plans }, read.spends),
     }
   }
   return true
@@ -291,19 +290,68 @@ async function readLedger($: EngineInterface, path: string): Promise<boolean> {
 
 /**
  * What the spends came to on each of the last 14 local days in the offset
- * `utcOffset` answers, and each sitting's plan cost, from one read of
- * token-ledger; null when it could not be read.
+ * `utcOffset` answers, from one read of token-ledger; null when it could not
+ * be read.
  */
-async function readSpend(
-  $: EngineInterface,
-  home: string,
-  now: number,
-  utcOffset: Promise<string>,
-): Promise<{ days: number[]; plans: Record<string, number> } | null> {
+async function readSpend($: EngineInterface, home: string, now: number, utcOffset: Promise<string>): Promise<{ days: number[] } | null> {
   if (ledgerRead === null) ledgerRead = readLedger($, `${home}/${LEDGER}`).finally(() => (ledgerRead = null))
   const [isRead, offset] = await Promise.all([ledgerRead, utcOffset])
   if (!isRead) return null
-  return { days: daySums(ledger.spends, now, offset), plans: { ...ledger.plans } }
+  return { days: daySums(ledger.spends, now, offset) }
+}
+
+// The plan costs scripts/plan-costs.mjs printed, under the key it printed
+// them for: the ledger's size and `origin/main`'s sha. A refusal keeps nothing.
+let planCache: { key: string; plans: Record<string, number> } | null = null
+// The plan-costs.mjs read in flight, so an overlapping poll awaits it.
+let planRead: Promise<Record<string, number> | null> | null = null
+
+/** Plan costs as plan-costs.mjs prints them: one object of `S<n>` keys to finite numbers, else null. */
+function planCostsOf(stdout: string): Record<string, number> | null {
+  let data: unknown
+  try {
+    data = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(data)) {
+    if (!/^S\d+$/.test(k) || typeof v !== 'number' || !Number.isFinite(v)) return null
+    out[k] = v
+  }
+  return out
+}
+
+/**
+ * Each sitting's plan cost, from `node scripts/plan-costs.mjs <ledger>` in
+ * the main checkout, once per ledger size and `origin/main` sha. Null when
+ * either key part, or the script, fails, rejects, or prints another shape:
+ * nothing is kept, and the next poll asks again.
+ */
+async function readPlans($: EngineInterface, home: string, main: string): Promise<Record<string, number> | null> {
+  const path = `${home}/${LEDGER}`
+  const [stat, head] = await Promise.all([
+    $.process.run(['stat', '-f', '%z', path], { timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' })),
+    $.process.run(['git', 'rev-parse', '--verify', 'origin/main^{commit}'], { cwd: main, timeoutMs: 5000 }).catch(() => ({ exitCode: 1, stdout: '' })),
+  ])
+  const size = stat.stdout.trim()
+  const sha = head.stdout.trim()
+  if (stat.exitCode !== 0 || !/^\d+$/.test(size) || head.exitCode !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) return null
+  const key = `${size}:${sha}`
+  if (planCache?.key === key) return planCache.plans
+  if (planRead === null) {
+    planRead = $.process
+      .run(['node', `${main}/scripts/plan-costs.mjs`, path], { cwd: main, timeoutMs: 20000 })
+      .then(r => {
+        const plans = r.exitCode === 0 ? planCostsOf(r.stdout) : null
+        if (plans !== null) planCache = { key, plans }
+        return plans
+      })
+      .catch(() => null)
+      .finally(() => (planRead = null))
+  }
+  return planRead
 }
 
 // Progress files read for RECENT and BLOCKED, by name, kept while their mtime holds.
@@ -500,6 +548,41 @@ let lastRead: Pick<BriefsRead, 'cycles' | 'epics' | 'recordedEpics' | 'archived'
  * and epic from `cyclesCache`. A failed listing reads no deck and gives the
  * last listing's cycles, epics, recorded epics, archived sittings and plan titles.
  */
+// Each brief key's facts, under the blob shas and the owner's mtime they were printed for.
+const factsCache = new Map<string, { key: string; facts: BriefFacts }>()
+// The fact reads in flight, by key, so an overlapping poll awaits them.
+const factsInFlight = new Map<string, Promise<BriefFacts | null>>()
+
+/**
+ * A brief's facts from its `origin/main` blobs, `README.md`'s first, piped
+ * into `node <main>/scripts/run-status.mjs --print /dev/null /dev/stdin`
+ * under `set -o pipefail`, each `git cat-file` joined by `&&`, so a blob that
+ * fails to read fails the read. Once per blob shas and owner mtime. A read
+ * that exits non-zero, whatever its stdout, rejects, or prints a record with
+ * no mode is not kept, and the next poll reads it again.
+ */
+async function printedFacts($: EngineInterface, main: string, briefKey: string, shas: readonly string[], ownerMs: number | null): Promise<BriefFacts | null> {
+  const key = JSON.stringify([...shas, ownerMs])
+  const hit = factsCache.get(briefKey)
+  if (hit !== undefined && hit.key === key) return hit.facts
+  const running = factsInFlight.get(key)
+  if (running !== undefined) return running
+  const cats = shas.map((_, i) => `git cat-file blob "\${${i + 2}}"`).join(' && ')
+  const script = `set -o pipefail; { ${cats}; } | node "$1" --print /dev/null /dev/stdin`
+  const read = $.process
+    .run(['sh', '-c', script, 'sh', `${main}/scripts/run-status.mjs`, ...shas], { cwd: main, timeoutMs: 10000 })
+    .then(r => {
+      const printed = r.exitCode === 0 ? recordRead(r.stdout) : null
+      const facts = printed?.kind === 'record' ? briefFacts(printed.record) : null
+      if (facts !== null) factsCache.set(briefKey, { key, facts })
+      return facts
+    })
+    .catch(() => null)
+    .finally(() => factsInFlight.delete(key))
+  factsInFlight.set(key, read)
+  return read
+}
+
 async function readBriefs($: EngineInterface, cwd: string, raw: RawStatus): Promise<BriefsRead> {
   const running = raw.running.map(r => r.brief)
   const keys = running.map(briefKey)
@@ -524,11 +607,20 @@ async function readBriefs($: EngineInterface, cwd: string, raw: RawStatus): Prom
   }
   const blobs = lsTreeBlobs(ls.stdout)
   const next = new Map<string, string>()
-  const texts = new Map(await Promise.all(briefsBlobs(blobs, running).map(async sha => [sha, await blobText($, cwd, sha, next)] as const)))
+  const texts = new Map(await Promise.all(briefsBlobs(blobs).map(async sha => [sha, await blobText($, cwd, sha, next)] as const)))
   blobCache = next
-  const read = briefsRead(blobs, sha => texts.get(sha) ?? null, running, raw.queued.map(r => r.brief))
+  // Each brief's facts, one read after another.
+  const byKey = cycleBlobMap(blobs)
+  const ownerMs = await mtimeOf($, `${cwd}/scripts`, 'run-status.mjs')
+  const facts = new Map<string, BriefFacts>()
+  for (const k of cycleKeys(briefFiles(blobs), running)) {
+    const shas = byKey.get(k) ?? []
+    if (shas.length === 0) continue
+    const read = await printedFacts($, cwd, k, shas, ownerMs)
+    if (read !== null) facts.set(k, read)
+  }
+  const read = briefsRead(blobs, k => facts.get(k), sha => texts.get(sha) ?? null, running, raw.queued.map(r => r.brief))
   const listed = cycleBlobMap(blobs)
-  const briefShas = new Map(briefFiles(blobs).map(f => [briefKey(f.path), f.sha]))
   for (const k of [...cyclesCache.keys()]) if (!keys.includes(k)) cyclesCache.delete(k)
   for (const k of keys) {
     const kept = { ...cyclesCache.get(k) }
@@ -536,10 +628,9 @@ async function readBriefs($: EngineInterface, cwd: string, raw: RawStatus): Prom
     // A failed blob read keeps no entry, so the next poll reads the blob again.
     else if (listed.has(k)) delete kept.cycles
     else if (kept.cycles !== undefined) read.cycles[k] = kept.cycles
-    const sha = briefShas.get(k)
     if (Object.hasOwn(read.epics, k)) kept.epic = read.epics[k]
-    // A listed brief that reads cleanly with no `Epic:` line names no epic.
-    else if (sha !== undefined && (texts.get(sha) ?? null) !== null) delete kept.epic
+    // A listed brief whose facts read with no `Epic:` line names no epic.
+    else if (facts.has(k)) delete kept.epic
     else if (kept.epic !== undefined) read.epics[k] = kept.epic
     cyclesCache.set(k, kept)
   }
@@ -686,11 +777,12 @@ async function poll($: EngineInterface): Promise<void> {
     .run(['date', '+%z'], { timeoutMs: 5000 })
     .then(r => (r.exitCode === 0 ? r.stdout.trim() : ''))
     .catch(() => '')
-  const [handoffs, deploys, utcOffset, read] = await Promise.all([
+  const [handoffs, deploys, utcOffset, read, plans] = await Promise.all([
     readHandoffs($, sources.main, endings).catch(() => ({})),
     readDeployStages($, sources.main, endings, now).catch(() => ({ stages: {}, live: '' })),
     offset,
     readSpend($, home, now, offset).catch(() => null),
+    readPlans($, home, sources.main).catch(() => null),
   ])
   const next = buildBoard(raw, alive, now, {
     loop,
@@ -702,7 +794,7 @@ async function poll($: EngineInterface): Promise<void> {
     cycles,
     utcOffset,
     spend: read === null ? null : { days: read.days },
-    plans: read?.plans ?? null,
+    plans,
     afters,
     endings,
     handoffs,

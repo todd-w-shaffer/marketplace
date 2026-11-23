@@ -5,11 +5,10 @@ import {
   ago,
   agoShort,
   briefFiles,
-  briefHeader,
+  briefFacts,
   briefKey,
   briefsRead,
   cycleBlobMap,
-  cycleCount,
   lsTreeBlobs,
   shippedCount,
   sittingsClaims,
@@ -58,7 +57,7 @@ import {
   liveDepths,
   historyTag,
   lineTimes,
-  planCosts,
+  UNREAD_HEADER,
   splitCounts,
   TIMELINE_AHEAD_MS,
   TIMELINE_BACK_MS,
@@ -71,7 +70,7 @@ import {
   sparkGlyphs,
 } from '../hooks/board'
 import type { Deck, Ended, Run } from '../types'
-import type { Ending, RecordRead } from '../hooks/board'
+import type { BriefFacts, BriefHeader, Ending, RecordRead } from '../hooks/board'
 
 const STATUS = JSON.stringify({
   written: '2026-10-31T16:49:25Z',
@@ -227,6 +226,44 @@ function ending(base: string, mtimeMs: number, end: object | null, more: object 
 const recordJson = (end: object | null, more: object = {}): string =>
   JSON.stringify({ ...RECORD_BASE, phase_ms: [], phase_split: null, launch_spans: [], named_cycles: 0, launches: 0, ...more, end })
 
+// What `--print` prints for each fixture brief's text, by the text: the facts
+// the fixture states for it. A text with none prints as a brief with no mode yet.
+type PrintedFacts = { mode: string | null; epic: string | null; after: string[]; split_from: string[]; cycles: number }
+const FACTS = new Map<string, PrintedFacts>()
+const NO_FACTS: PrintedFacts = { mode: 'none', epic: null, after: [], split_from: [], cycles: 0 }
+
+/** Registers `text` as a brief whose printed record states `facts`, and answers the text. */
+function briefWith(text: string, facts: Partial<PrintedFacts>): string {
+  FACTS.set(text, { ...NO_FACTS, ...facts })
+  return text
+}
+
+/** What `--print` prints for a brief made of `texts`, piped in: the first text's facts, from the base. */
+const printedFor = (texts: readonly string[]): string => JSON.stringify({ ...PRINT_BASE, end: null, ...(FACTS.get(texts[0] ?? '') ?? NO_FACTS) })
+
+/** The facts the board reads from that print. */
+function factsFor(texts: readonly string[]): BriefFacts {
+  const read = recordRead(printedFor(texts))
+  const facts = read.kind === 'record' ? briefFacts(read.record) : null
+  if (facts === null) throw new Error('the fixture prints no facts')
+  return facts
+}
+
+/** A header as the board draws one. */
+const hdr = (mode: BriefHeader['mode'], epic = '', after = '', splitFrom: string[] = []): BriefHeader => ({ epic, after, mode, splitFrom })
+
+/**
+ * The answer a stub gives the board's piped `--print` of a brief's blobs:
+ * the print of their texts, or a failed read, exit 128, when `blob` answers
+ * null for any of them, as `git cat-file` under `pipefail` does.
+ */
+function printAnswer(argv: readonly string[], blob: (sha: string) => string | null): { exitCode: number; stdout: string } | undefined {
+  if (argv[0] !== 'sh' || !(argv[2] ?? '').includes('--print /dev/null /dev/stdin')) return undefined
+  const texts = argv.slice(5).map(blob)
+  if (texts.length === 0 || texts.some(t => t === null)) return { exitCode: 128, stdout: '' }
+  return { exitCode: 0, stdout: printedFor(texts as string[]) }
+}
+
 /** A stamp `minutes` from NOW, as a record writes it. */
 const stampAt = (minutes: number): string => new Date(NOW + minutes * 60000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 
@@ -357,20 +394,21 @@ test('a phase label is the longest of its names that fits, never a cut word', as
   expect(label('cycle 12', 2)).toBe('c1')
 })
 
-test('a brief counts its cycles by heading or bold line, and a directory brief reads every file', async () => {
-  expect(cycleCount('### Cycle 1: a\ntext\n### Cycle 2: b\n### Cycles in general')).toBe(2)
-  expect(cycleCount('**Cycle 1.** a\n**Cycle 2.** b\n**Cycle 3.** c\n### Cycle 1: x')).toBe(3)
-  expect(cycleCount('no cycles')).toBe(0)
+test("a directory brief's blobs are every .md file directly in it, its README first", async () => {
   const ls = [
     '100644 blob aaa\tdocs/briefs/kickoff-sitting-s393-images-panel.md',
     '100644 blob bbb\tdocs/briefs/s410-big/README.md',
     '100644 blob ccc\tdocs/briefs/s410-big/cycles.md',
     '100644 blob ddd\tdocs/briefs/s410-big/notes/deep.md',
     '100644 blob eee\tdocs/briefs/s410-big/data.json',
+    // A file that lists before README.md still pipes after it, so the header leads.
+    '100644 blob aa1\tdocs/briefs/s411-cut/AAA.md',
+    '100644 blob bb2\tdocs/briefs/s411-cut/README.md',
   ].join('\n')
   const byKey = cycleBlobMap(lsTreeBlobs(ls))
   expect(byKey.get('docs/briefs/kickoff-sitting-s393-images-panel.md')).toEqual(['aaa'])
   expect(byKey.get('docs/briefs/s410-big')).toEqual(['bbb', 'ccc'])
+  expect(byKey.get('docs/briefs/s411-cut')).toEqual(['bb2', 'aa1'])
   expect(byKey.get('docs/briefs/gone.md')).toBe(undefined)
 })
 
@@ -805,14 +843,21 @@ test('a brief key is the queue path, and a directory brief is its directory', as
   expect(briefKey('docs/briefs/kickoff-sitting-s342-x.md')).toBe('docs/briefs/kickoff-sitting-s342-x.md')
 })
 
-test('the header stops at the first heading', async () => {
-  expect(briefHeader(S342)).toEqual({ epic: 'minisite/E4', after: 'S340, S341', mode: 'ready', splitFrom: [] })
-  expect(briefHeader('# x\n\nFinishes: issue 1\n\n## y')).toEqual({ epic: '', after: '', mode: 'enrich', splitFrom: [] })
-})
-
-test('an interactive brief reads as needs you', async () => {
-  const text = '# x\n\n**Mode: interactive.** Removes a wrangler.toml line.\n\n## y\n**Mode: autopilot.**'
-  expect(briefHeader(text)).toEqual({ epic: '', after: '', mode: 'interactive', splitFrom: [] })
+test("a brief's facts are its printed record's: its mode mapped, its After sittings joined, its cycles", () => {
+  const facts = (more: object) => {
+    const read = recordRead(JSON.stringify({ ...PRINT_BASE, end: null, ...more }))
+    if (read.kind !== 'record') throw new Error('no record')
+    return briefFacts(read.record)
+  }
+  expect(facts({ mode: 'autopilot', epic: 'minisite/E4', after: ['S340', 'S341'], split_from: ['S300'], cycles: 3 })).toEqual({
+    header: { epic: 'minisite/E4', after: 'S340, S341', mode: 'ready', splitFrom: ['S300'] },
+    cycles: 3,
+  })
+  expect(facts({ mode: 'interactive' })?.header.mode).toBe('interactive')
+  expect(facts({ mode: 'none', epic: null, after: [], split_from: [], cycles: 0 })).toEqual({ header: UNREAD_HEADER, cycles: 0 })
+  // A brief --print could not read prints no mode, and one of a mode the board does not know reads the same.
+  expect(facts({ mode: null })).toBe(null)
+  expect(facts({ mode: 'weekly' })).toBe(null)
 })
 
 test('an After line names its sittings', async () => {
@@ -900,8 +945,8 @@ test('an entry held off a run the board does not show running is a root tagged h
 })
 
 test('on deck lists unheld briefs by sitting, epic lane from the Epic line', async () => {
-  const texts: Record<string, string> = { bbb222: S342, ccc333: '**Mode: autopilot.**\nEpic: account-basics/E8\n## a', fff666: '**Mode: autopilot.**\n## a', '222999': '# issue\n## a' }
-  const briefs = briefFiles(lsTreeBlobs(LS_TREE)).map(f => ({ ...f, header: briefHeader(texts[f.sha] ?? '') }))
+  const headers: Record<string, BriefHeader> = { bbb222: hdr('ready', 'minisite/E4', 'S340, S341'), ccc333: hdr('ready', 'account-basics/E8'), fff666: hdr('ready'), '222999': hdr('enrich') }
+  const briefs = briefFiles(lsTreeBlobs(LS_TREE)).map(f => ({ ...f, header: headers[f.sha] ?? UNREAD_HEADER }))
   const deck = onDeckOf(briefs, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
   expect(deck.map(d => `${d.sitting} ${d.slug} ${d.lane}${d.epic === '' ? '' : ` · ${d.epic}`}`)).toEqual([
     'S342 gallery-pass-keeps-stars epic · minisite/E4',
@@ -1558,9 +1603,16 @@ test('recent draws each run as a phase split, and a file with no times as the gr
   await ui.unmount()
 })
 
-// Plan commits for S682 at $4 and $2, and records that are not plan cost: a
-// plan session and a plan ship that name S682, a build commit, and a sitting
-// written as a string.
+// The plan costs plan-costs.mjs prints for S682 and S683, the board's stub answer:
+// `node scripts/plan-costs.mjs ledger.jsonl` printed PLAN_COSTS_STDOUT in a scratch
+// repository over S682's plan commits at $4 and $2 and S683's at $40.
+const PLAN_COSTS_STDOUT = '{"S682":6,"S683":40}\n'
+const PLAN_COSTS: Record<string, number> = JSON.parse(PLAN_COSTS_STDOUT)
+/** Whether argv runs the main checkout's plan-costs.mjs. */
+const isPlanCosts = (argv: readonly string[]): boolean => argv[0] === 'node' && (argv[1] ?? '').endsWith('/scripts/plan-costs.mjs')
+// The sha a stub answers for `origin/main`.
+const MAIN_SHA = 'c0ffee'.padEnd(40, '0')
+// Ledger lines, which the spend sparkline reads.
 const PLAN_LEDGER = [
   JSON.stringify({ kind: 'commit', ts: '2026-10-31T08:00:00Z', phase: 'plan', sitting: 682, cost: { usd: 4 } }),
   JSON.stringify({ kind: 'commit', ts: '2026-10-31T08:10:00Z', phase: 'plan', sitting: 682, cost: { usd: 2 } }),
@@ -1571,13 +1623,9 @@ const PLAN_LEDGER = [
   JSON.stringify({ kind: 'commit', ts: '2026-10-31T09:20:00Z', phase: 'plan', sitting: 683, cost: { usd: 40 } }),
 ].join('\n')
 
-test('plan cost is the plan commits that carry the sitting, and nothing else', () => {
-  expect(planCosts(ledgerSpends(PLAN_LEDGER))).toEqual({ S682: 6, S683: 40 })
-})
-
 test('recent draws each run its plan cost, dim, bright past the build cost, and +— with none', async ($, on) => {
   const recent = endedOf(PROPOSED_RECENT.slice(0, 3))
-  const { ui } = await mountBoard($, on, recentBoard(recent, { plans: planCosts(ledgerSpends(PLAN_LEDGER)) }))
+  const { ui } = await mountBoard($, on, recentBoard(recent, { plans: PLAN_COSTS }))
   expect(await coloursOf(ui, '+$6')).toEqual(['#8087a2'])
   // S683's plan cost passes its $34 build.
   expect(await coloursOf(ui, '+$40')).toEqual(['#cad3f5'])
@@ -1612,16 +1660,10 @@ test('a recent slug is cut where the pane is narrow', async ($, on) => {
 })
 
 // S684's plan commits, $11.36, and a plan ship and a plan session that name it.
-const S684_PLAN_LEDGER = [
-  JSON.stringify({ kind: 'commit', ts: '2026-10-30T08:00:00Z', phase: 'plan', sitting: 684, cost: { usd: 10 } }),
-  JSON.stringify({ kind: 'commit', ts: '2026-10-30T08:10:00Z', phase: 'plan', sitting: 684, cost: { usd: 1.36 } }),
-  JSON.stringify({ kind: 'ship', ts: '2026-10-30T08:20:00Z', phase: 'plan', sitting: 684, overhead: { usd: 3 } }),
-  JSON.stringify({ kind: 'session', ts: '2026-10-30T08:30:00Z', phase: 'plan', sitting: 684, cost: { usd: 2 } }),
-].join('\n')
 const S684_RUN = 'kickoff-sitting-s684-home-gallery-sections'
 
 test('the blocked why-line gives the plan cost and which launch stopped', async ($, on) => {
-  const plans = planCosts(ledgerSpends(S684_PLAN_LEDGER))
+  const plans = { S684: 11.36 }
   const once = s684Board({ plans }, 1)
   expect(historyTag(once.blocked[0] ?? { plan: 'unread', launches: null })).toBe('+$11.36 plan · 1st launch')
   const { ui } = await mountBoard($, on, once)
@@ -1635,14 +1677,13 @@ test('the blocked why-line gives the plan cost and which launch stopped', async 
 })
 
 const SPLIT_BRIEFS = [
-  { path: `${BRIEFS}s686-dashboard-rail.md`, text: '# S686\n\nAfter: S685\n\n## a' },
-  { path: `${BRIEFS}s690-nav-overlays.md`, text: '# S690\n\nSplit from: S686\nAfter: S698\n\n## a\nSplit from: S1' },
+  { path: `${BRIEFS}s686-dashboard-rail.md`, text: briefWith('# S686\n\nAfter: S685\n\n## a', { after: ['S685'] }) },
+  { path: `${BRIEFS}s690-nav-overlays.md`, text: briefWith('# S690\n\nSplit from: S686\nAfter: S698\n\n## a\nSplit from: S1', { after: ['S698'], split_from: ['S686'] }) },
 ]
 const SITTINGS_JSON = JSON.stringify({ floor: 60, claims: { s700: { slug: 'x', record: { split_from: ['s686', 's690'] } }, s650: { slug: 'y', record: { cards: [] } } } })
 
 test("a split parent's queue row reads how many briefs were split from it", async ($, on) => {
-  expect(briefHeader(SPLIT_BRIEFS[1]?.text ?? '').splitFrom).toEqual(['S686'])
-  const headed = SPLIT_BRIEFS.map(b => ({ path: b.path, header: briefHeader(b.text) }))
+  const headed = SPLIT_BRIEFS.map(b => ({ path: b.path, header: factsFor([b.text]).header }))
   const splits = splitCounts(headed, sittingsClaims(SITTINGS_JSON))
   expect(splits).toEqual({ S686: 2, S690: 1 })
   // A sittings.json that does not parse counts only the live briefs.
@@ -1917,7 +1958,10 @@ test('one poll reads the files and the ledger, and writes a board with plan cost
     const [cmd = '', ...args] = e.argv
     const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (cmd === 'git' && args[0] === 'ls-tree') return out(`100644 blob aaaa\tdocs/briefs/${S684_RUN}.md\n`)
-    if (cmd === 'git' && args[0] === 'cat-file') return out('# S684\n\n**Mode: autopilot.**\n\n## x\n')
+    if (cmd === 'git' && args[0] === 'rev-parse') return out(`${MAIN_SHA}\n`)
+    const printed = printAnswer(e.argv, sha => (sha === 'aaaa' ? '# S684\n\n**Mode: autopilot.**\n\n## x\n' : null))
+    if (printed !== undefined) return out(printed.stdout, printed.exitCode)
+    if (isPlanCosts(e.argv)) return out(PLAN_COSTS_STDOUT)
     if (cmd === 'stat') return out(String(ledger.length))
     if (cmd === 'sh') return out(ledger.slice(Number(args[3]) - 1, Number(args[3]) - 1 + Number(args[5])))
     if (cmd === 'date') return out('-0500')
@@ -2003,12 +2047,6 @@ test('an empty or unparsable at line keeps the stamp above it', () => {
   expect(lineTimes(`at: ${iso(T0)}\nslot: 1\nat: \nskill: x\nat: garbage\nbash: y`)).toEqual([T0, T0, T0, T0, T0, T0])
 })
 
-test('plan costs add unrounded', () => {
-  const spend = JSON.stringify({ kind: 'commit', ts: '2026-10-31T08:00:00Z', phase: 'plan', sitting: 682, cost: { usd: 0.004 } })
-  const plans = planCosts(ledgerSpends([spend, spend, spend].join('\n')))
-  expect(Math.abs((plans.S682 ?? 0) - 0.012) < 1e-9).toBe(true)
-})
-
 test("you starts at the stop of the ending BLOCKED reads, the sitting's newest", () => {
   const raw = parseStatus(TL_STATUS)
   if (raw === null) throw new Error('status did not parse')
@@ -2033,7 +2071,7 @@ test('a running record whose slot_taken does not parse draws on its slot from it
 
 test("recent's totals put the time and cost under the rows' columns when plan cells show", async ($, on) => {
   const recent = endedOf(PROPOSED_RECENT.slice(0, 3))
-  const { ui } = await mountBoard($, on, recentBoard(recent, { plans: planCosts(ledgerSpends(PLAN_LEDGER)) }))
+  const { ui } = await mountBoard($, on, recentBoard(recent, { plans: PLAN_COSTS }))
   const texts = (await (ui as Ui).findAll({ type: 'Text' })).map(t => t.text ?? '')
   // How many cells follow a figure's last cell in its line.
   const after = (line: string | undefined, figure: string): number => (line === undefined ? -1 : line.length - (line.indexOf(figure) + figure.length))
@@ -2082,6 +2120,8 @@ test('a brief blob that fails to read is asked for again on the next poll', asyn
       if (sha === '5150' && registryReads++ === 0) return out('', 128)
       return sha in blobs ? out(blobs[sha] ?? '') : out('', 128)
     }
+    const printed = printAnswer(e.argv, sha => blobs[sha] ?? null)
+    if (printed !== undefined) return out(printed.stdout, printed.exitCode)
     if (cmd === 'date') return out('-0500')
     if (cmd === 'ps') return out('1\n')
     return out('', 1)
@@ -2105,8 +2145,9 @@ test('a brief blob that fails to read is asked for again on the next poll', asyn
   await second.unmount()
 })
 
-// A brief's header and its cycle headings, as the planner writes them.
+// A brief's header and its cycle headings, as the planner writes them, registered with what --print prints for it.
 const briefText = (sitting: string, epic: string, after: string, cycles: number): string =>
+  briefWith(
   [
     `# ${sitting}`,
     '',
@@ -2117,7 +2158,9 @@ const briefText = (sitting: string, epic: string, after: string, cycles: number)
     '',
     '## The cycles',
     ...Array.from({ length: cycles }, (_, i) => `### Cycle ${i + 1}: c${i + 1}`),
-  ].join('\n')
+  ].join('\n'),
+    { mode: 'autopilot', epic: epic === '' ? null : epic, after: afterSittings(after), cycles },
+  )
 
 // The epics as the artboard draws them: S692 shipped on dashboard/E2 with its
 // brief still listed, S693 running and S694 queued under it, S684 stopped and
@@ -2148,14 +2191,21 @@ const EPIC_BLOBS: Record<string, string> = {
   e901: DASHBOARD_PLAN,
 }
 
-/** What the poll reads from an `ls-tree` and its blobs, for `buildBoard`. */
-const fromTree = (ls: string, blobs: Readonly<Record<string, string>>, raw: Parameters<typeof buildBoard>[0]) =>
-  briefsRead(
-    lsTreeBlobs(ls),
+/** What the poll reads from an `ls-tree` and its blobs, for `buildBoard`: each brief's facts as --print prints them. */
+const fromTree = (ls: string, blobs: Readonly<Record<string, string>>, raw: Parameters<typeof buildBoard>[0]) => {
+  const tree = lsTreeBlobs(ls)
+  const byKey = cycleBlobMap(tree)
+  return briefsRead(
+    tree,
+    k => {
+      const texts = (byKey.get(k) ?? []).map(sha => blobs[sha])
+      return texts.length === 0 || texts.some(t => t === undefined) ? undefined : factsFor(texts as string[])
+    },
     sha => blobs[sha] ?? null,
     raw.running.map(r => r.brief),
     raw.queued.map(r => r.brief),
   )
+}
 
 // Four live runs: $7.70 over 1 cycle, $30 over 2, $10 over 2, and $1 whose commits name no cycle, each its record's `named_cycles`.
 const COST_FILES = (
@@ -2412,6 +2462,8 @@ test('one poll counts every brief, reads epics from sittings.json and the plan, 
       if (sha === 'c7901' && planReads++ === 0) return out('', 128)
       return sha in blobs ? out(blobs[sha] ?? '') : out('', 128)
     }
+    const printed = printAnswer(e.argv, sha => blobs[sha] ?? null)
+    if (printed !== undefined) return out(printed.stdout, printed.exitCode)
     if (cmd === 'stat') return out(String(ledger.length))
     if (cmd === 'sh') return out(ledger.slice(Number(args[3]) - 1, Number(args[3]) - 1 + Number(args[5])))
     if (cmd === 'date') return out('-0500')
@@ -2488,6 +2540,11 @@ async function pollFixture($: any, on: any, status: object, answer: (poll: numbe
       const a = answer(poll - 1, args)
       return a === 'deny' ? { deny: 'spawn failed' } : out(a.stdout, a.exitCode ?? 0)
     }
+    const printed = printAnswer(e.argv, sha => {
+      const a = answer(poll - 1, ['cat-file', 'blob', sha])
+      return a === 'deny' || (a.exitCode ?? 0) !== 0 ? null : a.stdout
+    })
+    if (printed !== undefined) return out(printed.stdout, printed.exitCode)
     if (cmd === 'date') return out('-0500')
     if (cmd === 'ps') return out('1\n')
     return out('', 1)
@@ -2917,3 +2974,121 @@ test('two polls that overlap on one slow --print run it once', async ($, on) => 
   expect(await has(ui, '42m')).toBe(true)
   await ui.unmount()
 })
+
+// ---------- ON DECK and plan costs through the owner ----------
+
+// S780 waits on deck at blob d0d758; S682 shipped, its record by name; the ledger is PLAN_LEDGER.
+const DECK_BLOB = 'd0d758'
+const DECK_LS = `100644 blob ${DECK_BLOB}\tdocs/briefs/kickoff-sitting-s780-deck-brief.md\n`
+const DECK_PRINTED = JSON.stringify({ ...PRINT_BASE, end: null, mode: 'autopilot', epic: null, after: ['S758'], split_from: [], cycles: 3 })
+const LEDGER_PATH = `${HOME}/.claude/token-ledger.jsonl`
+const LEDGER_TEXT = `${PLAN_LEDGER}\n`
+const S682_RUN = 'kickoff-sitting-s682-dom-wait-quiet'
+const deckFiles = (): Record<string, string> => ({
+  [`${LOGS}/status.json`]: JSON.stringify({ version: 1, sources: SOURCES, dispatcher: 1, running: [], queued: [], finished: [] }),
+  [`${LOGS}/${S682_RUN}.progress`]: stampedAt([[NOW - 2 * HOUR, 'slot: 1'], [NOW - HOUR, 'finished: shipped; production is live (run 1). ($22.40, 60 min)']]),
+  [`${SOURCES.log_dir}/${S682_RUN}.run.json`]: recordJson(endOf('shipped; production is live (run 1). ($22.40, 60 min)')),
+  [`${SOURCES.main}/scripts/run-status.mjs`]: '',
+})
+/** Whether argv is the board's piped --print of S780's blob: pipefail, /dev/stdin, the main checkout's owner, the sha. */
+const isDeckPrint = (argv: Argv): boolean =>
+  argv[0] === 'sh' &&
+  (argv[2] ?? '').startsWith('set -o pipefail;') &&
+  (argv[2] ?? '').includes('--print /dev/null /dev/stdin') &&
+  argv[4] === `${SOURCES.main}/scripts/run-status.mjs` &&
+  argv.slice(5).join(' ') === DECK_BLOB
+
+/**
+ * The commands of a poll over deckFiles: the listing, S780's print by `deck`,
+ * the plan costs by `plans` (asked in the main checkout only), and the ledger,
+ * whose `origin/main` sha `sha()` answers.
+ */
+function deckRun(deck: () => RunAnswer | Promise<RunAnswer>, plans: () => RunAnswer, sha: () => string = () => MAIN_SHA) {
+  return (argv: Argv, cwd: string | undefined): RunAnswer | Promise<RunAnswer> => {
+    if (argv[0] === 'git' && argv[1] === 'ls-tree') return { exitCode: 0, stdout: DECK_LS }
+    if (argv[0] === 'git' && argv[1] === 'rev-parse') return { exitCode: 0, stdout: `${sha()}\n` }
+    if (isDeckPrint(argv)) return deck()
+    if (isPlanCosts(argv)) return cwd === SOURCES.main ? plans() : { exitCode: 1, stdout: '' }
+    if (argv[0] === 'stat') return { exitCode: 0, stdout: String(LEDGER_TEXT.length) }
+    if (argv[0] === 'sh' && (argv[2] ?? '').includes('tail -c')) {
+      const from = Number(argv[4]) - 1
+      return { exitCode: 0, stdout: LEDGER_TEXT.slice(from, from + Number(argv[6])) }
+    }
+    return undefined
+  }
+}
+
+test("ON DECK draws what --print prints for a brief's blob, and the plan column what plan-costs.mjs prints", async ($, on) => {
+  const { ui, calls } = await pollPane(
+    $,
+    on,
+    deckFiles(),
+    deckRun(() => ({ exitCode: 0, stdout: DECK_PRINTED }), () => ({ exitCode: 0, stdout: PLAN_COSTS_STDOUT })),
+  )
+  expect(await has(ui, 'ready 1')).toBe(true)
+  expect((await costBox(ui, 'S780 deck-brief')).squares.join('')).toMatch(/^■■■ /)
+  expect(await has(ui, '+$6')).toBe(true)
+  expect(calls.filter(c => isPlanCosts(c.argv)).map(c => c.cwd)).toEqual([SOURCES.main])
+  expect(calls.filter(c => isPlanCosts(c.argv)).map(c => c.argv[2])).toEqual([LEDGER_PATH])
+  await ui.unmount()
+})
+
+for (const [name, answer] of [
+  ['exits 1', { exitCode: 1, stdout: '' }],
+  ['exits 0 with stdout that is no S<n> object', { exitCode: 0, stdout: '{"S682":"6","x":1}' }],
+] as const) {
+  test(`a plan-costs.mjs that ${name} draws no plan cell, and the sparkline still draws`, async ($, on) => {
+    const { ui } = await pollPane($, on, deckFiles(), deckRun(() => ({ exitCode: 0, stdout: DECK_PRINTED }), () => answer))
+    expect(await has(ui, '+$6')).toBe(false)
+    expect(await has(ui, '14d')).toBe(true)
+    await ui.unmount()
+  })
+}
+
+test('plan-costs.mjs runs once per ledger size and origin/main sha, and again on a new sha or after a refusal', async ($, on) => {
+  let sha = MAIN_SHA
+  let refuse = false
+  const { clock, calls } = await pollPane(
+    $,
+    on,
+    deckFiles(),
+    deckRun(
+      () => ({ exitCode: 0, stdout: DECK_PRINTED }),
+      () => (refuse ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: PLAN_COSTS_STDOUT }),
+      () => sha,
+    ),
+  )
+  const asked = () => calls.filter(c => isPlanCosts(c.argv)).length
+  await clock.advance(5000)
+  expect(asked()).toBe(1)
+  sha = 'beef'.padEnd(40, '1')
+  await clock.advance(5000)
+  expect(asked()).toBe(2)
+  refuse = true
+  sha = 'face'.padEnd(40, '2')
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(asked()).toBe(4)
+})
+
+test("ON DECK's --print runs once per blob sha", async ($, on) => {
+  const { clock, calls } = await pollPane($, on, deckFiles(), deckRun(() => ({ exitCode: 0, stdout: DECK_PRINTED }), () => ({ exitCode: 0, stdout: PLAN_COSTS_STDOUT })))
+  await clock.advance(5000)
+  await clock.advance(5000)
+  expect(calls.filter(c => isDeckPrint(c.argv)).length).toBe(1)
+})
+
+for (const [name, deck] of [
+  ['exits 1 with a record on stdout', (): RunAnswer | Promise<RunAnswer> => ({ exitCode: 1, stdout: DECK_PRINTED })],
+  ['rejects', (): RunAnswer | Promise<RunAnswer> => Promise.reject(new Error('spawn failed'))],
+] as const) {
+  test(`an ON DECK --print that ${name} draws the brief unread, and the next poll runs it again`, async ($, on) => {
+    const { ui, clock, calls } = await pollPane($, on, deckFiles(), deckRun(deck, () => ({ exitCode: 0, stdout: PLAN_COSTS_STDOUT })))
+    // An unread brief has no mode yet, so it sits under enrich.
+    expect(await has(ui, 'enrich 1')).toBe(true)
+    expect(await has(ui, 'ready 1')).toBe(false)
+    await ui.unmount()
+    await clock.advance(5000)
+    expect(calls.filter(c => isDeckPrint(c.argv)).length).toBe(2)
+  })
+}

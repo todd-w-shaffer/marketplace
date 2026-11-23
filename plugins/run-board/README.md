@@ -103,9 +103,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   lavender, cycles green with simplify and the xhigh review, ship blue, with a legend in the card head), the cost in
   whole dollars, the plan cost, and how long ago it ended (`14m`, `5h`, `3d`). The split is the record's
   `phase_split` rounded to six cells by largest remainder, so a relaunch's wait counts nowhere; a record with no
-  split draws the grey `⣀` baseline, and the phase medians read its `phase_ms`. The plan cost is dim, `+$6`, from the ledger's `phase: "plan"` commit records that carry the
-  sitting, `+—` when it holds none, bright when it passes the build's cost, and absent when the ledger cannot be
-  read. A run over twice the median draws its time in peach. Under a rule, a totals row reads `10 live in 12h ·
+  split draws the grey `⣀` baseline, and the phase medians read its `phase_ms`. The plan cost is dim, `+$6`, what
+  `scripts/plan-costs.mjs` prints for the sitting, `+—` when it prints none, bright when it passes the build's cost,
+  and absent when the script cannot be read. A run over twice the median draws its time in peach. Under a rule, a totals row reads `10 live in 12h ·
   median 1h04m`: the count of every listed run and the oldest one's age, then the median time, the total time under
   the time column, the total cost, bold, under the cost column, and `+ $81 plan`. The median and the time read only
   runs with minutes; the cost sums the unrounded costs, then rounds,
@@ -166,8 +166,14 @@ missing or malformed, draws only `status.json names no sources`, and one of a ve
 only `status.json is newer than the board`.
 
 For ON DECK, the cycle squares and EPICS it runs `git ls-tree -r origin/main docs/briefs/ docs/plans/` in
-the main checkout and reads each brief, `sittings.json` and each plan with `git cat-file`, once per blob.
-A blob that fails to read gives no count and no title, and is read again on the next poll. It never fetches: a push from any worktree of the checkout
+the main checkout and reads `sittings.json` and each plan with `git cat-file`, once per blob. A brief's mode,
+`Epic:`, `After:`, `Split from:` and cycle count are what the main checkout's `scripts/run-status.mjs` prints for
+it: its blobs, `README.md`'s first, piped into `node scripts/run-status.mjs --print /dev/null /dev/stdin` under
+`set -o pipefail`, once per blob shas and owner mtime. A read that fails draws the brief as one with no mode yet,
+under `enrich`, with no count, and a blob that fails to read gives no title; each is read again on the next poll.
+Each sitting's plan cost is what `node scripts/plan-costs.mjs ~/.claude/token-ledger.jsonl` prints, run in the
+main checkout once per ledger size and `origin/main` sha; when it fails, RECENT draws no plan cell and no plan
+total, and the spend line still draws. It never fetches: a push from any worktree of the checkout
 moves `origin/main`, and a brief pushed from another machine shows after the next fetch.
 
 For the loop it reads `<archloop_log_dir>/.lock/pid`, and lists the newest run directory

@@ -326,33 +326,23 @@ export function lastToolOf(tail: string): string {
 }
 
 /**
- * How many cycles a brief plans: its `### Cycle N` headings or its
- * `**Cycle N` lines, whichever there are more of, as scripts/autopilot.sh
- * counts them.
- */
-export function cycleCount(text: string): number {
-  const lines = text.split('\n')
-  const headings = lines.filter(l => /^### Cycle [0-9]/.test(l)).length
-  const bold = lines.filter(l => /^\*\*Cycle [0-9]/.test(l)).length
-  return Math.max(headings, bold)
-}
-
-/**
- * The blobs that hold each brief's cycles, by brief key, from an `ls-tree -r`
- * listing's blobs, in listing order: a file brief's own blob, or every `.md`
- * file directly in a directory brief, the files scripts/autopilot.sh reads.
+ * The blobs that hold each brief, by brief key, from an `ls-tree -r`
+ * listing's blobs: a file brief's own blob, or every `.md` file directly in a
+ * directory brief, the files scripts/autopilot.sh reads, its `README.md`
+ * first and the rest in listing order, so the brief's header leads.
  */
 export function cycleBlobMap(blobs: readonly TreeBlob[]): Map<string, string[]> {
   const out = new Map<string, string[]>()
-  const add = (key: string, sha: string) => {
+  const add = (key: string, sha: string, isReadme: boolean) => {
     const shas = out.get(key)
     if (shas === undefined) out.set(key, [sha])
+    else if (isReadme) shas.unshift(sha)
     else shas.push(sha)
   }
   for (const { path, sha } of blobs) {
-    add(path, sha)
+    add(path, sha, false)
     const dir = /^(.+)\/[^/]+\.md$/.exec(path)?.[1]
-    if (dir !== undefined) add(dir, sha)
+    if (dir !== undefined) add(dir, sha, path.endsWith('/README.md'))
   }
   return out
 }
@@ -1449,34 +1439,33 @@ export function briefKey(path: string): string {
 }
 
 /**
- * The header lines above a brief's first `## ` heading that the board reads.
- * The mode is `ready` for a brief marked `**Mode: autopilot.**`, `interactive`
- * for one marked `**Mode: interactive.**`, and `enrich` for a brief that carries neither yet. `splitFrom` is
- * the sittings its `Split from:` line names.
+ * A brief's header and cycle count, from the record `--print` printed for its
+ * text. The mode is `ready` for `autopilot`, `interactive` for
+ * `interactive`, and `enrich` for `none`, a brief that carries no mode yet.
  */
-export function briefHeader(text: string): BriefHeader {
-  let epic = ''
-  let after = ''
-  let mode: DeckMode = 'enrich'
-  let splitFrom: string[] = []
-  for (const line of text.split('\n')) {
-    if (line.startsWith('## ')) break
-    const e = /^Epic: (.+)$/.exec(line)
-    if (e) epic = (e[1] ?? '').trim()
-    const a = /^After: (.+)$/.exec(line)
-    if (a) after = (a[1] ?? '').trim()
-    const s = /^Split from: (.+)$/.exec(line)
-    if (s) splitFrom = afterSittings(s[1] ?? '')
-    if (line.includes('**Mode: autopilot.**')) mode = 'ready'
-    if (line.includes(INTERACTIVE)) mode = 'interactive'
-  }
-  return { epic, after, mode, splitFrom }
-}
+export type BriefFacts = { header: BriefHeader; cycles: number }
 
-const INTERACTIVE = '**Mode: interactive.**'
-
-/** A brief's header lines as `briefHeader` reads them. */
+/** A brief's header as the board draws it: `after` is its `After:` sittings joined by `, `. */
 export type BriefHeader = { epic: string; after: string; mode: DeckMode; splitFrom: string[] }
+
+/** The header of a brief whose facts could not be read: no epic, no wait, no mode yet. */
+export const UNREAD_HEADER: BriefHeader = { epic: '', after: '', mode: 'enrich', splitFrom: [] }
+
+const DECK_MODE: Readonly<Record<string, DeckMode>> = { autopilot: 'ready', interactive: 'interactive', none: 'enrich' }
+
+/**
+ * A brief's facts from the record `--print` printed for its text, or null
+ * when the record holds no mode the board knows, as a brief that could not be
+ * read prints `mode: null`.
+ */
+export function briefFacts(record: RunRecord): BriefFacts | null {
+  const mode = record.mode === null || !Object.hasOwn(DECK_MODE, record.mode) ? undefined : DECK_MODE[record.mode]
+  if (mode === undefined) return null
+  return {
+    header: { epic: record.epic ?? '', after: (record.after ?? []).join(', '), mode, splitFrom: record.splitFrom ?? [] },
+    cycles: record.cycles ?? 0,
+  }
+}
 
 /** A brief on `origin/main`: its path and its header, read once. */
 export type HeadedBrief = { path: string; header: BriefHeader }
@@ -1655,49 +1644,40 @@ export type BriefsRead = {
 }
 
 /** The keys whose cycles the board counts: every brief's, and each running brief's. */
-const cycleKeys = (briefs: readonly TreeBlob[], running: readonly string[]): Set<string> =>
+export const cycleKeys = (briefs: readonly TreeBlob[], running: readonly string[]): Set<string> =>
   new Set([...briefs.map(f => briefKey(f.path)), ...running.map(briefKey)])
 
 /**
- * The blob ids `briefsRead` reads from a listing's blobs: every brief, the
- * cycle blobs of every brief and of each running brief, every plan, and the
- * claims registry, each once.
+ * The blob ids `briefsRead` reads the text of: every plan, and the claims
+ * registry, each once. A brief's facts come through `--print`, not its text.
  */
-export function briefsBlobs(blobs: readonly TreeBlob[], running: readonly string[]): string[] {
-  const briefs = briefFiles(blobs)
-  const byKey = cycleBlobMap(blobs)
+export function briefsBlobs(blobs: readonly TreeBlob[]): string[] {
   const registry = sittingsBlob(blobs)
-  return [
-    ...new Set([
-      ...briefs.map(f => f.sha),
-      ...[...cycleKeys(briefs, running)].flatMap(k => byKey.get(k) ?? []),
-      ...planBlobs(blobs).map(p => p.sha),
-      ...(registry === null ? [] : [registry]),
-    ]),
-  ]
+  return [...new Set([...planBlobs(blobs).map(p => p.sha), ...(registry === null ? [] : [registry])])]
 }
 
 /**
- * What a listing's blobs and their texts give the board. `text` answers a
- * blob's text, or null when it could not be read; `running` and `queued` are
- * the briefs the dispatcher holds. A brief whose text could not be read reads
- * as a brief with no header. A key with a cycle blob that could not be read
- * has no count, a plan whose blob could not be read has no titles, and a
- * registry that could not be read holds no claims.
+ * What a listing's blobs give the board. `facts` answers a brief key's
+ * header and cycle count, or undefined when they could not be read; `text`
+ * answers a plan's or the registry's blob text, or null when it could not be
+ * read; `running` and `queued` are the briefs the dispatcher holds. A brief
+ * whose facts could not be read reads as `UNREAD_HEADER` and has no count, a
+ * plan whose blob could not be read has no titles, and a registry that could
+ * not be read holds no claims.
  */
 export function briefsRead(
   blobs: readonly TreeBlob[],
+  facts: (key: string) => BriefFacts | undefined,
   text: (sha: string) => string | null,
   running: readonly string[],
   queued: readonly string[],
 ): BriefsRead {
   const files = briefFiles(blobs)
-  const briefs = files.map(f => ({ path: f.path, header: briefHeader(text(f.sha) ?? '') }))
-  const byKey = cycleBlobMap(blobs)
+  const briefs = files.map(f => ({ path: f.path, header: facts(briefKey(f.path))?.header ?? UNREAD_HEADER }))
   const cycles: Record<string, number> = {}
   for (const k of cycleKeys(files, running)) {
-    const texts = (byKey.get(k) ?? []).map(text)
-    if (texts.length > 0 && texts.every(t => t !== null)) cycles[k] = cycleCount(texts.join('\n'))
+    const read = facts(k)
+    if (read !== undefined) cycles[k] = read.cycles
   }
   const epics: Record<string, string> = {}
   for (const b of briefs) if (b.header.epic !== '') epics[briefKey(b.path)] = b.header.epic
@@ -2594,26 +2574,6 @@ export function ledgerSpends(text: string): Spend[] {
   }
   return out
 }
-
-/**
- * Adds `spends` to `into`, each sitting's plan cost by sitting, and returns
- * it: the commits with `phase: "plan"` that carry that `sitting`, in order. A
- * plan ship carries no sitting of its own, and a session is no commit, so
- * neither counts. Adding a ledger chunk by chunk gives what one pass over the
- * whole ledger gives. The sums stay unrounded: `dollars` rounds once, where a
- * cost or a total is drawn.
- */
-export function addPlanCosts(into: Record<string, number>, spends: readonly Spend[]): Record<string, number> {
-  for (const s of spends) {
-    if (s.kind !== 'commit' || s.phase !== 'plan' || s.sitting === null) continue
-    const key = `S${s.sitting}`
-    into[key] = (into[key] ?? 0) + s.usd
-  }
-  return into
-}
-
-/** Each sitting's plan cost, by sitting, from `spends` alone. */
-export const planCosts = (spends: readonly Spend[]): Record<string, number> => addPlanCosts({}, spends)
 
 /**
  * Spends from one chunk of the ledger, read from where the last chunk
