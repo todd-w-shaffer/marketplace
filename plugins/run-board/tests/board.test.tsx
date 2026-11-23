@@ -1501,6 +1501,22 @@ test("each phase's time comes from the at lines, and a relaunch's wait counts in
   ]
   expect(phaseDurations(stamped(relaunched))).toEqual({ savor: 10 * 60000, 'cycle 1': 30 * 60000, shipping: 10 * 60000 })
   expect(phaseDurations(PHASED.map(([, line]) => line).join('\n'))).toEqual({})
+  // The time from the last cycle's low review to /simplify is no cycle 3: the run named two, and the running card,
+  // which knows the brief's count, books that time to simplify.
+  const twoCycles: [number, string][] = [
+    [0, 'slot: 1'],
+    [10, 'skill: commit-skill:commit S1 cycle 1: a'],
+    [10, 'skill: code-review low a..b'],
+    [35, 'skill: commit-skill:commit S1 cycle 2: b'],
+    [35, 'skill: code-review low b..c'],
+    [50, 'skill: simplify over a..HEAD'],
+    [60, 'finished: shipped; production is live (run 1). ($9.00, 60 min)'],
+  ]
+  expect(phaseDurations(stamped(twoCycles))).toEqual({
+    'cycle 1': 10 * 60000,
+    'cycle 2': 25 * 60000,
+    simplify: 25 * 60000,
+  })
 })
 
 test('the live phase starts at the line that opened it, or at the latest launch when that is later', () => {

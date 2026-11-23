@@ -485,7 +485,8 @@ export function phaseSince(progress: string, cycles?: number): number | null {
 export function phaseDurations(progress: string): Record<string, number> {
   const lines = progress.split('\n')
   const times = lineTimes(progress)
-  const labels = liveLabels(lines)
+  // The cycles the run named, so the time after its last low review is not booked to one more cycle.
+  const labels = liveLabels(lines, namedCycles(progress) || undefined)
   const out: Record<string, number> = {}
   let from: number | null = null
   let label: string | null = null
