@@ -1099,7 +1099,7 @@ test('a handoff question reads both the bare and the addressed label', () => {
 })
 
 // The shape the pane's board atom is stored under; it moves with the Board type.
-const BOARD_SHAPE = 'board-14'
+const BOARD_SHAPE = 'board-15'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>

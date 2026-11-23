@@ -167,7 +167,7 @@ const REPO = 'Desktop/apps/shootsfilm'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-14' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-15' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -1159,7 +1159,7 @@ export const register: Register = on => {
                       <Text color={F.overlay2}> · running</Text>
                     </Text>
                   ) : (
-                    <Text wrap="truncate-end" color={r.kind === 'held' || r.kind === 'block' ? F.yellow : F.overlay2}>
+                    <Text wrap="truncate-end" color={(r.kind === 'held' && r.joint === '') || r.kind === 'block' ? F.yellow : F.overlay2}>
                       {r.note}
                     </Text>
                   ),
