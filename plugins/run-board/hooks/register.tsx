@@ -111,6 +111,11 @@ const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 // Each on-deck group's colour: green can queue now, yellow needs a pass to
 // reach autopilot, red needs a person in the session.
 const DECK_COLOR: Record<DeckMode, string> = { ready: F.green, enrich: F.yellow, interactive: F.red }
+// A Todd node's `◇` and id, by the dispatcher's `next`: yellow when he is up
+// soon, red when he is needed. A value the board does not know draws in text.
+const NEXT_COLOR: Readonly<Record<string, string>> = { waiting: F.text, soon: F.yellow, you: F.red }
+/** The dispatcher's `next` values the board knows; `machine` is the machine's. */
+const KNOWN_NEXT = new Set(['machine', ...Object.keys(NEXT_COLOR)])
 // Each timeline cell's colour: green for a run live or in flight, peach for
 // its projection and the now-line, red for a stop, blue queued, mauve on
 // deck, yellow held, and the idle track faint.
@@ -169,7 +174,7 @@ const LOG_DIR = 'Library/Logs/shootsfilm-autopilot'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-16' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-17' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -1369,16 +1374,20 @@ export const register: Register = on => {
             {!folded('queued') &&
               queueRows.map((r, i) => {
                 const isHeld = r.kind === 'held' || r.kind === 'block' || r.kind === 'hold'
+                // A node whose next is not the machine's is Todd's: a `◇`, which shares its colour with the id.
+                const mine = r.kind !== 'run' && r.next !== 'machine'
+                const mineColor = Object.hasOwn(NEXT_COLOR, r.next) ? (NEXT_COLOR[r.next] ?? F.text) : F.text
+                const note = KNOWN_NEXT.has(r.next) ? r.note : [r.next, r.note].filter(p => p !== '').join(' · ')
                 const lit = r.kind === 'run' ? (b.costs[r.sitting]?.lit ?? 0) : null
                 // A solid joint means the entry needs its parent shipped, a yellow dashed one that the run holds its paths, and a yellow `‖` that a block holds it.
                 return boxedRow(
                   <Text wrap="truncate-end">
                     <Text color={r.kind === 'hold' ? F.yellow : F.overlay0}>{r.rails}</Text>
                     <Text color={r.kind === 'hold' || r.kind === 'held' ? F.yellow : r.kind === 'after' ? F.blue : F.surface2}>{r.joint}</Text>
-                    <Text color={r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
-                      {r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
+                    <Text color={mine ? mineColor : r.kind === 'run' ? F.peach : r.kind === 'block' || r.kind === 'hold' ? F.yellow : F.blue}>
+                      {mine ? '◇' : r.kind === 'run' ? '●' : r.kind === 'block' || r.kind === 'hold' ? '‖' : '○'}{' '}
                     </Text>
-                    <Text bold color={r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
+                    <Text bold color={mine ? mineColor : r.kind === 'block' ? F.yellow : F.text}>{r.sitting}</Text>
                     {r.slug !== '' && <Text color={r.kind === 'block' ? F.yellow : F.subtext0}> {r.slug}</Text>}
                     {(b.splits[r.sitting] ?? 0) > 0 && <Text color={F.overlay0}>{` split ×${b.splits[r.sitting] ?? 0}`}</Text>}
                   </Text>,
@@ -1389,7 +1398,7 @@ export const register: Register = on => {
                     </Text>
                   ) : (
                     <Text wrap="truncate-end" color={(r.kind === 'held' && r.joint === '') || r.kind === 'block' ? F.yellow : F.overlay2}>
-                      {r.note}
+                      {note}
                     </Text>
                   ),
                   costBox(r.sitting, isHeld ? F.yellow : F.blue, isHeld, lit),

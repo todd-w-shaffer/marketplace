@@ -40,6 +40,12 @@ export type Waiting = {
   reason: string
   /** The sittings on the brief's `After:` line on `origin/main`, shipped or not. */
   after: string[]
+  /** Who moves the entry next, as the dispatcher writes it: `machine`, `waiting`, `soon`, `you`, or a value the board does not know. */
+  next: string
+  /** `autopilot` or `interactive`, as the dispatcher read the brief's header, or empty. */
+  mode: string
+  /** The kind a stopped node stopped with, or null on any other entry. */
+  stop: string | null
 }
 
 export type Done = {
@@ -95,7 +101,7 @@ export type StripCell = { stage: Stage; state: 'done' | 'broke' | 'todo' | 'skip
  * A brief a root cause holds. `parent` is the sitting it hangs under: the root, or another hold.
  * `after` is every sitting on its `After:` line.
  */
-export type Held = { sitting: string; slug: string; parent: string; after: string[] }
+export type Held = { sitting: string; slug: string; parent: string; after: string[]; /** Its queued record's `next`, or `machine`. */ next: string }
 
 /** One root cause on the BLOCKED card. */
 export type Block = {
@@ -114,6 +120,8 @@ export type Block = {
   plan: PlanCost
   /** How many times the sitting launched, from its `.launches` file, or null without one. */
   launches: number | null
+  /** The stopped node's `next` when the root is one, else null. */
+  nodeNext: string | null
 }
 
 /** Each foldable card, by the hotkey its header answers. */

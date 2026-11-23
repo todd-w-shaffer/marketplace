@@ -71,8 +71,14 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   in yellow. After the free
   roots comes each block that holds a chain, in BLOCKED's order: the stuck sitting in yellow, `‖ S684
   home-gallery-sections  blocked ↑ · holds 8`, and under it every brief it holds on a yellow `‖`, queued or not,
-  each under the sitting on its `After:` line that sits deepest in the block. A held entry draws only there. The
-  card draws when something is queued or a block holds something. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
+  each under the sitting on its `After:` line that sits deepest in the block. A held entry draws only there.
+  A row is Todd's when status.json's `next` for it is not `machine`: it draws `◇` in place of `○` or `‖`, and
+  the `◇` and the id share one colour, text for `waiting`, yellow for `soon`, red for `you`. A `next` the board
+  does not know draws a text `◇` whose note leads with the value as written; a record with no `next` is the
+  machine's. Rails and joints keep their colours, so a held chain stays yellow under a `◇`. A stopped node (a
+  queued record with a `stop`) is a block whose kind is its `stop`, and its row is a red `◇` that reads
+  `blocked ↑`, with ` · holds N` when it holds something; it draws once, as that block. A `needs` cause holds
+  nothing. The card draws when something is queued or a block holds something. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
   A queue row whose brief was split reads `split ×2`: the briefs on `origin/main` whose `Split from:` line names it,
   and the archived claims in `docs/briefs/sittings.json` whose `split_from` list does, each child once.
   Each queue and on-deck row ends in a box pinned to its right edge: a square per cycle the brief plans, or a dim

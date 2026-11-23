@@ -5,7 +5,7 @@ import type { BarTone, Block, BlockKind, Board, BriefCost, Deck, DeckMode, Done,
 export type RawStatus = {
   dispatcher: number | null
   running: ({ entry: number; brief: string; lane: string; pid: number | null; started: string; cost: number; runRecord?: string } & SlotFields)[]
-  queued: { entry: number; brief: string; lane: string; reason: string; cause?: Cause | null }[]
+  queued: { entry: number; brief: string; lane: string; reason: string; cause?: Cause | null; next?: string; mode?: string; stop?: string | null }[]
   finished: ({ entry: number; brief: string; lane: string; status: number; outcome: string; kind: string | null } & SlotFields)[]
 }
 
@@ -37,9 +37,11 @@ function parseSlot(r: Record<string, unknown>): SlotFields {
 /**
  * The root cause the dispatcher says holds a queued entry back: a red deploy
  * by its run, or a sitting that stopped, with that stop's kind. `sitting` is
- * `S625` for an `After:` sitting and the run name for an `--after` brief.
+ * `S625` for an `After:` sitting and the run name for an `--after` brief. A
+ * `needs` cause is a Worker secret Todd sets, named by `missing`; it holds
+ * nothing on the board.
  */
-export type Cause = { kind: 'deploy-red'; run: number } | { kind: string; sitting: string }
+export type Cause = { kind: 'deploy-red'; run: number } | { kind: 'needs'; missing: string } | { kind: string; sitting: string }
 
 /**
  * A queued entry's `cause`: undefined when the record has no such key, as a
@@ -53,6 +55,7 @@ function parseCause(q: Record<string, unknown>): Cause | null | undefined {
   const r = c as Record<string, unknown>
   const run = num(r.run)
   if (r.kind === 'deploy-red' && run !== null) return { kind: 'deploy-red', run }
+  if (r.kind === 'needs') return typeof r.missing === 'string' && r.missing !== '' ? { kind: 'needs', missing: r.missing } : null
   if (typeof r.kind === 'string' && typeof r.sitting === 'string' && r.sitting !== '') return { kind: r.kind, sitting: r.sitting }
   return null
 }
@@ -107,6 +110,10 @@ function statusFields(d: Record<string, unknown>): RawStatus {
       lane: str(q.lane),
       reason: str(q.reason),
       cause: parseCause(q),
+      // An older dispatcher writes no `next`, and every record it writes is the machine's.
+      next: typeof q.next === 'string' && q.next !== '' ? q.next : 'machine',
+      mode: str(q.mode),
+      stop: typeof q.stop === 'string' && q.stop !== '' ? q.stop : null,
     })),
     finished: list(d.finished).map(f => ({
       entry: num(f.entry) ?? 0,
@@ -900,6 +907,9 @@ export function buildBoard(
     lane: q.lane,
     reason: q.reason,
     after: afters[briefKey(q.brief)] ?? [],
+    next: q.next ?? 'machine',
+    mode: q.mode ?? '',
+    stop: q.stop ?? null,
   }))
   // Each brief's cycles and cost: a brief on main, and each running or queued one.
   const perCycle = costPerCycle(recent)
@@ -1196,7 +1206,7 @@ export function timelineOf(input: {
 
   // What BLOCKED holds and what a cause holds, each once.
   const held = new Set<string>(blocks.flatMap(k => k.holds.map(h => h.sitting)))
-  for (const q of raw.queued) if (q.cause != null) held.add(sittingOf(q.brief).sitting)
+  for (const q of raw.queued) if (q.cause != null && q.cause.kind !== 'needs') held.add(sittingOf(q.brief).sitting)
 
   if (medianMs !== null) {
     const free = new Map(slots.map(k => [k, now]))
@@ -1244,9 +1254,10 @@ export function timelineOf(input: {
   }
   const stops = blocks
     .filter(k => k.kind === 'decision')
-    .map(k => {
+    // A stopped node with no ending has no finish to draw from.
+    .flatMap(k => {
       const e = endingOf.get(k.sitting)
-      return { sitting: k.sitting, sinceMs: (e === undefined ? null : finishedAt(e.text)) ?? k.endedMs }
+      return e === undefined && k.nodeNext !== null ? [] : [{ sitting: k.sitting, sinceMs: (e === undefined ? null : finishedAt(e.text)) ?? k.endedMs }]
     })
     .sort((a, b) => a.sinceMs - b.sinceMs)
   const oldest = stops[0]
@@ -1741,9 +1752,11 @@ export type TreeRow = {
   lane: string
   /**
    * At an `after` or `hold` row, `after S396`: the waits the tree does not draw. At a free root, the
-   * dispatcher's reason; at a held root, the held tag; at a held entry under its run, as at `after`; at a block, `blocked ↑ · holds N`; at a running root, empty.
+   * dispatcher's reason; at a held root, the held tag; at a held entry under its run, as at `after`; at a block, `blocked ↑`, then ` · holds N` when it holds something; at a running root, empty.
    */
   note: string
+  /** Who moves the row next: the entry's `next`, a block's node's, or `machine` for a run and a block with no node. */
+  next: string
 }
 
 /**
@@ -1772,11 +1785,13 @@ export type TreeRow = {
 export function queueTree(
   running: readonly Pick<Run, 'sitting' | 'slug' | 'lane'>[],
   queued: readonly Waiting[],
-  blocks: readonly Pick<Block, 'sitting' | 'slug' | 'holds'>[],
+  blocks: readonly (Pick<Block, 'sitting' | 'slug' | 'holds'> & { nodeNext?: string | null })[],
 ): TreeRow[] {
   const runs = new Set(running.map(r => r.sitting))
   const held = new Set(blocks.flatMap(k => k.holds.map(h => h.sitting)))
-  const byEntry = [...queued].sort((a, b) => a.entry - b.entry).filter(q => !held.has(q.sitting))
+  // A stopped node is queued and a block root, and draws once, as its block.
+  const roots = new Set(blocks.map(k => k.sitting))
+  const byEntry = [...queued].sort((a, b) => a.entry - b.entry).filter(q => !held.has(q.sitting) && !roots.has(q.sitting))
   const waiting = new Map(byEntry.map(q => [q.sitting, q]))
   // A board stored by an older version of the mod has no `after`.
   const needs = (q: Waiting): string[] => (q.after ?? []).filter(s => s !== q.sitting && (runs.has(s) || waiting.has(s)))
@@ -1831,13 +1846,14 @@ export function queueTree(
       slug: q.slug,
       lane: q.lane,
       note: others(q.after ?? [], q.sitting, parent.get(q.sitting) ?? null),
+      next: q.next ?? 'machine',
     })
     branch(q.sitting, rails + (isLast ? '  ' : '│ '))
   }
 
   for (const r of running) {
     if (kids(r.sitting).length === 0) continue
-    rows.push({ rails: '', joint: '', kind: 'run', sitting: r.sitting, slug: r.slug, lane: r.lane, note: '' })
+    rows.push({ rails: '', joint: '', kind: 'run', sitting: r.sitting, slug: r.slug, lane: r.lane, note: '', next: 'machine' })
     branch(r.sitting, '')
   }
   // What hangs under no run: an entry that names nothing running, or a ring of
@@ -1846,17 +1862,20 @@ export function queueTree(
     if (drawn.has(q.sitting)) continue
     drawn.add(q.sitting)
     const tag = heldNote(q.reason)
-    rows.push({ rails: '', joint: '', kind: tag === null ? 'free' : 'held', sitting: q.sitting, slug: q.slug, lane: q.lane, note: tag ?? q.reason })
+    rows.push({ rails: '', joint: '', kind: tag === null ? 'free' : 'held', sitting: q.sitting, slug: q.slug, lane: q.lane, note: tag ?? q.reason, next: q.next ?? 'machine' })
     branch(q.sitting, '')
   }
   for (const k of blocks) {
-    if (k.holds.length === 0) continue
-    rows.push({ rails: '', joint: '', kind: 'block', sitting: k.sitting, slug: k.slug, lane: '', note: `blocked ↑ · holds ${k.holds.length}` })
+    // A stopped node is Todd's, so it draws with no holds too.
+    const node = k.nodeNext ?? null
+    if (k.holds.length === 0 && node === null) continue
+    const note = k.holds.length === 0 ? 'blocked ↑' : `blocked ↑ · holds ${k.holds.length}`
+    rows.push({ rails: '', joint: '', kind: 'block', sitting: k.sitting, slug: k.slug, lane: '', note, next: node ?? 'machine' })
     const holdBranch = (p: string, rails: string) => {
       const ks = k.holds.filter(h => h.parent === p)
       ks.forEach((h, i) => {
         const isLast = i === ks.length - 1
-        rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', note: others(h.after, h.sitting, h.parent) })
+        rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', note: others(h.after, h.sitting, h.parent), next: h.next ?? 'machine' })
         holdBranch(h.sitting, rails + (isLast ? '  ' : '│ '))
       })
     }
@@ -2212,7 +2231,8 @@ export function blockedOf(input: {
   const statusKind = new Map<string, string | null>()
   for (const f of [...raw.finished].sort((a, b) => a.entry - b.entry)) statusKind.set(baseName(f.brief), f.kind)
 
-  type Info = { slug: string; base: string; text: string; mtimeMs: number; end: RecordEnd; launches: number; kind: BlockKind }
+  // `end` is absent for a stopped node with no ending, whose face reads `reason`.
+  type Info = { slug: string; base: string; text: string; mtimeMs: number; end?: RecordEnd; reason?: string; launches: number; kind: BlockKind; nodeNext: string | null }
   const ends = new Map<string, Info>()
   let newestLive = Number.NEGATIVE_INFINITY
   for (const e of endings) {
@@ -2227,23 +2247,32 @@ export function blockedOf(input: {
     if (known !== undefined && known.mtimeMs >= e.mtimeMs) continue
     // status.json's kind when it is not null, else the record's.
     const kind = blockKind(statusKind.get(e.base) ?? end.kind ?? '')
-    ends.set(sitting, { slug, base: e.base, text: e.text, mtimeMs: e.mtimeMs, end, launches: e.record.launches, kind })
+    ends.set(sitting, { slug, base: e.base, text: e.text, mtimeMs: e.mtimeMs, end, launches: e.record.launches, kind, nodeNext: null })
   }
   const stuck = new Map<string, Info>()
   for (const [s, i] of ends) {
-    if (running.has(s) || queued.has(s)) continue
+    if (running.has(s) || queued.has(s) || i.end === undefined) continue
     const run = deployRunOf(i.end)
     const redDeploy = i.mtimeMs > newestLive && deployStages[run] !== DEPLOY_LIVE && !supersededBy(run, liveDeploy)
     if (i.kind === 'deploy-red' ? redDeploy : onMain.has(s)) stuck.set(s, i)
   }
+  // A stopped node is stuck whatever main and the deploy say. Its kind is its
+  // `stop`, never an older ending's.
+  for (const q of raw.queued) {
+    if (q.stop == null) continue
+    const { sitting, slug } = sittingOf(q.brief)
+    const e = ends.get(sitting)
+    const node = { slug, reason: q.reason, kind: blockKind(q.stop), nodeNext: q.next ?? 'you' }
+    stuck.set(sitting, e === undefined ? { ...node, base: baseName(q.brief), text: '', mtimeMs: 0, launches: 0 } : { ...e, ...node })
+  }
 
   // A root is a stuck sitting, or `run N` for a red deploy no stuck sitting names.
-  const rootOfCause = (c: Cause): string => {
+  const rootOfCause = (c: Cause): string | null => {
     if ('run' in c) {
-      for (const [s, i] of stuck) if (i.kind === 'deploy-red' && deployRunOf(i.end) === String(c.run)) return s
+      for (const [s, i] of stuck) if (i.kind === 'deploy-red' && i.end !== undefined && deployRunOf(i.end) === String(c.run)) return s
       return `run ${c.run}`
     }
-    return sittingOf(c.sitting).sitting
+    return 'missing' in c ? null : sittingOf(c.sitting).sitting
   }
   const afterOf = (s: string): string[] => afters[onMain.get(s) ?? ''] ?? []
   const held = new Map<string, string | null>()
@@ -2284,9 +2313,10 @@ export function blockedOf(input: {
       ...h,
       slug: slugOf.get(h.sitting) ?? stuck.get(h.sitting)?.slug ?? '',
       after: afterOf(h.sitting),
+      next: queued.get(h.sitting)?.next ?? 'machine',
     }))
     const history = { plan: planOf(plans, root), launches: info === undefined || info.launches <= 0 ? null : info.launches }
-    blocks.push({ ...blockFace(root, info, kind, holds, handoffs, deployStages), ...history })
+    blocks.push({ ...blockFace(root, info, kind, holds, handoffs, deployStages), ...history, nodeNext: info?.nodeNext ?? null })
   }
   blocks.sort((a, b) => b.holds.length - a.holds.length || b.endedMs - a.endedMs)
   const drawn = new Set<string>()
@@ -2371,17 +2401,17 @@ export function chainLine(k: Pick<Block, 'holds'>): { count: string; chain: stri
 /** A block's words by kind: its headline, the line of why, the strip and the next line. */
 function blockFace(
   root: string,
-  info: { slug: string; base: string; text: string; mtimeMs: number; end: RecordEnd } | undefined,
+  info: { slug: string; base: string; text: string; mtimeMs: number; end?: RecordEnd; reason?: string } | undefined,
   kind: BlockKind,
   holds: Held[],
   handoffs: Readonly<Record<string, string>>,
   deployStages: Readonly<Record<string, string>>,
-): Omit<Block, 'plan' | 'launches'> {
-  const outcome = info?.end.text ?? ''
+): Omit<Block, 'plan' | 'launches' | 'nodeNext'> {
+  const outcome = info?.end?.text ?? info?.reason ?? ''
   const totals = TOTALS.exec(outcome)
   const sentence = totals === null ? outcome : outcome.slice(0, totals.index)
   const spent = totals === null ? [] : [hoursMinutes(Number(totals[2])), `$${totals[1] ?? ''}`]
-  const run = (info === undefined ? '' : deployRunOf(info.end)) || (root.startsWith('run ') ? root.slice('run '.length) : '')
+  const run = (info?.end === undefined ? '' : deployRunOf(info.end)) || (root.startsWith('run ') ? root.slice('run '.length) : '')
   const handoff = info === undefined ? '' : (handoffs[info.base] ?? '')
   const strip = info === undefined ? [] : stripOf(info.text, kind, deployStages[run] ?? '')
   const broke = strip.find(p => p.state === 'broke')?.stage

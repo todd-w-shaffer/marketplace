@@ -879,7 +879,7 @@ const RUNNING = [
   { sitting: 'S403', slug: 'dashboard-groups', lane: 'epic' },
   { sitting: 'S396', slug: 'prune-test-overlaps', lane: 'fix' },
 ]
-const waits = (entry: number, sitting: string, lane: string, after: string[], reason = '') => ({ entry, sitting, slug: sitting.toLowerCase(), lane, reason, after })
+const waits = (entry: number, sitting: string, lane: string, after: string[], reason = '') => ({ entry, sitting, slug: sitting.toLowerCase(), lane, reason, after, next: 'machine', mode: 'autopilot', stop: null })
 const drawn = (rows: ReturnType<typeof queueTree>) => rows.map(r => `${r.rails}${r.joint}${r.sitting} ${r.note}`.trimEnd())
 
 test('the queue draws as a tree: each entry under what it needs, and one that needs nothing in the tree is a root', async () => {
@@ -1062,8 +1062,8 @@ test("S625's decision stop is one block that holds S626 and S627, which leave on
   expect(k.strip.map(c => `${c.stage}:${c.state}`)).toEqual(['savor:broke', 'cycles:todo', 'push:todo', 'staging:todo', 'prod:todo'])
   // The refused S626 is a hold, never a root of its own.
   expect(k.holds).toEqual([
-    { sitting: 'S626', slug: 'gallery-arrange-page', parent: 'S625', after: ['S625'] },
-    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'] },
+    { sitting: 'S626', slug: 'gallery-arrange-page', parent: 'S625', after: ['S625'], next: 'machine' },
+    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'], next: 'machine' },
   ])
   expect(k.next).toBe('answer in the handoff, then relaunch S625')
   expect(b.onDeck.map(d => d.sitting)).toEqual(['S640'])
@@ -1191,7 +1191,7 @@ test('a handoff question reads both the bare and the addressed label', () => {
 })
 
 // The shape the pane's board atom is stored under; it moves with the Board type.
-const BOARD_SHAPE = 'board-16'
+const BOARD_SHAPE = 'board-17'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>
@@ -3191,5 +3191,128 @@ test("ON DECK pipes a directory brief's blobs with a newline between them", asyn
     return undefined
   })
   expect(await has(ui, 'ready 1')).toBe(true)
+  await ui.unmount()
+})
+
+// The queued records `write_status` in shootsfilm's scripts/dispatch.sh writes. The machine, waiting and
+// soon records are its output under `./scripts/vt.sh test/scripts/dispatch-contract.test.mjs -t 'queues
+// waiting behind its queued After'`, with status.json's queued list logged after the row's `machine` and
+// `soon` assertions; each brief path names a sitting in place of the fixture's `kickoff-i.md`.
+const NEXT_MACHINE = { entry: 1, brief: `${BRIEFS}s901-x.md`, lane: '', reason: 'a free slot', cause: { kind: 'slot' }, early: null, next: 'machine', mode: 'autopilot', stop: null }
+const NEXT_WAITING = { entry: 2, brief: `${BRIEFS}s902-i.md`, lane: '', reason: 'S901', cause: { kind: 'after', waits_on: 'S901' }, early: null, next: 'waiting', mode: 'interactive', stop: null }
+const NEXT_SOON = { entry: 3, brief: `${BRIEFS}s903-j.md`, lane: '', reason: 'S901', cause: { kind: 'after', waits_on: 'S901' }, early: null, next: 'soon', mode: 'interactive', stop: null }
+// An interactive entry that nothing holds, as the same file's `next_of` rows assert it: `{ next: 'you', reason: '' }`.
+const NEXT_YOU = { entry: 4, brief: `${BRIEFS}s904-k.md`, lane: '', reason: '', cause: null, early: null, next: 'you', mode: 'interactive', stop: null }
+// A stopped node, from `jq -c '.queued[] | select(.stop != null)' ~/Library/Logs/shootsfilm-autopilot/status.json`.
+const S769_RUN = 'kickoff-sitting-s769-red-deploy-fix'
+const NODE = {
+  entry: 460,
+  brief: `docs/briefs/${S769_RUN}.md`,
+  lane: '',
+  reason: `autopilot: ${S769_RUN} started 14:39; follow it with scripts/autopilot.sh --watch docs/briefs/${S769_RUN}.md`,
+  cause: null,
+  early: null,
+  next: 'you',
+  mode: 'autopilot',
+  stop: 'run-broke',
+}
+const NEXT_AFTERS = { [`${BRIEFS}s901-x.md`]: [], [`${BRIEFS}s902-i.md`]: ['S901'], [`${BRIEFS}s903-j.md`]: ['S901'], [`${BRIEFS}s904-k.md`]: [], [`docs/briefs/${S769_RUN}.md`]: [] }
+const nextStatus = (queued: object[], finished: object[] = []) => parseStatus(JSON.stringify({ dispatcher: 1, running: [], queued, finished })) as NonNullable<ReturnType<typeof parseStatus>>
+const RED = '#ed8796'
+const TEXT = '#cad3f5'
+
+/**
+ * Each queue row drawn for `sitting`: its glyph and the colours of its glyph
+ * span and its id span. A row's glyph span sits just before its id span, so a
+ * bar or a card that also names the sitting is not read.
+ */
+async function rowMarks(ui: Ui, sitting: string): Promise<{ glyph: string; glyphColor: string; idColor: string }[]> {
+  const ts = await ui.findAll({ type: 'Text' })
+  const out: { glyph: string; glyphColor: string; idColor: string }[] = []
+  for (let i = 1; i < ts.length; i++) {
+    const g = ts[i - 1]?.text ?? ''
+    if (ts[i]?.text === sitting && /^[●○‖◇] $/.test(g)) out.push({ glyph: g.trim(), glyphColor: ts[i - 1]?.props?.color ?? '', idColor: ts[i]?.props?.color ?? '' })
+  }
+  return out
+}
+
+test("a Todd node draws ◇, its id and its ◇ in the colour of its next, and the machine's draws ○", async ($, on) => {
+  const b = buildBoard(nextStatus([NEXT_MACHINE, NEXT_WAITING, NEXT_SOON, NEXT_YOU]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(drawn(queueTree(b.running, b.queued, b.blocked))).toEqual(['S901 a free slot', '├─S902', '└─S903', 'S904'])
+  const { ui } = await mountBoard($, on, b)
+  expect(await rowMarks(ui, 'S901')).toEqual([{ glyph: '○', glyphColor: BLUE, idColor: TEXT }])
+  expect(await rowMarks(ui, 'S902')).toEqual([{ glyph: '◇', glyphColor: TEXT, idColor: TEXT }])
+  expect(await rowMarks(ui, 'S903')).toEqual([{ glyph: '◇', glyphColor: YELLOW, idColor: YELLOW }])
+  expect(await rowMarks(ui, 'S904')).toEqual([{ glyph: '◇', glyphColor: RED, idColor: RED }])
+  await ui.unmount()
+})
+
+test('a stopped node is a BLOCKED card and one red ◇ root that reads blocked ↑, with no holds', async ($, on) => {
+  const b = buildBoard(nextStatus([NODE]), new Set([1]), NOW, {
+    afters: NEXT_AFTERS,
+    endings: [ending(S769_RUN, NOW - 10 * MIN, endOf('autopilot: the run broke. ($4.00, 20 min)', 'run-broke'))],
+  })
+  expect(b.blocked.map(k => [k.sitting, k.kind, k.holds.length, k.nodeNext])).toEqual([['S769', 'run-broke', 0, 'you']])
+  const rows = queueTree(b.running, b.queued, b.blocked)
+  expect(rows.filter(r => r.sitting === 'S769').map(r => [r.kind, r.note])).toEqual([['block', 'blocked ↑']])
+  const { ui } = await mountBoard($, on, b)
+  expect(await has(ui, 'S769: the run broke')).toBe(true)
+  expect(await rowMarks(ui, 'S769')).toEqual([{ glyph: '◇', glyphColor: RED, idColor: RED }])
+  await ui.unmount()
+})
+
+test("a stopped node blocks as its stop, with no ending and over an older decision's ending", () => {
+  const bare = buildBoard(nextStatus([NODE]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(bare.blocked.map(k => [k.sitting, k.kind, k.why])).toEqual([['S769', 'run-broke', NODE.reason]])
+  const older = buildBoard(nextStatus([NODE], [{ entry: 400, brief: NODE.brief, lane: '', status: 1, outcome: 'stopped', kind: 'decision' }]), new Set([1]), NOW, {
+    afters: NEXT_AFTERS,
+    endings: [ending(S769_RUN, NOW - 600 * MIN, endOf('stopped: the brief is still in docs/briefs. Read the handoff. ($2.00, 9 min)', 'decision'))],
+  })
+  expect(older.blocked.map(k => [k.sitting, k.kind])).toEqual([['S769', 'run-broke']])
+})
+
+test("a stop the board does not know blocks as run-broke and reads the node's reason as written", () => {
+  const b = buildBoard(nextStatus([{ ...NODE, stop: 'paused' }]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(b.blocked.map(k => [k.kind, k.why])).toEqual([['run-broke', NODE.reason]])
+})
+
+test('a decision node with no ending draws no ? bar on the timeline', () => {
+  const b = buildBoard(nextStatus([{ ...NODE, stop: 'decision' }]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(b.blocked.map(k => k.kind)).toEqual(['decision'])
+  expect(b.timeline.you).toBeNull()
+})
+
+test('a queued next and stop that is null, a number or empty read as machine and null', () => {
+  for (const v of [null, 7, '']) {
+    const raw = parseStatus(JSON.stringify({ dispatcher: 1, running: [], queued: [{ ...NEXT_WAITING, next: v, stop: v }], finished: [] }))
+    expect([raw?.queued[0]?.next, raw?.queued[0]?.stop]).toEqual(['machine', null])
+  }
+  const raw = parseStatus(JSON.stringify({ dispatcher: 1, running: [], queued: [NODE], finished: [] }))
+  expect([raw?.queued[0]?.next, raw?.queued[0]?.mode, raw?.queued[0]?.stop]).toEqual(['you', 'autopilot', 'run-broke'])
+})
+
+test('a needs cause parses with its missing text, and one with no missing reads as null', () => {
+  const needs = { kind: 'needs', missing: 'needs the Worker secret RESEND_KEY' }
+  const raw = parseStatus(JSON.stringify({ dispatcher: 1, running: [], queued: [{ ...NEXT_YOU, cause: needs }, { ...NEXT_WAITING, cause: { kind: 'needs' } }], finished: [] }))
+  expect(raw?.queued.map(q => q.cause)).toEqual([needs, null])
+})
+
+const nextFiles = (queued: object[]): Record<string, string> => ({ [`${LOGS}/status.json`]: JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued, finished: [] }) })
+
+test('a polled record with no next draws ○, and one whose next the board does not know draws ◇ noted with it', async ($, on) => {
+  const { next: _, ...noNext } = NEXT_MACHINE
+  const { ui } = await pollPane($, on, nextFiles([noNext, { ...NEXT_YOU, next: 'review' }]))
+  expect(await rowMarks(ui, 'S901')).toEqual([{ glyph: '○', glyphColor: BLUE, idColor: TEXT }])
+  expect(await rowMarks(ui, 'S904')).toEqual([{ glyph: '◇', glyphColor: TEXT, idColor: TEXT }])
+  expect(await has(ui, 'review')).toBe(true)
+  await ui.unmount()
+})
+
+test('a polled needs cause holds nothing in BLOCKED and is not counted held on the timeline', async ($, on) => {
+  const needs = { ...NEXT_YOU, reason: 'needs the Worker secret RESEND_KEY', cause: { kind: 'needs', missing: 'needs the Worker secret RESEND_KEY' } }
+  const { ui } = await pollPane($, on, nextFiles([needs]))
+  expect(await has(ui, 'blocked')).toBe(false)
+  expect(await has(ui, ' held')).toBe(false)
+  expect(await rowMarks(ui, 'S904')).toEqual([{ glyph: '◇', glyphColor: RED, idColor: RED }])
   await ui.unmount()
 })
