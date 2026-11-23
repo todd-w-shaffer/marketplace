@@ -103,19 +103,7 @@ function sandbox(t) {
 
     // A bare remote with one commit on main, and a clone tracking it.
     repo(name = 'work') {
-      const remote = path.join(root, 'remote.git');
-      if (!fs.existsSync(remote)) {
-        sb.git(root, 'init', '-q', '--bare', '-b', 'main', remote);
-        const seed = path.join(root, 'seed');
-        sb.git(root, 'clone', '-q', remote, seed);
-        fs.writeFileSync(path.join(seed, 'README'), 'seed\n');
-        sb.git(seed, 'add', '.');
-        sb.git(seed, 'commit', '-q', '-m', 'seed');
-        sb.git(seed, 'push', '-q', 'origin', 'HEAD:main');
-      }
-      const dir = path.join(root, name);
-      sb.git(root, 'clone', '-q', remote, dir);
-      return dir;
+      return base.clone(name);
     },
 
     // Writes a file and commits it by hand, as /commit does before it tallies.

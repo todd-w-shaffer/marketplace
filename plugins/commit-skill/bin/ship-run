@@ -70,8 +70,13 @@ function gitOut(args) {
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
-function tail(text, n = TAIL) {
-  return text.trimEnd().split('\n').slice(-n).join('\n');
+/** A process's stdout then stderr, as one text. */
+function outputOf(r) {
+  return `${r.stdout || ''}${r.stderr || ''}`;
+}
+
+function tail(text) {
+  return text.trimEnd().split('\n').slice(-TAIL).join('\n');
 }
 
 function sleep(ms) {
@@ -126,7 +131,7 @@ function fetch(remote) {
     if (attempt) sleep(BACKOFF_MS * attempt);
     const r = git(['fetch', '-q', remote]);
     if (r.status === 0) return null;
-    out = `${r.stdout}${r.stderr}`;
+    out = outputOf(r);
     if (!TRANSPORT_LINE.test(out)) return out;
   }
   return out;
@@ -153,15 +158,15 @@ function commitsOf(args) {
   if (!out) return [];
   return out.split('\n').map((l) => {
     const i = l.indexOf(' ');
-    return i < 0 ? { sha: l, subject: '' } : { sha: l.slice(0, i), subject: l.slice(i + 1) };
+    return { sha: l.slice(0, i), subject: l.slice(i + 1) };
   });
 }
 
 /** The target and how to push to it, or `{error}`. */
-function findTarget(branch, toDefault) {
+function findTarget(branch, upstreamRemote, toDefault) {
   const upstream = gitOut(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
   if (upstream) {
-    const remote = gitOut(['config', `branch.${branch}.remote`]) || 'origin';
+    const remote = upstreamRemote;
     const merge = (gitOut(['config', `branch.${branch}.merge`]) || `refs/heads/${branch}`).replace(/^refs\/heads\//, '');
     return { kind: 'upstream', remote, ref: upstream, branch: merge };
   }
@@ -191,7 +196,7 @@ function isAncestor(a, b) {
 function pullRebase(t, gitDir) {
   const r = git(['pull', '--rebase', '-q', t.remote, t.branch]);
   if (r.status === 0 && !r.signal) return null;
-  const output = `${r.stdout || ''}${r.stderr || ''}`;
+  const output = outputOf(r);
   if (rebaseInProgress(gitDir)) {
     const conflicts = gitOut(['diff', '--name-only', '--diff-filter=U']) || '';
     git(['rebase', '--abort']);
@@ -207,15 +212,15 @@ function pushOnce(t, s, env) {
   const refspec = `HEAD:${t.branch}`;
   if (s['push:checked']) {
     const r = runNpm('push:checked', [t.remote, refspec]);
-    return { status: r.status, output: `${r.stdout || ''}${r.stderr || ''}`, checked: true };
+    return { status: r.status, output: outputOf(r), checked: true };
   }
   if (s['check:push']) {
     const c = runNpm('check:push');
-    if (c.status !== 0) return { status: c.status, output: `${c.stdout || ''}${c.stderr || ''}`, checkFailed: true };
+    if (c.status !== 0) return { status: c.status, output: outputOf(c), checkFailed: true };
   }
   const args = t.kind === 'new' ? ['push', '-u', t.remote, refspec] : ['push', t.remote, refspec];
   const r = git(args, { env });
-  return { status: r.status, output: `${r.stdout || ''}${r.stderr || ''}` };
+  return { status: r.status, output: outputOf(r) };
 }
 
 /**
@@ -225,57 +230,52 @@ function push(t, s, gitDir) {
   const retries = { rebase: 0, transport: 0 };
   const output = [];
   const pushLines = [];
-  const before0 = refSha(t.ref);
+  let before = refSha(t.ref);
   const check = Boolean(s['push:checked'] || s['check:push']);
+  const stop = (outcome, extra) => {
+    if (extra) output.push(extra);
+    return { outcome, retries, pushLines, output: output.join('\n'), before };
+  };
 
-  if (t.kind === 'default' && !s['push:checked'] && before0 && !isAncestor(t.ref, 'HEAD')) {
+  if (t.kind === 'default' && !s['push:checked'] && before && !isAncestor(t.ref, 'HEAD')) {
     const failed = pullRebase(t, gitDir);
-    if (failed) return { outcome: failed.outcome, retries, pushLines, output: failed.output, before: before0 };
+    if (failed) return stop(failed.outcome, failed.output);
   }
 
   for (;;) {
-    const before = refSha(t.ref);
+    before = refSha(t.ref);
     const env = retries.transport ? bigBufferEnv() : process.env;
     const attempt = pushOnce(t, s, env);
     const head = gitOut(['rev-parse', 'HEAD']);
     output.push(attempt.output);
     pushLines.push(...attempt.output.split('\n').filter((l) => REF_LINE.test(l)));
     const fetchFailed = fetch(t.remote);
-    if (fetchFailed) {
-      output.push(fetchFailed);
-      return { outcome: 'transport', retries, pushLines, output: output.join('\n'), before };
-    }
-    if (refSha(t.ref) && isAncestor(head, t.ref)) {
+    if (fetchFailed) return stop('transport', fetchFailed);
+    if (isAncestor(head, t.ref)) {
       if (t.kind === 'new' && attempt.checked) git(['branch', `--set-upstream-to=${t.ref}`]);
-      return { outcome: 'landed', retries, pushLines, output: output.join('\n'), before: beforeOf(attempt.output, t, before) };
+      before = beforeOf(attempt.output, t, before);
+      return stop('landed');
     }
-    const text = attempt.output;
-    if (attempt.checkFailed) return { outcome: 'refused', retries, pushLines, output: output.join('\n'), before };
-    if (CONFLICT_LINE.test(text)) return { outcome: 'conflict', retries, pushLines, output: output.join('\n'), before };
-    if (REJECTED_LINE.test(text)) {
+    if (attempt.checkFailed) return stop('refused');
+    if (CONFLICT_LINE.test(attempt.output)) return stop('conflict');
+    if (REJECTED_LINE.test(attempt.output)) {
       if (!check || retries.rebase) {
-        output.push(check
+        return stop('refused', check
           ? 'ship-run: the remote moved again after one rebase; rebase and re-check.'
           : 'ship-run: the remote moved; no check reruns on a rebased commit here, so rebase and re-check.');
-        return { outcome: 'refused', retries, pushLines, output: output.join('\n'), before };
       }
       retries.rebase++;
       const failed = pullRebase(t, gitDir);
-      if (failed) {
-        output.push(failed.output);
-        return { outcome: failed.outcome, retries, pushLines, output: output.join('\n'), before };
-      }
+      if (failed) return stop(failed.outcome, failed.output);
       continue;
     }
-    if (TRANSPORT_LINE.test(text)) {
-      if (retries.transport >= TRANSPORT_RETRIES) {
-        return { outcome: 'transport', retries, pushLines, output: output.join('\n'), before };
-      }
+    if (TRANSPORT_LINE.test(attempt.output)) {
+      if (retries.transport >= TRANSPORT_RETRIES) return stop('transport');
       retries.transport++;
       sleep(BACKOFF_MS * retries.transport);
       continue;
     }
-    return { outcome: 'refused', retries, pushLines, output: output.join('\n'), before };
+    return stop('refused');
   }
 }
 
@@ -318,8 +318,8 @@ function main() {
   const gitDir = path.resolve(gitOut(['rev-parse', '--git-dir']));
 
   // 1. Refusals
-  const status = git(['status', '--porcelain']).stdout || '';
-  const dirty = status.split('\n').filter((l) => l && !l.startsWith('?? ')).map((l) => l.slice(3));
+  const status = (git(['status', '--porcelain', '--untracked-files=all']).stdout || '').split('\n').filter(Boolean);
+  const dirty = status.filter((l) => !l.startsWith('?? ')).map((l) => l.slice(3));
   if (dirty.length) return print({ outcome: 'dirty', files: dirty, next: 'run /commit first' }, 2);
   if (rebaseInProgress(gitDir)) {
     return print({ outcome: 'dirty', files: [], next: 'a rebase is in progress: finish it or run git rebase --abort' }, 2);
@@ -330,7 +330,7 @@ function main() {
   // 2. Target
   const upstreamRemote = gitOut(['config', `branch.${branch}.remote`]) || 'origin';
   const fetchFailed = fetch(upstreamRemote);
-  const t = findTarget(branch, args.toDefault);
+  const t = findTarget(branch, upstreamRemote, args.toDefault);
   if (t.error) return usage(t.error);
   const base = {
     target: t.ref,
@@ -340,7 +340,7 @@ function main() {
     retries: { rebase: 0, transport: 0 },
     changed: [],
     push_lines: [],
-    untracked: untrackedPaths(),
+    untracked: status.filter((l) => l.startsWith('?? ')).map((l) => l.slice(3)),
   };
   if (fetchFailed) return print({ ...base, outcome: 'transport', output_tail: tail(fetchFailed) }, 1);
 
@@ -378,8 +378,8 @@ function main() {
   }
 
   // 6. --finish
+  const done = report.outcome === 'landed' || report.outcome === 'nothing-to-push';
   if (args.finish) {
-    const done = report.outcome === 'landed' || report.outcome === 'nothing-to-push';
     let staleness = null;
     if (done && fs.existsSync(path.join(root, 'scripts', 'staleness.mjs'))) {
       const s = sh(process.execPath, [path.join(root, 'scripts', 'staleness.mjs')]);
@@ -389,8 +389,7 @@ function main() {
     report.ship_cost = done ? ledger(['ship']) : null;
   }
 
-  const code = report.outcome === 'landed' || report.outcome === 'nothing-to-push' ? 0 : 1;
-  return print(report, code);
+  return print(report, done ? 0 : 1);
 }
 
 process.exitCode = main();

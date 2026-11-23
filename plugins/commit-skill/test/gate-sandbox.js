@@ -104,7 +104,7 @@ function baseSandbox(t, { prefix, env: extra = {} }) {
     return vars;
   };
 
-  return {
+  const base = {
     root,
     home,
     env,
@@ -115,7 +115,30 @@ function baseSandbox(t, { prefix, env: extra = {} }) {
       if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed:\n${r.stderr}`);
       return r.stdout.trim();
     },
+
+    /**
+     * A bare remote, `<remote>`, with one commit on `branch` and its HEAD there, and a clone of it at `name`,
+     * ungated: a pushable origin for ship-run. Each call makes another clone of the same remote.
+     */
+    clone(name = 'work', { branch = 'main', remote = 'origin.git' } = {}) {
+      const bare = path.join(root, remote);
+      if (!fs.existsSync(bare)) {
+        base.git(root, 'init', '-q', '--bare', '-b', branch, bare);
+        const seed = path.join(root, `${remote}-seed`);
+        base.git(root, 'clone', '-q', bare, seed);
+        base.git(seed, 'checkout', '-q', '-b', branch);
+        fs.writeFileSync(path.join(seed, 'README'), 'seed\n');
+        base.git(seed, 'add', 'README');
+        base.git(seed, 'commit', '-q', '-m', 'seed');
+        base.git(seed, 'push', '-q', 'origin', `HEAD:${branch}`);
+      }
+      const dir = path.join(root, name);
+      base.git(root, 'clone', '-q', bare, dir);
+      base.git(dir, 'config', 'commit.gpgsign', 'false');
+      return dir;
+    },
   };
+  return base;
 }
 
 function sandbox(t) {
@@ -147,28 +170,6 @@ function sandbox(t) {
         const r = sb.gate(dir, ['install']);
         assert.equal(r.status, 0, r.stderr);
       }
-      return dir;
-    },
-
-    /**
-     * A bare remote, `<remote>`, with one commit on `branch` and its HEAD there, and a clone of it at `name`,
-     * ungated: a pushable origin for ship-run. Each call makes another clone of the same remote.
-     */
-    clone(name = 'work', { branch = 'main', remote = 'origin.git' } = {}) {
-      const bare = path.join(root, remote);
-      if (!fs.existsSync(bare)) {
-        sb.git(root, 'init', '-q', '--bare', '-b', branch, bare);
-        const seed = path.join(root, `${remote}-seed`);
-        sb.git(root, 'clone', '-q', bare, seed);
-        sb.git(seed, 'checkout', '-q', '-b', branch);
-        fs.writeFileSync(path.join(seed, 'README'), 'seed\n');
-        sb.git(seed, 'add', 'README');
-        sb.git(seed, 'commit', '-q', '-m', 'seed');
-        sb.git(seed, 'push', '-q', 'origin', `HEAD:${branch}`);
-      }
-      const dir = path.join(root, name);
-      sb.git(root, 'clone', '-q', bare, dir);
-      sb.git(dir, 'config', 'commit.gpgsign', 'false');
       return dir;
     },
 

@@ -117,8 +117,10 @@ function main() {
   // 2. Stage and commit
   const plain = [];
   const tracked = [];
+  const ignored = new Set((git(['check-ignore', '-z', '--stdin', '--no-index'], { input: args.paths.join('\0') + '\0' })
+    .stdout || '').split('\0').filter(Boolean));
   for (const p of args.paths) {
-    if (git(['check-ignore', '-q', '--no-index', '--', p]).status !== 0) plain.push(p);
+    if (!ignored.has(p)) plain.push(p);
     else if (git(['ls-files', '--error-unmatch', '--', p]).status === 0) tracked.push(p);
     else {
       process.stdout.write(`${p} is ignored and not tracked; nothing was staged or committed.\n`);
