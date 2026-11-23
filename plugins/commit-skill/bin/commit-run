@@ -130,10 +130,12 @@ function main() {
   const adds = [];
   if (plain.length) adds.push(['add', '--', ...plain]);
   if (tracked.length) adds.push(['add', '-u', '--', ...tracked]);
-  for (const add of adds) {
+  for (const [i, add] of adds.entries()) {
     const r = git(add);
     if (r.status !== 0) {
-      process.stdout.write(`git add failed; nothing was committed.\n${tail(r.stderr)}\n`);
+      // A second add's failure unstages the first's paths, so a failed run leaves nothing staged.
+      if (i > 0) git(['reset', '-q', '--', ...plain]);
+      process.stdout.write(`git add failed; nothing was staged or committed.\n${tail(r.stderr)}\n`);
       return 1;
     }
   }

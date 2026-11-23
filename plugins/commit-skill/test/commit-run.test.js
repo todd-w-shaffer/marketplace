@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
-const { RECIPE, NO_TOKEN, claude, run, sandbox } = require('./gate-sandbox');
+const { PATH_ENV, RECIPE, NO_TOKEN, claude, run, sandbox, which } = require('./gate-sandbox');
 
 const BIN = path.join(__dirname, '..', 'bin', 'commit-run');
 
@@ -106,6 +106,24 @@ test('a typo beside a tracked ignored path stages nothing', (t) => {
   const r = commitRun(['h/x', 'typo']);
   assert.equal(r.status, 1);
   assert.match(r.stdout, /typo/);
+  assert.equal(sb.git(repo, 'diff', '--cached', '--name-only'), '');
+});
+
+test('a failed second add unstages the first, so nothing is left staged', (t) => {
+  const { sb, repo, commitRun, write } = ignoredDir(t);
+  write('h/x', 'two');
+  write('a.txt', 'two');
+  // A git first on PATH whose `add -u` fails, as a held index.lock would fail it after the plain add.
+  const shim = path.join(sb.root, 'shim');
+  fs.mkdirSync(shim);
+  fs.writeFileSync(path.join(shim, 'git'), `#!/bin/sh
+case " $* " in *" add -u "*) echo "fatal: index.lock held" >&2; exit 128 ;; esac
+exec '${which('git')}' "$@"
+`);
+  fs.chmodSync(path.join(shim, 'git'), 0o755);
+  const r = commitRun(['a.txt', 'h/x'], { env: { PATH: `${shim}:${PATH_ENV}` } });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /nothing was staged/);
   assert.equal(sb.git(repo, 'diff', '--cached', '--name-only'), '');
 });
 
