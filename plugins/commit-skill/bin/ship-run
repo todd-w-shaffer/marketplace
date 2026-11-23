@@ -1,0 +1,396 @@
+#!/usr/bin/env node
+'use strict';
+
+// /ship's mechanical steps in one Bash call: find the target, push, decide the
+// outcome by fetch, rebase or retry where the rules allow, and report one JSON
+// object on stdout. The skill keeps the judgement: the doc sync and refusal
+// triage.
+//
+//   ship-run [--to-default]            steps 0 and 1: the code push
+//   ship-run --finish [--to-default]   step 6's push, then 7 and 8
+//
+// 1. Refuses, exit 2, a tree with a tracked change ({"outcome":"dirty"}), a
+//    rebase in progress or a detached HEAD, before anything else runs.
+//    Untracked files do not refuse: no push carries them.
+// 2. The target: the branch's upstream; with none, `--to-default` makes it the
+//    remote's default branch (origin/HEAD, else origin/main, else
+//    origin/master), and its absence makes it origin/<branch>, published.
+// 3. `token-ledger ship-begin`, only while no ship of this session and branch
+//    is open, so a retry and --finish keep the first call's base.
+// 4. The push: `npm run push:checked -- <remote> <refspec>` when package.json
+//    defines it; otherwise `npm run check:push` when defined, then `git push`,
+//    with one `git pull --rebase` first when pushing straight to the default
+//    branch and the remote has moved.
+// 5. The outcome is the fetch: `landed` when the HEAD read as the push exits
+//    is an ancestor of the target. A failure is classified once, by git's and
+//    the hook's own line shapes: push:checked's stopped rebase is `conflict`;
+//    a non-fast-forward rejection rebases once and pushes again only where a
+//    check reruns on the rebased commit, else `refused`; a transport line
+//    retries up to 3 times with a larger http.postBuffer, then `transport`;
+//    anything else is `refused`.
+// 6. --finish, once its push lands or there is nothing to push, adds
+//    `staleness` (scripts/staleness.mjs's output) and `ship_cost`
+//    (`token-ledger ship`'s); either is null when missing or failing.
+//
+// Exits 0 for landed and nothing-to-push, 1 for refused, conflict and
+// transport, 2 for bad usage, a dirty tree and no target.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const TAIL = 40;
+const TRANSPORT_RETRIES = 3;
+const POST_BUFFER = '157286400';
+const BACKOFF_MS = Number(process.env.SHIP_RUN_BACKOFF_MS ?? 2000);
+
+const CONFLICT_LINE = /^pre-push: rebasing .* stopped; conflicts in:/m;
+const REJECTED_LINE = /^ ! \[rejected\] .*\((non-fast-forward|fetch first)\)/m;
+const TRANSPORT_LINE = /^(error: RPC failed|fatal: the remote end hung up|(send-pack|fetch-pack): unexpected disconnect)/m;
+// git's ref-update lines: a flag column, a summary, `from -> to`.
+const REF_LINE = /^ [ +\-*=!] \S.* -> \S+/;
+
+function usage(why) {
+  process.stderr.write(`ship-run: ${why}\nusage: ship-run [--finish] [--to-default]\n`);
+  return 2;
+}
+
+function sh(cmd, args, opts = {}) {
+  return spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...opts });
+}
+
+function git(args, opts) {
+  return sh('git', ['-c', 'color.ui=never', ...args], opts);
+}
+
+/** git's trimmed stdout, or null when it fails. */
+function gitOut(args) {
+  const r = git(args);
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+function tail(text, n = TAIL) {
+  return text.trimEnd().split('\n').slice(-n).join('\n');
+}
+
+function sleep(ms) {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function parseArgs(argv) {
+  const out = { finish: false, toDefault: false };
+  for (const a of argv) {
+    if (a === '--finish') out.finish = true;
+    else if (a === '--to-default') out.toDefault = true;
+    else return { error: `unknown argument ${a}` };
+  }
+  return out;
+}
+
+function print(obj, code) {
+  process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
+  return code;
+}
+
+/** token-ledger beside this script, PATH as the fallback, as commit-run finds it. */
+function ledger(args) {
+  const local = path.join(__dirname, 'token-ledger');
+  const r = fs.existsSync(local) ? sh(process.execPath, [local, ...args]) : sh('token-ledger', args);
+  if (r.error || r.status !== 0) return null;
+  return r.stdout.trim() || null;
+}
+
+/** Whether this session's ship on this branch is open: ship-begin left its marker and `ship` has not cleared it. */
+function openShip(root, branch) {
+  const file = process.env.TOKEN_LEDGER_MARKERS
+    || path.join(os.homedir(), '.claude', 'token-ledger-ship-markers.json');
+  let markers = {};
+  try { markers = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  const m = markers[root];
+  if (!m || m.session !== process.env.CLAUDE_CODE_SESSION_ID || m.branch !== branch) return null;
+  return m;
+}
+
+function scripts(root) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    return (pkg && pkg.scripts) || {};
+  } catch { return {}; }
+}
+
+/** `git fetch <remote>`, retried on a transport line. Null on success, else the last output. */
+function fetch(remote) {
+  let out = '';
+  for (let attempt = 0; attempt <= TRANSPORT_RETRIES; attempt++) {
+    if (attempt) sleep(BACKOFF_MS * attempt);
+    const r = git(['fetch', '-q', remote]);
+    if (r.status === 0) return null;
+    out = `${r.stdout}${r.stderr}`;
+    if (!TRANSPORT_LINE.test(out)) return out;
+  }
+  return out;
+}
+
+/** The environment with http.postBuffer appended to any GIT_CONFIG_COUNT pairs already set. */
+function bigBufferEnv() {
+  const n = Number(process.env.GIT_CONFIG_COUNT) || 0;
+  return {
+    ...process.env,
+    GIT_CONFIG_COUNT: String(n + 1),
+    [`GIT_CONFIG_KEY_${n}`]: 'http.postBuffer',
+    [`GIT_CONFIG_VALUE_${n}`]: POST_BUFFER,
+  };
+}
+
+function rebaseInProgress(gitDir) {
+  return ['rebase-merge', 'rebase-apply'].some((d) => fs.existsSync(path.join(gitDir, d)));
+}
+
+/** Oldest first: `[{sha, subject}]`. */
+function commitsOf(args) {
+  const out = gitOut(['log', '--reverse', '--format=%H %s', ...args]);
+  if (!out) return [];
+  return out.split('\n').map((l) => {
+    const i = l.indexOf(' ');
+    return i < 0 ? { sha: l, subject: '' } : { sha: l.slice(0, i), subject: l.slice(i + 1) };
+  });
+}
+
+/** The target and how to push to it, or `{error}`. */
+function findTarget(branch, toDefault) {
+  const upstream = gitOut(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  if (upstream) {
+    const remote = gitOut(['config', `branch.${branch}.remote`]) || 'origin';
+    const merge = (gitOut(['config', `branch.${branch}.merge`]) || `refs/heads/${branch}`).replace(/^refs\/heads\//, '');
+    return { kind: 'upstream', remote, ref: upstream, branch: merge };
+  }
+  const remote = 'origin';
+  if (toDefault) {
+    const head = gitOut(['symbolic-ref', '-q', `refs/remotes/${remote}/HEAD`]);
+    let name = head ? head.replace(`refs/remotes/${remote}/`, '') : null;
+    if (!name) name = ['main', 'master'].find((b) => gitOut(['rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${b}`]));
+    if (!name) return { error: `${remote} has no default branch; run git remote set-head ${remote} -a` };
+    return { kind: 'default', remote, ref: `${remote}/${name}`, branch: name };
+  }
+  return { kind: 'new', remote, ref: `${remote}/${branch}`, branch };
+}
+
+function refSha(ref) {
+  return gitOut(['rev-parse', '--verify', '--quiet', `refs/remotes/${ref}`]);
+}
+
+function isAncestor(a, b) {
+  return git(['merge-base', '--is-ancestor', a, b]).status === 0;
+}
+
+/**
+ * `git pull --rebase`. A conflict, or a pull killed mid-rebase, runs `git rebase --abort` so the branch is as it
+ * was. Returns null on success, else `{outcome, output}`.
+ */
+function pullRebase(t, gitDir) {
+  const r = git(['pull', '--rebase', '-q', t.remote, t.branch]);
+  if (r.status === 0 && !r.signal) return null;
+  const output = `${r.stdout || ''}${r.stderr || ''}`;
+  if (rebaseInProgress(gitDir)) {
+    const conflicts = gitOut(['diff', '--name-only', '--diff-filter=U']) || '';
+    git(['rebase', '--abort']);
+    if (r.signal) return { outcome: 'refused', output: `${output}\ngit pull --rebase was killed (${r.signal}); the rebase was aborted.` };
+    return { outcome: 'conflict', output: `${output}\nconflicts in:\n${conflicts}\nThe rebase was aborted; the branch is as it was.` };
+  }
+  return { outcome: 'refused', output };
+}
+
+/** One push attempt with the project's command. Returns `{status, output}`. */
+function pushOnce(t, s, env) {
+  const runNpm = (script, args = []) => sh('npm', ['run', '--silent', script, ...(args.length ? ['--', ...args] : [])], { env });
+  const refspec = `HEAD:${t.branch}`;
+  if (s['push:checked']) {
+    const r = runNpm('push:checked', [t.remote, refspec]);
+    return { status: r.status, output: `${r.stdout || ''}${r.stderr || ''}`, checked: true };
+  }
+  if (s['check:push']) {
+    const c = runNpm('check:push');
+    if (c.status !== 0) return { status: c.status, output: `${c.stdout || ''}${c.stderr || ''}`, checkFailed: true };
+  }
+  const args = t.kind === 'new' ? ['push', '-u', t.remote, refspec] : ['push', t.remote, refspec];
+  const r = git(args, { env });
+  return { status: r.status, output: `${r.stdout || ''}${r.stderr || ''}` };
+}
+
+/**
+ * Pushes HEAD to the target until it lands or a rule stops it. Returns the report's push fields and `outcome`.
+ */
+function push(t, s, gitDir) {
+  const retries = { rebase: 0, transport: 0 };
+  const output = [];
+  const pushLines = [];
+  const before0 = refSha(t.ref);
+  const check = Boolean(s['push:checked'] || s['check:push']);
+
+  if (t.kind === 'default' && !s['push:checked'] && before0 && !isAncestor(t.ref, 'HEAD')) {
+    const failed = pullRebase(t, gitDir);
+    if (failed) return { outcome: failed.outcome, retries, pushLines, output: failed.output, before: before0 };
+  }
+
+  for (;;) {
+    const before = refSha(t.ref);
+    const env = retries.transport ? bigBufferEnv() : process.env;
+    const attempt = pushOnce(t, s, env);
+    const head = gitOut(['rev-parse', 'HEAD']);
+    output.push(attempt.output);
+    pushLines.push(...attempt.output.split('\n').filter((l) => REF_LINE.test(l)));
+    const fetchFailed = fetch(t.remote);
+    if (fetchFailed) {
+      output.push(fetchFailed);
+      return { outcome: 'transport', retries, pushLines, output: output.join('\n'), before };
+    }
+    if (refSha(t.ref) && isAncestor(head, t.ref)) {
+      if (t.kind === 'new' && attempt.checked) git(['branch', `--set-upstream-to=${t.ref}`]);
+      return { outcome: 'landed', retries, pushLines, output: output.join('\n'), before: beforeOf(attempt.output, t, before) };
+    }
+    const text = attempt.output;
+    if (attempt.checkFailed) return { outcome: 'refused', retries, pushLines, output: output.join('\n'), before };
+    if (CONFLICT_LINE.test(text)) return { outcome: 'conflict', retries, pushLines, output: output.join('\n'), before };
+    if (REJECTED_LINE.test(text)) {
+      if (!check || retries.rebase) {
+        output.push(check
+          ? 'ship-run: the remote moved again after one rebase; rebase and re-check.'
+          : 'ship-run: the remote moved; no check reruns on a rebased commit here, so rebase and re-check.');
+        return { outcome: 'refused', retries, pushLines, output: output.join('\n'), before };
+      }
+      retries.rebase++;
+      const failed = pullRebase(t, gitDir);
+      if (failed) {
+        output.push(failed.output);
+        return { outcome: failed.outcome, retries, pushLines, output: output.join('\n'), before };
+      }
+      continue;
+    }
+    if (TRANSPORT_LINE.test(text)) {
+      if (retries.transport >= TRANSPORT_RETRIES) {
+        return { outcome: 'transport', retries, pushLines, output: output.join('\n'), before };
+      }
+      retries.transport++;
+      sleep(BACKOFF_MS * retries.transport);
+      continue;
+    }
+    return { outcome: 'refused', retries, pushLines, output: output.join('\n'), before };
+  }
+}
+
+/** The target's sha before the landing push, from git's ref-update line for the target, else as read before it. */
+function beforeOf(text, t, fallback) {
+  for (const l of text.split('\n')) {
+    if (!REF_LINE.test(l) || !l.trimEnd().endsWith(`-> ${t.branch}`)) continue;
+    if (/\[new branch\]/.test(l)) return null;
+    const m = /^ [ +] ([0-9a-f]+)\.\.\.?[0-9a-f]+ /.exec(l);
+    if (m) return gitOut(['rev-parse', '--verify', '--quiet', `${m[1]}^{commit}`]) || fallback;
+  }
+  return fallback;
+}
+
+function changedSince(before, t) {
+  // A new branch diffs from where it left the remote's default branch.
+  let range = before ? `${before}..HEAD` : null;
+  if (!range && refSha(`${t.remote}/HEAD`)) range = `${t.remote}/HEAD...HEAD`;
+  if (!range) return [];
+  const out = gitOut(['diff', '--name-status', '--no-renames', range]);
+  if (!out) return [];
+  return out.split('\n').map((l) => {
+    const [status, ...rest] = l.split('\t');
+    return { status, path: rest.join('\t') };
+  });
+}
+
+function untrackedPaths() {
+  const out = git(['status', '--porcelain', '--untracked-files=all']).stdout || '';
+  return out.split('\n').filter((l) => l.startsWith('?? ')).map((l) => l.slice(3));
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.error) return usage(args.error);
+
+  const root = gitOut(['rev-parse', '--show-toplevel']);
+  if (!root) return usage('not in a git repository');
+  process.chdir(root);
+  const gitDir = path.resolve(gitOut(['rev-parse', '--git-dir']));
+
+  // 1. Refusals
+  const status = git(['status', '--porcelain']).stdout || '';
+  const dirty = status.split('\n').filter((l) => l && !l.startsWith('?? ')).map((l) => l.slice(3));
+  if (dirty.length) return print({ outcome: 'dirty', files: dirty, next: 'run /commit first' }, 2);
+  if (rebaseInProgress(gitDir)) {
+    return print({ outcome: 'dirty', files: [], next: 'a rebase is in progress: finish it or run git rebase --abort' }, 2);
+  }
+  const branch = gitOut(['symbolic-ref', '-q', '--short', 'HEAD']);
+  if (!branch) return print({ outcome: 'dirty', files: [], next: 'HEAD is detached: check out a branch' }, 2);
+
+  // 2. Target
+  const upstreamRemote = gitOut(['config', `branch.${branch}.remote`]) || 'origin';
+  const fetchFailed = fetch(upstreamRemote);
+  const t = findTarget(branch, args.toDefault);
+  if (t.error) return usage(t.error);
+  const base = {
+    target: t.ref,
+    before: refSha(t.ref),
+    commits: [],
+    outcome: null,
+    retries: { rebase: 0, transport: 0 },
+    changed: [],
+    push_lines: [],
+    untracked: untrackedPaths(),
+  };
+  if (fetchFailed) return print({ ...base, outcome: 'transport', output_tail: tail(fetchFailed) }, 1);
+
+  const range = base.before ? [`${t.ref}..HEAD`] : ['HEAD', '--not', `--remotes=${t.remote}`];
+  const pending = commitsOf(range);
+  const marker = openShip(root, branch);
+
+  let report;
+  if (!pending.length) {
+    const head = gitOut(['rev-parse', 'HEAD']);
+    // A rerun while the ship is open, its push already landed: report that landing.
+    if (!args.finish && marker && marker.base && base.before && marker.base !== base.before
+        && isAncestor(marker.base, base.before) && isAncestor(head, t.ref)) {
+      report = { ...base, before: marker.base, outcome: 'landed', commits: commitsOf([`${marker.base}..HEAD`]) };
+      report.changed = changedSince(marker.base, t);
+    } else {
+      report = { ...base, outcome: 'nothing-to-push' };
+    }
+  } else {
+    // 3. The ledger's base, only while no ship is open.
+    if (!args.finish && !marker) ledger(['ship-begin']);
+    // 4–5. Push
+    const r = push(t, scripts(root), gitDir);
+    report = { ...base, outcome: r.outcome, retries: r.retries, push_lines: r.pushLines };
+    if (r.outcome === 'landed') {
+      report.before = r.before;
+      report.commits = r.before ? commitsOf([`${r.before}..HEAD`])
+        : commitsOf(['HEAD', '--not', `--exclude=${t.ref}`, `--remotes=${t.remote}`]);
+      report.changed = changedSince(r.before, t);
+    } else {
+      report.commits = pending;
+      report.output_tail = tail(r.output);
+    }
+    report.untracked = untrackedPaths();
+  }
+
+  // 6. --finish
+  if (args.finish) {
+    const done = report.outcome === 'landed' || report.outcome === 'nothing-to-push';
+    let staleness = null;
+    if (done && fs.existsSync(path.join(root, 'scripts', 'staleness.mjs'))) {
+      const s = sh(process.execPath, [path.join(root, 'scripts', 'staleness.mjs')]);
+      if (!s.error && s.status === 0) staleness = s.stdout.trim() || null;
+    }
+    report.staleness = staleness;
+    report.ship_cost = done ? ledger(['ship']) : null;
+  }
+
+  const code = report.outcome === 'landed' || report.outcome === 'nothing-to-push' ? 0 : 1;
+  return print(report, code);
+}
+
+process.exitCode = main();

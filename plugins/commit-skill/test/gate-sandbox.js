@@ -150,6 +150,28 @@ function sandbox(t) {
       return dir;
     },
 
+    /**
+     * A bare remote, `<remote>`, with one commit on `branch` and its HEAD there, and a clone of it at `name`,
+     * ungated: a pushable origin for ship-run. Each call makes another clone of the same remote.
+     */
+    clone(name = 'work', { branch = 'main', remote = 'origin.git' } = {}) {
+      const bare = path.join(root, remote);
+      if (!fs.existsSync(bare)) {
+        sb.git(root, 'init', '-q', '--bare', '-b', branch, bare);
+        const seed = path.join(root, `${remote}-seed`);
+        sb.git(root, 'clone', '-q', bare, seed);
+        sb.git(seed, 'checkout', '-q', '-b', branch);
+        fs.writeFileSync(path.join(seed, 'README'), 'seed\n');
+        sb.git(seed, 'add', 'README');
+        sb.git(seed, 'commit', '-q', '-m', 'seed');
+        sb.git(seed, 'push', '-q', 'origin', `HEAD:${branch}`);
+      }
+      const dir = path.join(root, name);
+      sb.git(root, 'clone', '-q', bare, dir);
+      sb.git(dir, 'config', 'commit.gpgsign', 'false');
+      return dir;
+    },
+
     /** Commits a new file with `message` read from stdin, the way /commit passes it. */
     commit(cwd, message, extra = {}) {
       const file = `f-${Math.random().toString(36).slice(2)}.txt`;
@@ -212,5 +234,5 @@ function sandbox(t) {
 
 module.exports = {
   ROOT, GATE, SESSION, OTHER, RECIPE, NO_TOKEN, NO_RECIPE, NO_SESSION, NOT_ENABLED,
-  baseSandbox, bash, claude, hookCommands, prompt, run, sandbox, skillCall,
+  PATH_ENV, baseSandbox, bash, claude, hookCommands, prompt, run, sandbox, skillCall, which,
 };
