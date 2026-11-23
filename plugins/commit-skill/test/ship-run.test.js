@@ -25,6 +25,9 @@ function setup(t, opts) {
     CLAUDE_CODE_SESSION_ID: SESSION,
     GIT_TERMINAL_PROMPT: '0',
     SHIP_RUN_BACKOFF_MS: '0',
+    // npm in a fresh HOME checks for its own update and builds a cache: skip both, so a loaded run stays in time.
+    npm_config_update_notifier: 'false',
+    npm_config_cache: path.join(sb.root, 'npm-cache'),
   };
   const shipRun = (args = [], { bin = BIN, cwd = repo, env: extra = {} } = {}) => {
     const r = run(bin, args, { cwd, timeout: 30000, env: sb.envWith({ ...env, ...extra }) });
