@@ -13,8 +13,13 @@
 //    `npm run build` when package.json has a build script, else `sh build.sh`,
 //    else `make` for a Makefile. `--no-build` skips it. A failed build stops
 //    the run before anything is staged.
-// 2. `git add -- <path>...`, then `git commit -F -` with the message on stdin.
-//    The commit-msg hook (the commit gate) runs as it would for a hand commit.
+// 2. Stage, then `git commit -F -` with the message on stdin. The commit-msg
+//    hook (the commit gate) runs as it would for a hand commit. Each path is
+//    judged first: one that is ignored and tracks nothing is refused before
+//    anything is staged; one that is ignored but tracked goes to
+//    `git add -u --`, since a plain add refuses it after staging it; every
+//    other path goes to `git add --`, which runs first, so a typo fails in
+//    git's own words with nothing staged.
 // 3. Prints the commit, the files it holds, what is left in the tree, any
 //    build warnings, and `token-ledger commit`'s Cost line. A missing or failed
 //    ledger drops the Cost line and nothing else.
@@ -110,10 +115,25 @@ function main() {
   }
 
   // 2. Stage and commit
-  const add = git(['add', '--', ...args.paths]);
-  if (add.status !== 0) {
-    process.stdout.write(`git add failed; nothing was committed.\n${tail(add.stderr)}\n`);
-    return 1;
+  const plain = [];
+  const tracked = [];
+  for (const p of args.paths) {
+    if (git(['check-ignore', '-q', '--no-index', '--', p]).status !== 0) plain.push(p);
+    else if (git(['ls-files', '--error-unmatch', '--', p]).status === 0) tracked.push(p);
+    else {
+      process.stdout.write(`${p} is ignored and not tracked; nothing was staged or committed.\n`);
+      return 1;
+    }
+  }
+  const adds = [];
+  if (plain.length) adds.push(['add', '--', ...plain]);
+  if (tracked.length) adds.push(['add', '-u', '--', ...tracked]);
+  for (const add of adds) {
+    const r = git(add);
+    if (r.status !== 0) {
+      process.stdout.write(`git add failed; nothing was committed.\n${tail(r.stderr)}\n`);
+      return 1;
+    }
   }
   const commit = git(['commit', '-q', '-F', '-'], { input: message });
   if (commit.status !== 0) {

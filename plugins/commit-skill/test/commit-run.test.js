@@ -56,6 +56,59 @@ test('stages a deletion', (t) => {
   assert.match(r.stdout, /^ {2}D\ta\.txt$/m);
 });
 
+/** A repo that ignores `h/` and `s/*.log`, with `h/x` tracked and `a.txt` committed. */
+function ignoredDir(t) {
+  const ctx = setup(t, { gated: false });
+  const { sb, repo, write } = ctx;
+  fs.mkdirSync(path.join(repo, 'h'));
+  fs.mkdirSync(path.join(repo, 's'));
+  write('.gitignore', 'h/\ns/*.log\n');
+  write('h/x', 'one');
+  write('a.txt', 'one');
+  sb.git(repo, 'add', '-f', '.gitignore', 'h/x', 'a.txt');
+  sb.git(repo, 'commit', '-q', '-m', 'seed');
+  return ctx;
+}
+
+test('commits a tracked path under an ignored directory', (t) => {
+  const { sb, repo, commitRun, write } = ignoredDir(t);
+  write('h/x', 'two');
+  const r = commitRun(['h/x']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(sb.git(repo, 'show', '--name-status', '--format=', 'HEAD'), 'M\th/x');
+});
+
+test('refuses an untracked ignored path and stages nothing', (t) => {
+  const { sb, repo, commitRun, write } = ignoredDir(t);
+  write('h/new');
+  write('a.txt', 'two');
+  const alone = commitRun(['h/new']);
+  assert.equal(alone.status, 1);
+  assert.match(alone.stdout, /h\/new.*ignored/);
+  assert.equal(sb.git(repo, 'diff', '--cached', '--name-only'), '');
+  const mixed = commitRun(['h/new', 'a.txt']);
+  assert.equal(mixed.status, 1);
+  assert.equal(sb.git(repo, 'diff', '--cached', '--name-only'), '');
+});
+
+test('a directory commits its new files and skips its ignored ones', (t) => {
+  const { sb, repo, commitRun, write } = ignoredDir(t);
+  write('s/x.log');
+  write('s/n.txt');
+  const r = commitRun(['s']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(sb.git(repo, 'show', '--name-only', '--format=', 'HEAD'), 's/n.txt');
+});
+
+test('a typo beside a tracked ignored path stages nothing', (t) => {
+  const { sb, repo, commitRun, write } = ignoredDir(t);
+  write('h/x', 'two');
+  const r = commitRun(['h/x', 'typo']);
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /typo/);
+  assert.equal(sb.git(repo, 'diff', '--cached', '--name-only'), '');
+});
+
 test('runs the package.json build and stops before staging when it fails', (t) => {
   const { sb, repo, commitRun, write } = setup(t, { gated: false });
   write('package.json', JSON.stringify({ scripts: { build: 'echo boom >&2; exit 3' } }));
