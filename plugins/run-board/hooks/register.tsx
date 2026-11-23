@@ -51,6 +51,7 @@ import {
   newestRunDir,
   queueTree,
   noticeBoard,
+  sittingOf,
   NO_SOURCES,
   RECORD_NEWER,
   recordRead,
@@ -430,7 +431,7 @@ async function readEndings(
   raw: RawStatus,
   onMain: readonly string[],
   archived: readonly string[],
-): Promise<{ recent: Ended[]; endings: Ending[] }> {
+): Promise<{ recent: Ended[]; endings: Ending[]; newer: string[]; picked: string[] }> {
   const files = [...(await ls(dir))].map(([name, mtimeMs]) => ({ name, mtimeMs }))
   const recordMtimes = await ls(sources.logDir)
   const running = new Set(raw.running.map(r => `${baseName(r.brief)}.progress`))
@@ -438,6 +439,7 @@ async function readEndings(
   const picked = new Map(recentCandidates(files, raw.running.map(r => r.brief)).map(f => [f.name, f]))
   for (const f of files) if (wanted.has(f.name) && !running.has(f.name)) picked.set(f.name, f)
   const endings: Ending[] = []
+  const newer: string[] = []
   for (const f of picked.values()) {
     const base = f.name.replace(/\.progress$/, '')
     let hit = progressCache.get(f.name)
@@ -446,8 +448,9 @@ async function readEndings(
       progressCache.set(f.name, hit)
     }
     let read: RecordRead | null = null
+    // A record older than its progress file missed its last write: the progress file is the newer word.
     const recordMs = recordMtimes.get(`${base}.run.json`)
-    if (recordMs !== undefined) {
+    if (recordMs !== undefined && recordMs >= f.mtimeMs) {
       const known = recordCache.get(base)
       if (known !== undefined && known.mtimeMs === recordMs) read = known.read
       else {
@@ -457,12 +460,14 @@ async function readEndings(
       }
     }
     if (read === null || read.kind === 'none') read = await printedRecord($, ls, sources.main, dir, base, f.mtimeMs, ownerMs)
+    if (read?.kind === 'newer') newer.push(sittingOf(base).sitting)
     if (read?.kind !== 'record') continue
     endings.push({ base, text: hit.text, mtimeMs: f.mtimeMs, record: read.record })
   }
   prune(progressCache, new Set(picked.keys()))
   prune(recordCache, new Set([...picked.keys()].map(n => n.replace(/\.progress$/, ''))))
-  return { recent: recentOf(endings, raw.finished, new Set(archived)), endings }
+  const bases = [...picked.keys()].map(n => n.replace(/\.progress$/, ''))
+  return { recent: recentOf(endings, raw.finished, new Set(archived)), endings, newer, picked: bases }
 }
 
 /**
@@ -603,8 +608,9 @@ const factsInFlight = new Map<string, Promise<BriefFacts | null>>()
  * no mode is not kept, and the next poll reads it again.
  */
 function printedFacts($: EngineInterface, main: string, briefKey: string, shas: readonly string[], ownerMs: number | null): Promise<BriefFacts | null> {
-  const cats = shas.map((_, i) => `git cat-file blob "\${${i + 2}}"`).join(' && ')
+  const cats = shas.map((_, i) => `git cat-file blob "\${${i + 2}}"`).join(' && echo && ')
   const script = `set -o pipefail; { ${cats}; } | node "$1" --print /dev/null /dev/stdin`
+  if (ownerMs === null) return Promise.resolve(null)
   return cachedRead(factsCache, factsInFlight, briefKey, JSON.stringify([...shas, ownerMs]), async () => {
     const r = await $.process.run(['sh', '-c', script, 'sh', `${main}/scripts/run-status.mjs`, ...shas], { cwd: main, timeoutMs: 10000 })
     const printed = r.exitCode === 0 ? recordRead(r.stdout) : null
@@ -689,18 +695,25 @@ const printCache = new Map<string, { key: string; value: RecordRead }>()
 const printInFlight = new Map<string, Promise<RecordRead | null>>()
 
 /**
- * The brief `--print` reads for the run named `base`: `docs/briefs/<file>`
- * while it exists, else the archive's `docs/archive/<name>/<file>`, where the
- * archive keeps each brief under its name without `kickoff-sitting-`. Its
- * mtime is null when neither path holds it, and `--print` then reads no brief.
+ * The brief `--print` reads for the run named `base`, the first that exists:
+ * `docs/briefs/<base>.md`, a directory brief's `docs/briefs/<base>/README.md`,
+ * then the same two in the archive's `docs/archive/<name>/`, where the archive
+ * keeps each brief under its name without `kickoff-sitting-`. Its mtime is
+ * null when none exists, and `--print` then reads no brief.
  */
 async function briefOnDisk(ls: Listings, main: string, base: string): Promise<{ path: string; mtimeMs: number | null }> {
-  const file = `${base}.md`
-  const live = await mtimeOf(ls, `${main}/docs/briefs`, file)
-  if (live !== null) return { path: `${main}/docs/briefs/${file}`, mtimeMs: live }
   const archive = `${main}/docs/archive/${base.replace(/^kickoff-sitting-/, '')}`
-  const archived = await mtimeOf(ls, archive, file)
-  return archived === null ? { path: `${main}/docs/briefs/${file}`, mtimeMs: null } : { path: `${archive}/${file}`, mtimeMs: archived }
+  const places: [string, string][] = [
+    [`${main}/docs/briefs`, `${base}.md`],
+    [`${main}/docs/briefs/${base}`, 'README.md'],
+    [archive, `${base}.md`],
+    [archive, 'README.md'],
+  ]
+  for (const [dir, file] of places) {
+    const mtimeMs = await mtimeOf(ls, dir, file)
+    if (mtimeMs !== null) return { path: `${dir}/${file}`, mtimeMs }
+  }
+  return { path: `${main}/docs/briefs/${base}.md`, mtimeMs: null }
 }
 
 /**
@@ -719,6 +732,7 @@ async function printedRecord(
   progressMs: number | null,
   ownerMs: number | null,
 ): Promise<RecordRead | null> {
+  if (ownerMs === null) return null
   const brief = await briefOnDisk(ls, main, base)
   return cachedRead(printCache, printInFlight, base, JSON.stringify([progressMs, brief.path, brief.mtimeMs, ownerMs]), async () => {
     const r = await $.process.run(['node', `${main}/scripts/run-status.mjs`, '--print', `${dir}/${base}.progress`, brief.path], {
@@ -800,12 +814,14 @@ async function poll($: EngineInterface): Promise<void> {
   }
   const pids = [raw.dispatcher, ...raw.running.map(r => r.pid)].filter((n): n is number => n !== null)
   const alive = await alivePids($, pids).catch(() => new Set<number>())
-  const { recent, endings } = await readEndings($, ls, dir, sources, ownerMs, raw, Object.keys(afters), archived).catch(() => ({
+  const { recent, endings, newer, picked } = await readEndings($, ls, dir, sources, ownerMs, raw, Object.keys(afters), archived).catch(() => ({
     recent: [] as Ended[],
     endings: [] as Ending[],
+    newer: [] as string[],
+    picked: [] as string[],
   }))
-  // The --print fallback keeps the runs this poll drew, running or not.
-  prune(printCache, new Set([...raw.running.map(r => baseName(r.brief)), ...endings.map(e => e.base)]))
+  // The --print fallback keeps every run this poll read, running or not, a newer answer included.
+  prune(printCache, new Set([...raw.running.map(r => baseName(r.brief)), ...picked]))
   const now = await $.clock.now()
   const offset = $.process
     .run(['date', '+%z'], { timeoutMs: 5000 })
@@ -831,6 +847,7 @@ async function poll($: EngineInterface): Promise<void> {
     plans,
     afters,
     endings,
+    newer,
     handoffs,
     deployStages: deploys.stages,
     liveDeploy: deploys.live,
@@ -949,6 +966,8 @@ export const register: Register = on => {
       )
     }
     if (b.notice !== null) return <Text color={F.yellow}>{b.notice}</Text>
+    // Runs that are not running whose record the board cannot read draw no row, so one line names them.
+    const newerLine = b.newer.length === 0 ? null : <Text color={F.yellow}>{`${b.newer.join(', ')}: ${RECORD_NEWER}`}</Text>
 
     // The header's three figures as dot numerals, each in the colour its
     // section uses below; a zero fades to the to-come grey.
@@ -1208,6 +1227,7 @@ export const register: Register = on => {
           </Box>
           {tileRow(tiles)}
           {b.spend !== null && sparkline(b.spend.days)}
+          {newerLine}
         </Box>
 
         {hasBlocked && (
@@ -1319,7 +1339,7 @@ export const register: Register = on => {
                     <Text color={F.text}>{money(r.cost)}</Text>
                   </Text>
                 </Box>
-                {r.source === 'newer' ? (
+                {r.isAlive && r.source === 'newer' ? (
                   <Text color={F.yellow}>{RECORD_NEWER}</Text>
                 ) : r.isAlive ? (
                   <Box flexDirection="column" marginTop={1}>

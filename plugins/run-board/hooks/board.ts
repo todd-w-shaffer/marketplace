@@ -828,7 +828,7 @@ export function buildBoard(
     tools?: Readonly<Record<string, string>>
     /** Each running brief's log marks, as `grep -noE LOG_MARKS` prints them; a brief whose log was not read is absent. */
     marks?: Readonly<Record<string, string>>
-    /** Each brief's cycle count by its key, read from `origin/main`; a brief whose blobs could not be read is absent. */
+    /** Each brief's cycle count by its key, as `--print` prints it for the brief's `origin/main` blobs; a brief whose facts could not be read is absent. */
     cycles?: Readonly<Record<string, number>>
     /** The machine's UTC offset as `date +%z` prints it, `-0500`. */
     utcOffset?: string
@@ -836,15 +836,17 @@ export function buildBoard(
     spend?: Board['spend']
     /** Each brief's `After:` sittings, read from `origin/main`. */
     afters?: Readonly<Record<string, string[]>>
-    /** The progress files read for RECENT and BLOCKED. */
+    /** The runs RECENT, BLOCKED and the timeline read, each with its record. */
     endings?: readonly Ending[]
+    /** The runs that are not running whose record has a version this board does not know, by sitting. */
+    newer?: readonly string[]
     /** Each stopped run's handoff text, by run name. */
     handoffs?: Readonly<Record<string, string>>
     /** Each red deploy's failed strip stage, by run. */
     deployStages?: Readonly<Record<string, string>>
     /** The newest deploy.yml run on main that went live, or empty when it could not be read. */
     liveDeploy?: string
-    /** Each sitting's plan cost by sitting, from token-ledger, or null when it could not be read. */
+    /** Each sitting's plan cost by sitting, as scripts/plan-costs.mjs prints it, or null when it could not be read. */
     plans?: Readonly<Record<string, number>> | null
     /** How many briefs were split from each sitting, by sitting. */
     splits?: Readonly<Record<string, number>>
@@ -930,6 +932,7 @@ export function buildBoard(
     .map(f => ({ entry: f.entry, ...sittingOf(f.brief), lane: f.lane, isShipped: f.status === 0, detail: outcomeDetail(outcomeOf(f)) }))
   return {
     notice: null,
+    newer: [...(extra.newer ?? [])],
     checkedAt: now,
     clock: localClock(now, utcOffset),
     spend,
@@ -1145,13 +1148,16 @@ export function timelineOf(input: {
     placed.push({ slot, bar: bar(sitting, 'running', from, end, liveEnd, isOver) })
     ends.set(sitting, end)
   })
-  // Whether each ended run went live, by run name, from its record.
-  const endedLive = new Map(endings.flatMap(e => (e.record.end === null ? [] : [[e.base, e.record.end.live] as const])))
+  // Each ended run's launch spans, by run name, from its record.
+  const spansOf = new Map(endings.map(e => [e.base, slotSpans(e.record, e.mtimeMs)] as const))
   // A finished record whose slot was never released, by run name: its progress file ends it.
   const unreleased = new Map<string, { slot: number; takenMs: number; tone: BarTone }[]>()
   for (const f of raw.finished) {
     if (f.slot == null || f.slotTakenMs == null) continue
-    const tone: BarTone = (endedLive.get(baseName(f.brief)) ?? (f.status === 0 && f.kind === null)) ? 'live' : 'stopped'
+    // The launch's own span in the record says whether it went live; a launch the record does not hold reads its own status fields.
+    const takenMs = f.slotTakenMs
+    const span = spansOf.get(baseName(f.brief))?.find(x => x.endMs !== null && isSameLaunch(takenMs, x))
+    const tone: BarTone = (span?.isLive ?? (f.status === 0 && f.kind === null)) ? 'live' : 'stopped'
     if (f.slotReleasedMs == null) {
       const base = baseName(f.brief)
       unreleased.set(base, [...(unreleased.get(base) ?? []), { slot: f.slot, takenMs: f.slotTakenMs, tone }])
@@ -2192,7 +2198,7 @@ export function blockedOf(input: {
   deployStages?: Readonly<Record<string, string>>
   /** The newest deploy.yml run on main that went live, or empty. */
   liveDeploy?: string
-  /** Each sitting's plan cost, or null when the ledger could not be read. */
+  /** Each sitting's plan cost, or null when scripts/plan-costs.mjs could not be read. */
   plans?: Readonly<Record<string, number>> | null
 }): { blocks: Block[]; drawn: Set<string> } {
   const { raw, endings, afters, handoffs = {}, deployStages = {}, liveDeploy = '', plans = null } = input

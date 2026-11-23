@@ -210,6 +210,8 @@ export type BriefCost = { cycles: number | null; usd: number | null; lit?: numbe
 export type Board = {
   /** A line the board draws alone in place of every card, or null: status.json is newer than the board, or names no sources. */
   notice: string | null
+  /** The runs that are not running whose record has a version this board does not know, by sitting; each draws no row. */
+  newer: string[]
   checkedAt: number
   /** `checkedAt` on a 12-hour clock in the machine's offset, `7:41 PM`. */
   clock: string

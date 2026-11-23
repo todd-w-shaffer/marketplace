@@ -1915,6 +1915,8 @@ const LOGS = `${HOME}/Library/Logs/shootsfilm-autopilot`
 // status.json's `sources` on the machine the defaults name; DEFAULT_STATUS heads every poll fixture's status.json.
 const DEFAULT_SOURCES = { main: `${HOME}/Desktop/apps/shootsfilm`, log_dir: LOGS, archloop_log_dir: `${HOME}/Library/Logs/shootsfilm-archloop` }
 const DEFAULT_STATUS = { version: 1, sources: DEFAULT_SOURCES }
+// The main checkout's scripts directory as a poll lists it: the owner is there, so --print runs.
+const OWNER_LISTING = { value: [{ name: 'run-status.mjs', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] }
 const POLL_FILES: Record<string, string> = {
   [`${LOGS}/status.json`]: JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [], finished: [] }),
   [`${LOGS}/kickoff-sitting-s682-dom-wait-quiet.progress`]: stampedAt([[NOW - 3 * HOUR, 'slot: 1'], [NOW - 2 * HOUR, 'finished: shipped; production is live (run 1). ($22.40, 60 min)']]),
@@ -1951,7 +1953,9 @@ test('one poll reads the files and the ledger, and writes a board with plan cost
   on('fs.list', (_: unknown, e: { path: string }) =>
     e.path === LOGS
       ? { value: Object.entries(POLL_MTIMES).map(([name, mtimeMs]) => ({ name, kind: 'file', size: 1, mtimeMs })) }
-      : { deny: 'no such directory' },
+      : e.path === `${DEFAULT_SOURCES.main}/scripts`
+        ? OWNER_LISTING
+        : { deny: 'no such directory' },
   )
   const ledger = `${PLAN_LEDGER}\n`
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
@@ -2105,7 +2109,11 @@ test('a brief blob that fails to read is asked for again on the next poll', asyn
   const status = JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s686-dashboard-rail.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
   on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: status } : { deny: 'no such file' }))
   on('fs.list', (_: unknown, e: { path: string }) =>
-    e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
+    e.path === LOGS
+      ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] }
+      : e.path === `${DEFAULT_SOURCES.main}/scripts`
+        ? OWNER_LISTING
+        : { deny: 'no such directory' },
   )
   const blobs: Record<string, string> = { b686: SPLIT_BRIEFS[0]?.text ?? '', b690: SPLIT_BRIEFS[1]?.text ?? '', '5150': SITTINGS_JSON }
   let registryReads = 0
@@ -2442,7 +2450,11 @@ test('one poll counts every brief, reads epics from sittings.json and the plan, 
   const status = JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [{ entry: 1, brief: `${BRIEFS}s694-system-catalogue.md`, lane: '', reason: 'a free slot', cause: null }], finished: [] })
   on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: status } : { deny: 'no such file' }))
   on('fs.list', (_: unknown, e: { path: string }) =>
-    e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
+    e.path === LOGS
+      ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] }
+      : e.path === `${DEFAULT_SOURCES.main}/scripts`
+        ? OWNER_LISTING
+        : { deny: 'no such directory' },
   )
   const blobs: Record<string, string> = { c7694: briefText('S694', 'dashboard/E2', '', 3), c7515: EPIC_SITTINGS, c7901: DASHBOARD_PLAN }
   // Shorter than PLAN_LEDGER, which an earlier poll read, so this poll reads the ledger again from its start.
@@ -2529,7 +2541,11 @@ async function pollFixture($: any, on: any, status: object, answer: (poll: numbe
   const text = JSON.stringify({ ...DEFAULT_STATUS, dispatcher: 1, running: [], queued: [], finished: [], ...status })
   on('fs.read', (_: unknown, e: { path: string }) => (e.path === `${LOGS}/status.json` ? { value: text } : { deny: 'no such file' }))
   on('fs.list', (_: unknown, e: { path: string }) =>
-    e.path === LOGS ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] } : { deny: 'no such directory' },
+    e.path === LOGS
+      ? { value: [{ name: 'status.json', kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false }] }
+      : e.path === `${DEFAULT_SOURCES.main}/scripts`
+        ? OWNER_LISTING
+        : { deny: 'no such directory' },
   )
   let poll = 0
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
@@ -2749,7 +2765,7 @@ test('a --print answer of a version the board does not know draws the newer line
   const { ui } = await pollPane(
     $,
     on,
-    { [`${LOGS}/status.json`]: runningStatus(), [`${LOGS}/${S758}.progress`]: S758_PROGRESS },
+    { [`${LOGS}/status.json`]: runningStatus(), [`${LOGS}/${S758}.progress`]: S758_PROGRESS, [`${SOURCES.main}/scripts/run-status.mjs`]: '' },
     argv => (isPrint(argv) ? { exitCode: 0, stdout: JSON.stringify({ ...runningRecord({ stage: 'observations' }), version: 2 }) } : undefined),
   )
   expect(await has(ui, 'the record is newer than the board')).toBe(true)
@@ -2826,7 +2842,7 @@ test("a finished run's block kind is status.json's kind when it is not null, els
   // The outcome's first word is `shipped`: a board that keys the kind on it reads no red deploy.
   const redEnd = { outcome: 'shipped', text: 'shipped; deploy failed (run 45149929776). ($8.00, 14 min)', kind: 'deploy-red', live: false, deploy_run: 45149929776 }
   const b = buildBoard(raw, new Set(), NOW, {
-    endings: [ending(red, NOW - HOUR, redEnd), ending(split, NOW - 2 * HOUR, endOf('stopped: over the ceiling. ($3.00, 9 min)', 'decision'))],
+    endings: [ending(red, NOW - HOUR, redEnd, { launch_spans: [spanAt(2, -120, -60, false)] }), ending(split, NOW - 2 * HOUR, endOf('stopped: over the ceiling. ($3.00, 9 min)', 'decision'))],
     afters: { [`${BRIEFS}s762-split-run.md`]: [] },
     deployStages: { '45149929776': 'prod' },
   })
@@ -3092,3 +3108,88 @@ for (const [name, deck] of [
     expect(calls.filter(c => isDeckPrint(c.argv)).length).toBe(2)
   })
 }
+
+// ---------- each launch, each run, each brief its own ----------
+
+test("an earlier launch that stopped keeps its stopped bar after a later launch of the brief ships", () => {
+  const brief = `${BRIEFS}s700-relaunched.md`
+  const raw = statusOf({
+    finished: [
+      { entry: 1, brief, lane: '', status: 1, outcome: 'x', kind: 'decision', slot: 1, slot_taken: iso(NOW - 5 * HOUR), slot_released: iso(NOW - 4 * HOUR) },
+      { entry: 2, brief, lane: '', status: 0, outcome: 'x', kind: null, slot: 2, slot_taken: iso(NOW - 2 * HOUR), slot_released: iso(NOW - HOUR) },
+    ],
+  })
+  // The record is the latest launch's: it shipped, and it holds both launches' spans.
+  const record = { launch_spans: [spanAt(1, -300, -240, false), spanAt(2, -120, -60, true)] }
+  const b = buildBoard(raw, new Set(), NOW, { endings: [ending('kickoff-sitting-s700-relaunched', NOW - HOUR, endOf('shipped; production is live (run 1). ($9.00, 60 min)'), record)], afters: {} })
+  expect(barsOf(b, 1)).toEqual(['S700 stopped -300..-240'])
+  expect(barsOf(b, 2)).toEqual(['S700 live -120..-60'])
+})
+
+test('a finished run whose record is newer than the board is named on one line, and its --print answer is kept', async ($, on) => {
+  const newer = JSON.stringify({ ...JSON.parse(recordJson(FIN_LIVE)), version: 2 })
+  const { ui, clock, calls } = await pollPane($, on, finFiles(), argv => (isFinPrint(argv) ? { exitCode: 0, stdout: newer } : undefined))
+  expect(await has(ui, 'S761: the record is newer than the board')).toBe(true)
+  expect(await has(ui, '42m')).toBe(false)
+  await ui.unmount()
+  await clock.advance(5000)
+  expect(calls.filter(c => isFinPrint(c.argv)).length).toBe(1)
+})
+
+test('a record older than its progress file missed its last write, so the run draws through --print', async ($, on) => {
+  const stale = recordJson(null)
+  const { ui } = await pollPane(
+    $,
+    on,
+    finFiles({ [`${SOURCES.log_dir}/${FIN}.run.json`]: stale }),
+    argv => (isFinPrint(argv) ? { exitCode: 0, stdout: FIN_PRINTED } : undefined),
+    { [`${SOURCES.log_dir}/${FIN}.run.json`]: NOW - 10 * MIN, [`${LOGS}/${FIN}.progress`]: NOW },
+  )
+  expect(await has(ui, '42m')).toBe(true)
+  await ui.unmount()
+})
+
+test('a run whose brief is a directory brief prints with its README', async ($, on) => {
+  const files = finFiles()
+  delete files[`${SOURCES.main}/docs/briefs/${FIN}.md`]
+  files[`${SOURCES.main}/docs/briefs/${FIN}/README.md`] = '# S761'
+  const { ui } = await pollPane($, on, files, argv =>
+    isPrint(argv) && argv[4] === `${SOURCES.main}/docs/briefs/${FIN}/README.md` ? { exitCode: 0, stdout: FIN_PRINTED } : undefined,
+  )
+  expect(await has(ui, '42m')).toBe(true)
+  await ui.unmount()
+})
+
+test('a main checkout with no run-status.mjs runs no --print', async ($, on) => {
+  const files = finFiles()
+  delete files[`${SOURCES.main}/scripts/run-status.mjs`]
+  const { calls } = await pollPane($, on, files, argv => (isPrint(argv) ? { exitCode: 0, stdout: FIN_PRINTED } : undefined))
+  expect(calls.filter(c => isPrint(c.argv) || (c.argv[2] ?? '').includes('--print'))).toEqual([])
+})
+
+test('a dead run whose record is newer than the board says the launcher is gone', async ($, on) => {
+  const { ui } = await pollPane(
+    $,
+    on,
+    { [`${LOGS}/status.json`]: runningStatus({}, { pid: 99 }), [S758_RECORD]: JSON.stringify({ ...runningRecord(), version: 2 }) },
+  )
+  expect(await has(ui, 'launcher gone, no finished line')).toBe(true)
+  expect(await has(ui, 'the record is newer than the board')).toBe(false)
+  await ui.unmount()
+})
+
+test("ON DECK pipes a directory brief's blobs with a newline between them", async ($, on) => {
+  const ls = `100644 blob a781\tdocs/briefs/s781-dir/README.md\n100644 blob b781\tdocs/briefs/s781-dir/cycles.md\n`
+  const printed = JSON.stringify({ ...PRINT_BASE, end: null, mode: 'autopilot', epic: null, after: [], split_from: [], cycles: 2 })
+  const { ui } = await pollPane($, on, deckFiles(), argv => {
+    if (argv[0] === 'git' && argv[1] === 'ls-tree') return { exitCode: 0, stdout: ls }
+    const script = argv[2] ?? ''
+    if (argv[0] === 'sh' && script.includes('--print /dev/null /dev/stdin'))
+      return script.includes('git cat-file blob "${2}" && echo && git cat-file blob "${3}"') && argv.slice(5).join(' ') === 'a781 b781'
+        ? { exitCode: 0, stdout: printed }
+        : { exitCode: 1, stdout: '' }
+    return undefined
+  })
+  expect(await has(ui, 'ready 1')).toBe(true)
+  await ui.unmount()
+})

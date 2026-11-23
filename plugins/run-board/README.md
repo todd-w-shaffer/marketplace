@@ -114,7 +114,9 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   finished by hand after it stopped reads `rescued`, with the stopped run's time and cost. RECENT comes from each sitting's record,
   `<sources.log_dir>/<name>.run.json`, whose `end` is its latest outcome, so it survives a dispatcher restart, which
   empties status.json's finished list. A run with no record the board can read draws what `--print` prints for it,
-  and a record with no `end` draws in neither RECENT nor BLOCKED. ON DECK, between the queue and RECENT, lists each brief on
+  and a record with no `end` draws in neither RECENT nor BLOCKED. A record older than its progress file
+  missed its last write, so the run draws through `--print`. A run whose record is a version the board does not
+  know draws no row, and one line under the header names it: `S761: the record is newer than the board`. ON DECK, between the queue and RECENT, lists each brief on
   `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
   group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow
   `enrich` (no Mode line yet: it needs a pass before autopilot), and red `needs you` (marked
