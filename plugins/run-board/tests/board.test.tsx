@@ -17,7 +17,6 @@ import {
   handoffStops,
   buildBoard,
   buildLoop,
-  deckTree,
   finishedToast,
   laneTag,
   lanesOf,
@@ -30,6 +29,8 @@ import {
   loopStageOf,
   newestRunDir,
   onDeckOf,
+  UNQUEUED_NEXT,
+  FOLD_KEY,
   outcomeDetail,
   phaseGlyphs,
   phaseFill,
@@ -54,7 +55,6 @@ import {
   DEPLOY_LIVE,
   foldSummary,
   isFolded,
-  liveDepths,
   historyTag,
   lineTimes,
   UNREAD_HEADER,
@@ -944,7 +944,7 @@ test('an entry held off a run the board does not show running is a root tagged h
   expect(rows.map(r => r.kind)).toEqual(['held'])
 })
 
-test('on deck lists unheld briefs by sitting, epic lane from the Epic line', async () => {
+test('the unqueued briefs are the unheld briefs on main by sitting, epic lane from the Epic line', async () => {
   const headers: Record<string, BriefHeader> = { bbb222: hdr('ready', 'minisite/E4', 'S340, S341'), ccc333: hdr('ready', 'account-basics/E8'), fff666: hdr('ready'), '222999': hdr('enrich') }
   const briefs = briefFiles(lsTreeBlobs(LS_TREE)).map(f => ({ ...f, header: headers[f.sha] ?? UNREAD_HEADER }))
   const deck = onDeckOf(briefs, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
@@ -958,45 +958,42 @@ test('on deck lists unheld briefs by sitting, epic lane from the Epic line', asy
 })
 
 const deckOf = (sitting: string, mode: Deck['mode'], after = ''): Deck => ({ sitting, slug: sitting.toLowerCase(), lane: 'fix', epic: '', after, mode })
-const deckDrawn = (rows: ReturnType<typeof deckTree>) =>
-  rows.map(r => `${r.rails}${r.joint}${r.kind === 'group' ? r.slug : r.sitting} ${[r.wait === '' ? '' : `after ${r.wait}`, r.note].filter(x => x !== '').join(' · ')}`.trimEnd())
 
-test('on deck draws as a tree under ready, enrich and needs you, each brief under the one it waits on', async () => {
-  const deck = [
-    deckOf('S467', 'ready'),
-    deckOf('S470', 'ready', 'S429, S434'),
-    deckOf('S471', 'ready', 'S470'),
-    deckOf('S473', 'ready', 'S470, S471'),
-    deckOf('S472', 'enrich', 'S470, S471, S475'),
-    deckOf('S474', 'enrich'),
-    deckOf('S435', 'interactive', 'S470'),
-    deckOf('S436', 'interactive', 'S429, S434'),
+test('an unqueued brief hangs under the deepest live sitting on its After line, and one that names nothing live is a root', async () => {
+  // S434 runs, S475 waits under it, and S429 has shipped.
+  const running = [{ sitting: 'S434', slug: 's434', lane: 'epic' }]
+  const queued = [waits(1, 'S475', 'fix', ['S434'])]
+  const unqueued = [
+    deckOf('S473', 'ready', 'S429'),
+    deckOf('S472', 'enrich', 'S470'),
+    deckOf('S471', 'ready', 'S434, S475'),
+    deckOf('S470', 'ready', 'S429, S475'),
+    deckOf('S467', 'interactive'),
   ]
-  // S434 is running, S475 is queued one deep, S429 has shipped. Each row names
-  // only its nearest wait, and none under the parent the tree draws.
-  const live = new Map([['S434', 0], ['S475', 1]])
-  expect(deckDrawn(deckTree(deck, live, new Set(['S475'])))).toEqual([
-    'ready 4',
-    '├╌S467',
-    '└╌S470 after S434',
-    '  └─S471',
-    '    └─S473',
-    'enrich 2',
-    '├╌S472 after S471',
-    '└╌S474',
-    'needs you 2',
-    '├╌S435 after S470',
-    '└╌S436 after S434',
+  const rows = queueTree(running, queued, [], unqueued)
+  expect(drawn(rows)).toEqual([
+    'S434',
+    '└─S475',
+    '  ├─S470 not queued',
+    '  │ └─S472 needs a decision pass',
+    '  └─S471 after S434 · not queued',
+    'S467 not queued',
+    'S473 not queued',
   ])
-  expect(deckTree(deck, new Map(), new Set()).filter(r => r.kind === 'group').map(r => r.mode)).toEqual(['ready', 'enrich', 'interactive'])
+  expect(rows.filter(r => r.kind === 'unqueued').map(r => `${r.sitting} ${r.next}`)).toEqual(['S470 unqueued', 'S472 unqueued', 'S471 unqueued', 'S467 unqueued', 'S473 unqueued'])
+  expect(UNQUEUED_NEXT).toBe('unqueued')
 })
 
-test('an empty group draws nothing, and a ring of waits still draws every brief', async () => {
-  const deck = [deckOf('S500', 'enrich', 'S501'), deckOf('S501', 'enrich', 'S500')]
-  const rows = deckDrawn(deckTree(deck, new Map(), new Set()))
-  expect(rows[0]).toBe('enrich 2')
-  expect(rows.length).toBe(3)
-  expect(rows.some(r => r.includes('S500')) && rows.some(r => r.includes('S501'))).toBe(true)
+test('a queued entry hangs under the unqueued brief it names, and unqueued roots follow the free roots and precede the blocks', async () => {
+  const queued = [waits(1, 'S501', 'fix', ['S500']), waits(2, 'S502', 'fix', [], 'a free slot')]
+  const blocks = [{ sitting: 'S490', slug: 's490', holds: [], nodeNext: 'you' }]
+  const rows = queueTree([], queued, blocks, [deckOf('S500', 'ready'), deckOf('S499', 'ready')])
+  expect(drawn(rows)).toEqual(['S502 a free slot', 'S499 not queued', 'S500 not queued', '└─S501', 'S490 blocked ↑'])
+})
+
+test('an After ring among unqueued briefs draws each brief once', async () => {
+  const rows = queueTree([], [], [], [deckOf('S500', 'enrich', 'S501'), deckOf('S501', 'enrich', 'S500')])
+  expect(drawn(rows)).toEqual(['S500 after S501 · needs a decision pass', '└─S501 needs a decision pass'])
 })
 
 // S625's real stop: its progress file as the launcher wrote it, and the status
@@ -1044,7 +1041,7 @@ const S625_ENDINGS = [
 const redEnd = (text: string, run: number) => endOf(text, 'deploy-red', { deploy_run: run })
 const heldDeck = (sitting: string, slug: string): Deck => ({ sitting, slug, lane: 'epic', epic: 'gallery', after: '', mode: 'ready' })
 
-test("S625's decision stop is one block that holds S626 and S627, which leave on deck", async () => {
+test("S625's decision stop is one block that holds S626 and S627, which draw only under it", async () => {
   const b = buildBoard(S625_STATUS, new Set([927]), NOW, {
     endings: S625_ENDINGS,
     afters: S625_AFTERS,
@@ -1063,10 +1060,13 @@ test("S625's decision stop is one block that holds S626 and S627, which leave on
   // The refused S626 is a hold, never a root of its own.
   expect(k.holds).toEqual([
     { sitting: 'S626', slug: 'gallery-arrange-page', parent: 'S625', after: ['S625'], next: 'machine' },
-    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'], next: 'machine' },
+    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'], next: UNQUEUED_NEXT },
   ])
   expect(k.next).toBe('answer in the handoff, then relaunch S625')
   expect(b.onDeck.map(d => d.sitting)).toEqual(['S640'])
+  // The refused S626 is stuck with no node, so it stays the machine's. S627 is a held brief that nothing
+  // queues, Todd's to queue. Each draws once, under the block.
+  expect(drawn(queueTree(b.running, b.queued, b.blocked, b.onDeck))).toEqual(['S640 not queued', 'S625 blocked ↑ · holds 2', '└─S626', '  └─S627 not queued'])
   expect(foldSummary('blocked', b)).toBe('1 cause · holds 2 · ? you S625')
   expect(b.recent).toEqual([])
 })
@@ -1149,9 +1149,8 @@ test('a red deploy stops being stuck once a newer deploy run on main goes live',
   expect(blocked('44934802905')).toEqual([])
 })
 
-test('recent and on deck fold themselves while BLOCKED shows, unless set by hand', async () => {
+test('recent folds itself while BLOCKED shows, unless set by hand', async () => {
   expect(isFolded('recent', {}, true)).toBe(true)
-  expect(isFolded('deck', {}, true)).toBe(true)
   expect(isFolded('queued', {}, true)).toBe(false)
   expect(isFolded('recent', { recent: false }, true)).toBe(false)
   expect(isFolded('recent', {}, false)).toBe(false)
@@ -1173,6 +1172,7 @@ test("the pane draws S625's block above a folded recent, and a header press keep
   // The blocked card names the chain once, and the queue card draws it.
   expect(await has(ui, 'holds 2 ‖ S626 → S627, drawn in the queue ↓')).toBe(true)
   expect(await has(ui, '└─‖ S626 gallery-arrange-page')).toBe(true)
+  expect(await has(ui, '  └─◇ S627 gallery-arrange-options')).toBe(true)
   expect(await has(ui, '⏸')).toBe(false)
   // Recent folds itself while BLOCKED shows, and keeps its one line.
   expect((await ui.find({ type: 'Text', text: /2 live · last S624/ })) === undefined).toBe(false)
@@ -1190,8 +1190,9 @@ test('a handoff question reads both the bare and the addressed label', () => {
   expect(handoffQuestion('**Stop:** 6. No question here.')).toBe('')
 })
 
-// The shape the pane's board atom is stored under; it moves with the Board type.
+// The shapes the pane's board and folds atoms are stored under; each moves with its type.
 const BOARD_SHAPE = 'board-17'
+const FOLDS_SHAPE = 'folds-2'
 
 type Ui = {
   find: (q: { type: string; text?: RegExp }) => Promise<unknown>
@@ -1202,7 +1203,7 @@ type Ui = {
 async function mountBoard($: any, on: any, b: unknown, folds: Record<string, boolean> = {}, bodyColumns = 100) {
   const sets: unknown[] = []
   on('state.get', (_: unknown, e: { key: string }) => ({
-    value: { value: e.key === 'board' ? { shape: BOARD_SHAPE, value: b } : { shape: 'folds-1', value: folds }, version: 1 },
+    value: { value: e.key === 'board' ? { shape: BOARD_SHAPE, value: b } : { shape: FOLDS_SHAPE, value: folds }, version: 1 },
   }))
   on('state.set', (_: unknown, e: { value?: { value: unknown } }) => {
     sets.push((e.value ?? { value: undefined }).value)
@@ -1232,7 +1233,7 @@ const firstAt = async (ui: Ui, text: string): Promise<number> => (await ui.findA
 
 // S684's stop as the Paper "Now" pane drew it: S684 stopped at step 0's savor
 // and holds the nav chain; S692 runs with two queued under it; S650 waits on
-// nothing; S695 to S697 wait on deck.
+// nothing; S695 to S697 are briefs nothing queues.
 const S684_BRIEFS: Record<string, string[]> = {
   's684-home-gallery-sections': [],
   's685-layout-gallery-rows': ['S684'],
@@ -1313,14 +1314,14 @@ test("S684's held chain draws once, in the queue, under its block and after the 
     '  └─S694',
     'S650 a free slot',
     'S684 blocked ↑ · holds 8',
-    '└─S685',
-    '  └─S686',
-    '    └─S698',
-    '      ├─S687',
-    '      ├─S688',
-    '      │ └─S691 after S686',
-    '      ├─S689',
-    '      └─S690',
+    '└─S685 not queued',
+    '  └─S686 not queued',
+    '    └─S698 not queued',
+    '      ├─S687 not queued',
+    '      ├─S688 not queued',
+    '      │ └─S691 after S686 · not queued',
+    '      ├─S689 not queued',
+    '      └─S690 not queued',
   ])
   expect(rows.slice(4).every(r => r.kind !== 'after')).toBe(true)
   // The blocked card's holds are the queue's order, each under the same parent.
@@ -1443,24 +1444,42 @@ test('spend that could not be read draws no spend line', async ($, on) => {
 const coloursOf = async (ui: Ui, text: string): Promise<string[]> =>
   (await ui.findAll({ type: 'Text' })).filter(t => t.text === text).map(t => t.props?.color ?? '')
 
-test('on deck names only the nearest wait, and writes a queued one in blue', async ($, on) => {
-  const b = s684Board()
-  expect(deckDrawn(deckTree(b.onDeck, liveDepths(b), new Set(b.queued.map(q => q.sitting))))).toEqual([
-    'ready 3',
-    '└╌S695 after S693',
-    '  ├─S696',
-    '  └─S697',
+test('an unqueued brief draws ◇ in text, its joint and cost squares in surface grey, under the queued sitting it names', async ($, on) => {
+  const b = s684Board({ cycles: { [`${BRIEFS}s692-design-tokens.md`]: 3, [`${BRIEFS}s695-admin-scale.md`]: 2 } })
+  expect(drawn(queueTree(b.running, b.queued, b.blocked, b.onDeck)).slice(0, 7)).toEqual([
+    'S692',
+    '└─S693',
+    '  ├─S694',
+    '  │ ├─S696 after S695 · not queued',
+    '  │ └─S697 after S695 · not queued',
+    '  └─S695 not queued',
+    'S650 a free slot',
   ])
-  const { ui } = await mountBoard($, on, b, { deck: false })
-  expect(await has(ui, 'after S693')).toBe(true)
-  expect(await has(ui, 'after S694')).toBe(false)
-  expect(await coloursOf(ui, 'S693')).toContain('#8aadf4')
+  const { ui } = await mountBoard($, on, b)
+  expect(await rowMarks(ui, 'S695')).toEqual([{ glyph: '◇', glyphColor: TEXT, idColor: TEXT }])
+  expect(await jointsOf(ui, 'S695')).toEqual([`└─ ${SURFACE2}`])
+  expect((await costBox(ui, 'S695 s695')).squares).toEqual([`■■ ${SURFACE2}`])
+  // A held brief that nothing queues is Todd's too, and its chain stays yellow.
+  expect(await rowMarks(ui, 'S685')).toEqual([{ glyph: '◇', glyphColor: TEXT, idColor: TEXT }])
+  expect(await jointsOf(ui, 'S685')).toEqual([`└─ ${YELLOW}`])
+  // ON DECK is gone: no card, no fold and no hotkey.
+  const buttons: Drawn[] = await ui.findAll({ type: 'Button' })
+  expect(buttons.some(x => x.props?.hotkey === 'd')).toBe(false)
+  expect(Object.values(FOLD_KEY)).not.toContain('d')
+  expect(await has(ui, '▾ on deck')).toBe(false)
+  expect(await has(ui, '▸ on deck')).toBe(false)
   await ui.unmount()
 })
 
-test('a deck wait that has shipped draws no wait', async () => {
-  const rows = deckDrawn(deckTree([deckOf('S800', 'ready', 'S429, S430')], new Map(), new Set()))
-  expect(rows).toEqual(['ready 1', '└╌S800'])
+test('with nothing queued, the queue card draws the unqueued briefs, and its folded summary counts them', async ($, on) => {
+  const b = buildBoard({ dispatcher: null, running: [], queued: [], finished: [] }, new Set(), NOW, { onDeck: [deckOf('S800', 'ready', 'S429, S430'), deckOf('S801', 'enrich')] })
+  expect(foldSummary('queued', b)).toBe('2 not queued')
+  const { ui } = await mountBoard($, on, b)
+  expect(await has(ui, '▾ queued')).toBe(true)
+  // A wait that has shipped draws no wait.
+  expect(drawn(queueTree(b.running, b.queued, b.blocked, b.onDeck))).toEqual(['S800 not queued', 'S801 needs a decision pass'])
+  expect(await has(ui, 'needs a decision pass')).toBe(true)
+  await ui.unmount()
 })
 
 // The Proposed pane's ten recent runs, newest first: minutes and cost.
@@ -2304,7 +2323,7 @@ test('the epics card names each epic by its plan title, a cell per sitting, ship
   // A plan with no `### E3` heading, and a plan file the listing lacks, give the raw value.
   expect(await epicCells(ui, 'dashboard/E3')).toEqual([`□ ${SURFACE2}`])
   expect(await epicCells(ui, 'multi-gallery/E4')).toEqual([`□□ ${SURFACE2}`])
-  expect(await has(ui, 'later')).toBe(false)
+  expect(await has(ui, 'later ')).toBe(false)
   // The card sits between the running cards and the queue.
   const head = await firstAt(ui, '▾ epics')
   expect(head > (await firstAt(ui, 'S693 token-export')) && head < (await firstAt(ui, '▾ queued'))).toBe(true)
@@ -2347,12 +2366,12 @@ test('a folded epics card keeps one line: each epic, shipped over total', async 
   await ui.unmount()
 })
 
-test('queue and deck rows draw a square per cycle and the projected cost from the median cost per cycle', async ($, on) => {
+test('queue rows draw a square per cycle and the projected cost from the median cost per cycle', async ($, on) => {
   const b = epicBoard()
   // $7.70, $15 and $5 a cycle: the median is $7.70, so 3 cycles cost $23.10. The $1 run names no cycle.
   expect(Math.abs((b.costs.S694?.usd ?? 0) - 23.1) < 1e-9).toBe(true)
   expect(b.costs.S650).toEqual({ cycles: 0, usd: null })
-  const { ui } = await mountBoard($, on, b, { deck: false })
+  const { ui } = await mountBoard($, on, b)
   const s694 = await costBox(ui, 'S694 system-catalogue')
   expect(s694.squares).toEqual([`■■■ ${BLUE}`])
   expect(s694.text.endsWith('~$23')).toBe(true)
@@ -2362,9 +2381,9 @@ test('queue and deck rows draw a square per cycle and the projected cost from th
   expect(s650.squares).toEqual([`· ${SURFACE2}`])
   expect(s650.text.endsWith('~$?')).toBe(true)
   expect((await costBox(ui, 'S685 layout-gallery-rows')).squares).toEqual([`■■■ ${YELLOW}`])
-  // An on-deck brief takes its group's colour.
-  expect((await costBox(ui, 'S699 later-arc')).squares).toEqual([`■■ ${GREEN}`])
-  // Every box is one width across the queue and deck cards, a tree child's included, so each cost ends in one column.
+  // An unqueued brief's squares are surface grey.
+  expect((await costBox(ui, 'S699 later-arc')).squares).toEqual([`■■ ${SURFACE2}`])
+  // Every box is one width across the queue card, a tree child's included, so each cost ends in one column.
   const boxes = await Promise.all(['S693 token-export', 'S694 system-catalogue', 'S686 dashboard-rail', 'S650 stray-check', 'S685 layout-gallery-rows', 'S699 later-arc'].map(n => costBox(ui, n)))
   expect(new Set(boxes.map(x => x.text.length)).size).toBe(1)
   expect(boxes.every(x => /~\$(\d+|\?)$/.test(x.text))).toBe(true)
@@ -2788,7 +2807,7 @@ for (const [name, status] of [
   ['a status.json with no sources', JSON.stringify({ ...JSON.parse(runningStatus()), sources: undefined })],
   ['a status.json whose sources name no strings', JSON.stringify({ ...JSON.parse(runningStatus()), sources: { main: 7 } })],
 ] as const) {
-  test(`${name} draws the no-sources line alone, with no loop and no ON DECK`, async ($, on) => {
+  test(`${name} draws the no-sources line alone, with no loop and no unqueued brief`, async ($, on) => {
     const files: Record<string, string> = {
       [S758_RECORD]: JSON.stringify(runningRecord()),
       [`${HOME}/Library/Logs/shootsfilm-archloop/.lock/pid`]: '7\n',
@@ -2991,9 +3010,9 @@ test('two polls that overlap on one slow --print run it once', async ($, on) => 
   await ui.unmount()
 })
 
-// ---------- ON DECK and plan costs through the owner ----------
+// ---------- unqueued briefs and plan costs through the owner ----------
 
-// S780 waits on deck at blob d0d758; S682 shipped, its record by name; the ledger is PLAN_LEDGER.
+// S780 is a brief nothing queues, at blob d0d758; S682 shipped, its record by name; the ledger is PLAN_LEDGER.
 const DECK_BLOB = 'd0d758'
 const DECK_LS = `100644 blob ${DECK_BLOB}\tdocs/briefs/kickoff-sitting-s780-deck-brief.md\n`
 const DECK_PRINTED = JSON.stringify({ ...PRINT_BASE, end: null, mode: 'autopilot', epic: null, after: ['S758'], split_from: [], cycles: 3 })
@@ -3034,14 +3053,16 @@ function deckRun(deck: () => RunAnswer | Promise<RunAnswer>, plans: () => RunAns
   }
 }
 
-test("ON DECK draws what --print prints for a brief's blob, and the plan column what plan-costs.mjs prints", async ($, on) => {
+test("an unqueued brief draws what --print prints for its blob, and the plan column what plan-costs.mjs prints", async ($, on) => {
   const { ui, calls } = await pollPane(
     $,
     on,
     deckFiles(),
     deckRun(() => ({ exitCode: 0, stdout: DECK_PRINTED }), () => ({ exitCode: 0, stdout: PLAN_COSTS_STDOUT })),
   )
-  expect(await has(ui, 'ready 1')).toBe(true)
+  // S758 has shipped, so S780 is a root that reads its own note.
+  expect(await rowMarks(ui, 'S780')).toEqual([{ glyph: '◇', glyphColor: TEXT, idColor: TEXT }])
+  expect(await has(ui, 'not queued')).toBe(true)
   expect((await costBox(ui, 'S780 deck-brief')).squares.join('')).toMatch(/^■■■ /)
   expect(await has(ui, '+$6')).toBe(true)
   expect(calls.filter(c => isPlanCosts(c.argv)).map(c => c.cwd)).toEqual([SOURCES.main])
@@ -3087,7 +3108,7 @@ test('plan-costs.mjs runs once per ledger size and origin/main sha, and again on
   expect(asked()).toBe(4)
 })
 
-test("ON DECK's --print runs once per blob sha", async ($, on) => {
+test("an unqueued brief's --print runs once per blob sha", async ($, on) => {
   const { clock, calls } = await pollPane($, on, deckFiles(), deckRun(() => ({ exitCode: 0, stdout: DECK_PRINTED }), () => ({ exitCode: 0, stdout: PLAN_COSTS_STDOUT })))
   await clock.advance(5000)
   await clock.advance(5000)
@@ -3098,14 +3119,25 @@ for (const [name, deck] of [
   ['exits 1 with a record on stdout', (): RunAnswer | Promise<RunAnswer> => ({ exitCode: 1, stdout: DECK_PRINTED })],
   ['rejects', (): RunAnswer | Promise<RunAnswer> => Promise.reject(new Error('spawn failed'))],
 ] as const) {
-  test(`an ON DECK --print that ${name} draws the brief unread, and the next poll runs it again`, async ($, on) => {
-    const { ui, clock, calls } = await pollPane($, on, deckFiles(), deckRun(deck, () => ({ exitCode: 0, stdout: PLAN_COSTS_STDOUT })))
-    // An unread brief has no mode yet, so it sits under enrich.
-    expect(await has(ui, 'enrich 1')).toBe(true)
-    expect(await has(ui, 'ready 1')).toBe(false)
+  test(`an unqueued brief's --print that ${name} draws the brief unread, and the next poll that answers draws its own note`, async ($, on) => {
+    let failed = false
+    const once = (): RunAnswer | Promise<RunAnswer> => {
+      if (failed) return { exitCode: 0, stdout: DECK_PRINTED }
+      failed = true
+      return deck()
+    }
+    const { ui, clock, calls, mount } = await pollPane($, on, deckFiles(), deckRun(once, () => ({ exitCode: 0, stdout: PLAN_COSTS_STDOUT })))
+    // An unread brief has no mode yet, so it needs a decision pass.
+    expect(await has(ui, 'S780 deck-brief')).toBe(true)
+    expect(await has(ui, 'needs a decision pass')).toBe(true)
+    expect(await has(ui, 'not queued')).toBe(false)
     await ui.unmount()
     await clock.advance(5000)
     expect(calls.filter(c => isDeckPrint(c.argv)).length).toBe(2)
+    const again = await mount()
+    expect(await has(again, 'not queued')).toBe(true)
+    expect(await has(again, 'needs a decision pass')).toBe(false)
+    await again.unmount()
   })
 }
 
@@ -3178,7 +3210,7 @@ test('a dead run whose record is newer than the board says the launcher is gone'
   await ui.unmount()
 })
 
-test("ON DECK pipes a directory brief's blobs with a newline between them", async ($, on) => {
+test("an unqueued directory brief pipes its blobs to --print with a newline between them", async ($, on) => {
   const ls = `100644 blob a781\tdocs/briefs/s781-dir/README.md\n100644 blob b781\tdocs/briefs/s781-dir/cycles.md\n`
   const printed = JSON.stringify({ ...PRINT_BASE, end: null, mode: 'autopilot', epic: null, after: [], split_from: [], cycles: 2 })
   const { ui } = await pollPane($, on, deckFiles(), argv => {
@@ -3190,7 +3222,8 @@ test("ON DECK pipes a directory brief's blobs with a newline between them", asyn
         : { exitCode: 1, stdout: '' }
     return undefined
   })
-  expect(await has(ui, 'ready 1')).toBe(true)
+  expect(await has(ui, 'S781 dir')).toBe(true)
+  expect(await has(ui, 'not queued')).toBe(true)
   await ui.unmount()
 })
 
@@ -3232,6 +3265,16 @@ async function rowMarks(ui: Ui, sitting: string): Promise<{ glyph: string; glyph
   for (let i = 1; i < ts.length; i++) {
     const g = ts[i - 1]?.text ?? ''
     if (ts[i]?.text === sitting && /^[●○‖◇] $/.test(g)) out.push({ glyph: g.trim(), glyphColor: ts[i - 1]?.props?.color ?? '', idColor: ts[i]?.props?.color ?? '' })
+  }
+  return out
+}
+
+/** Each queue row's joint drawn for `sitting`, with its colour: the span just before the row's glyph span. */
+async function jointsOf(ui: Ui, sitting: string): Promise<string[]> {
+  const ts = await ui.findAll({ type: 'Text' })
+  const out: string[] = []
+  for (let i = 2; i < ts.length; i++) {
+    if (ts[i]?.text === sitting && /^[●○‖◇] $/.test(ts[i - 1]?.text ?? '')) out.push(`${ts[i - 2]?.text ?? ''} ${ts[i - 2]?.props?.color ?? ''}`)
   }
   return out
 }

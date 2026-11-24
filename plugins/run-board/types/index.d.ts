@@ -125,7 +125,7 @@ export type Block = {
 }
 
 /** Each foldable card, by the hotkey its header answers. */
-export type FoldCard = 'recent' | 'deck' | 'queued' | 'blocked' | 'timeline' | 'epics'
+export type FoldCard = 'recent' | 'queued' | 'blocked' | 'timeline' | 'epics'
 
 /** The folds set by hand: true folded, false unfolded. A card absent follows its default. */
 export type Folds = Partial<Record<FoldCard, boolean>>
@@ -138,7 +138,7 @@ export type Loop = {
   cost: number
 }
 
-/** A brief on `origin/main` in `docs/briefs/` that no run holds and the queue does not list. */
+/** A brief on `origin/main` in `docs/briefs/` that no run holds and the queue does not list: an unqueued node in the queue tree. */
 export type Deck = {
   sitting: string
   slug: string

@@ -60,40 +60,46 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   whose `Epic:` line names it, a running one kept after its archive), a sitting in both counting once, as shipped.
   Labels pad to the widest label and cells to the widest epic, ending in `…` past the room. Then `shipped/total`,
   and where the next sitting stands: `● S693 running` in peach, `blocked at S684` in red, `‖ held` in yellow,
-  `queued` or `on deck`. Epics go by their lowest sitting still to come. Below them comes the queue as a tree of who waits on whom: each
-  running run that something waits on is a root, and each entry hangs under the running or queued sitting
-  on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`). Its note names only
-  the waits the tree does not draw: each running, queued or held sitting on its `After:` line other than its
-  parent (`after S396`), so a row with no other wait has no note. An entry that needs nothing running or queued is a root of
-  its own under the dispatcher's reason (`a free slot`). One held only because a running run touches the same
+  `queued` or `on deck` (a brief nothing queues). Epics go by their lowest sitting still to come. Below them comes the queue as a tree of who waits on whom: each
+  running run that something waits on is a root, and each node hangs under the running sitting or node
+  on its brief's `After:` line that sits deepest in the tree, on a solid blue joint (`└─`). A node is a queued entry,
+  or a brief on `origin/main` in `docs/briefs/` that no run holds and the queue does not list; among siblings the
+  unqueued briefs follow the entries, by sitting. A row's note names only
+  the waits the tree does not draw: each running, queued, unqueued or held sitting on its `After:` line other than its
+  parent (`after S396`), so a row with no other wait has no note. An entry that needs nothing in the tree is a root of
+  its own under the dispatcher's reason (`a free slot`). An unqueued brief draws a text `◇` on a grey joint, and
+  its note ends in `not queued`, or `needs a decision pass` for a brief with no Mode line or whose `--print`
+  failed: `└─◇ S396 board-yours  after S394 · not queued`. One that needs nothing in the tree is a root after the
+  free roots, by sitting. A ring of `After:` lines draws each node once. One held only because a running run touches the same
   paths hangs under that run on a dashed yellow joint (`└┄`): the hold lifts when that run lands, and orders
   nothing after. When the board does not show that run running, the entry is a root that reads `held · S518`
-  in yellow. After the free
-  roots comes each block that holds a chain, in BLOCKED's order: the stuck sitting in yellow, `‖ S684
+  in yellow. After the free and
+  unqueued roots comes each block that holds a chain, in BLOCKED's order: the stuck sitting in yellow, `‖ S684
   home-gallery-sections  blocked ↑ · holds 8`, and under it every brief it holds on a yellow `‖`, queued or not,
-  each under the sitting on its `After:` line that sits deepest in the block. A held entry draws only there.
+  each under the sitting on its `After:` line that sits deepest in the block. A held brief draws only there; one
+  that nothing queues is Todd's to queue, a text `◇` noted `not queued`.
   A row is Todd's when status.json's `next` for it is not `machine`: it draws `◇` in place of `○` or `‖`, and
   the `◇` and the id share one colour, text for `waiting`, yellow for `soon`, red for `you`. A `next` the board
   does not know draws a text `◇` whose note leads with the value as written; a record with no `next` is the
   machine's. Rails and joints keep their colours, so a held chain stays yellow under a `◇`. A stopped node (a
   queued record with a `stop`) is a block whose kind is its `stop`, and its row is a red `◇` that reads
   `blocked ↑`, with ` · holds N` when it holds something; it draws once, as that block. A `needs` cause holds
-  nothing. The card draws when something is queued or a block holds something. The `After:` lines come from `origin/main`, read with the briefs for ON DECK.
+  nothing. The card draws while it has a row. The `After:` lines come from `origin/main`, read with the briefs.
   A queue row whose brief was split reads `split ×2`: the briefs on `origin/main` whose `Split from:` line names it,
   and the archived claims in `docs/briefs/sittings.json` whose `split_from` list does, each child once.
-  Each queue and on-deck row ends in a box pinned to its right edge: a square per cycle the brief plans, or a dim
+  Each queue row ends in a box pinned to its right edge: a square per cycle the brief plans, or a dim
   `·` with no cycle headings, in a slot as wide as the most cycles, then the projected build cost, `~$23`,
   right-aligned. The squares are blue queued, yellow held, peach for a running brief's cycles done or under way and
-  grey for the rest, and an on-deck brief's take its group's colour. The cost is the median cost per cycle of
+  grey for the rest and for an unqueued brief. The cost is the median cost per cycle of
   RECENT's runs times the brief's cycles: each run's cost over the highest `cycle k` its `/commit` lines name, among
   runs with both. It reads `~$?` when the cycles or the median are unknown, and dim yellow on a held row. The box is
-  one width across the queue and on deck, so the costs end in one column; the row's note sits between the name
+  one width across the queue, so the costs end in one column; the row's note sits between the name
   and the box and gives way first.
   The TIMELINE sits under BLOCKED and above the running cards: a lane per dispatcher slot (`slot 1` to the highest slot the board sees), then `you` and
   `held`, over a window from 8h before now to 6h after, under even-hour labels (`2p`, `12a`) and with a peach
   now-line. It draws in braille, 2 dots a cell. A bar is `⣿` cells in its colour with its last dot column blank:
   green for a run that went live, red for one that stopped, and the run in flight green to now and peach to its
-  start plus RECENT's median. Queued entries (blue) and ready briefs on deck (mauve) follow as projected bars:
+  start plus RECENT's median. Queued entries (blue) and unqueued `**Mode: autopilot.**` briefs (mauve) follow as projected bars:
   each takes the slot where it can start soonest, no earlier than the projected end of each `After:` sitting.
   Idle slot time is a faint `⣀` track. A sitting number sits inside its bar, mantle on the bar's colour, where
   it fits, else beside it; a bar clipped at the window start reads `◂ S677`. A run's slot comes from status.json's
@@ -104,7 +110,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `S684 ? 19m`, with `+N` for each other one. `held` is a dashed yellow strip from now, `3 held · ~3h12m`: every
   brief BLOCKED holds and every queued entry a `cause` holds, at the median each. With no median there are no
   projected bars and `held` reads its count alone.
-  Under on deck, RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
+  Under the queue, RECENT: the last 10 sittings live in production, newest first, one ledger row each: a green `●`,
   the sitting and its whole name where the pane is wide enough, then its time, a six-cell phase split (savor
   lavender, cycles green with simplify and the xhigh review, ship blue, with a legend in the card head), the cost in
   whole dollars, the plan cost, and how long ago it ended (`14m`, `5h`, `3d`). The split is the record's
@@ -122,15 +128,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   empties status.json's finished list. A run with no record the board can read draws what `--print` prints for it,
   and a record with no `end` draws in neither RECENT nor BLOCKED. A record older than its progress file
   missed its last write, so the run draws through `--print`. A run whose record is a version the board does not
-  know draws no row, and one line under the header names it: `S761: the record is newer than the board`. ON DECK, between the queue and RECENT, lists each brief on
-  `origin/main` in `docs/briefs/` that no run holds and the queue does not list, drawn as a tree under three
-  group headings, each with its count: green `ready` (marked `**Mode: autopilot.**`, so it can be queued), yellow
-  `enrich` (no Mode line yet: it needs a pass before autopilot), and red `needs you` (marked
-  `**Mode: interactive.**`, a run with Todd in the session). Inside its group a brief hangs on a solid joint under
-  the brief its `After:` line names that sits deepest in the group, and otherwise dashed under the heading. Its note
-  names one wait, the nearest: of the named sittings still on deck, queued or running, the one that sits deepest
-  across the queue and on deck, a tie going to the brief's tree parent. A brief under that parent names no wait, and
-  a queued wait's sitting reads in blue. Then the epic: `└╌◇ S436 retire-held-path  after S434`.
+  know draws no row, and one line under the header names it: `S761: the record is newer than the board`.
   `/board` again closes it.
 - **BLOCKED.** A red-bordered card above the timeline and the running cards, drawn only when something is stuck: one block per root cause,
   the one that holds the most first. A sitting is stuck when its last `finished:` line is not live, nothing runs or
@@ -151,15 +149,15 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   record's `end.deploy_run`. A queued
   entry is held by status.json's `queued[].cause`; a dispatcher that writes no `cause` key is read through the
   `After:` lines instead. A brief held upstream is a line under its cause, never a block of its own, and never
-  appears on deck. A red deploy's strip reads its latest attempt with `gh run view`: once for a run older than the
+  appears in the tree as unqueued. A red deploy's strip reads its latest attempt with `gh run view`: once for a run older than the
   newest live run, and again each minute for one that still blocks, so a re-run that passes clears its block.
-- **Folding.** The headers of blocked, epics, queued, on deck, timeline and recent are Buttons on `b`, `e`, `q`, `d`, `t`
+- **Folding.** The headers of blocked, epics, queued, timeline and recent are Buttons on `b`, `e`, `q`, `t`
   and `r` (with the pane focused). The epics and the timeline start open and never fold themselves; folded, epics
-  keeps `design system 1/3 · nav 0/7`. A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
-  otherwise recent and on deck fold themselves while BLOCKED shows.
+  keeps `design system 1/3 · nav 0/7`, and the queue `3 waiting · 2 not queued · holds 8`. A folded card keeps a one-line summary. A fold set by hand is kept in `$.store` across sessions;
+  otherwise recent folds itself while BLOCKED shows.
 - **Colours.** The pane paints in Catppuccin Macchiato, from the `F` table in `hooks/register.tsx`: the pane
-  on base, each section in a card on mantle (the timeline, the lanes, the epics, the queue, on deck, recent), green done, peach in flight, surface grey to come, lavender headings,
-  blue queued (an on-deck wait that is queued included), mauve on deck, yellow for a block's chain in the queue, on deck's groups in green, yellow and red, and peach
+  on base, each section in a card on mantle (the timeline, the lanes, the epics, the queue, recent), green done, peach in flight, surface grey to come and unqueued, lavender headings,
+  blue queued, mauve for an unqueued brief's projected bar, yellow for a block's chain in the queue, a Todd node's `◇` and id in text, yellow or red by its `next`, and peach
   for a recent run over twice the median. The colours are fixed hex values and do not follow the terminal theme; the
   pane's ground is set when it opens, so a change shows after `/board` closes and opens again. The hint
   line is plain text and takes none.
@@ -173,12 +171,12 @@ checkout, and `archloop_log_dir`, the loop's log directory. A status.json that i
 missing or malformed, draws only `status.json names no sources`, and one of a version the board does not know draws
 only `status.json is newer than the board`.
 
-For ON DECK, the cycle squares and EPICS it runs `git ls-tree -r origin/main docs/briefs/ docs/plans/` in
+For the unqueued briefs, the cycle squares and EPICS it runs `git ls-tree -r origin/main docs/briefs/ docs/plans/` in
 the main checkout and reads `sittings.json` and each plan with `git cat-file`, once per blob. A brief's mode,
 `Epic:`, `After:`, `Split from:` and cycle count are what the main checkout's `scripts/run-status.mjs` prints for
 it: its blobs, `README.md`'s first, piped into `node scripts/run-status.mjs --print /dev/null /dev/stdin` under
 `set -o pipefail`, once per blob shas and owner mtime. A read that fails draws the brief as one with no mode yet,
-under `enrich`, with no count, and a blob that fails to read gives no title; each is read again on the next poll.
+noted `needs a decision pass`, with no count, and a blob that fails to read gives no title; each is read again on the next poll.
 Each sitting's plan cost is what `node scripts/plan-costs.mjs ~/.claude/token-ledger.jsonl` prints, run in the
 main checkout once per ledger size and `origin/main` sha; when it fails, RECENT draws no plan cell and no plan
 total, and the spend line still draws. It never fetches: a push from any worktree of the checkout

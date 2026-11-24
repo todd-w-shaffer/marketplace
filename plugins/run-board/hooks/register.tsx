@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BlockKind, Board, BriefCost, DeckMode, Ended, EpicCell, EpicRow, EpicState, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
+import type { BlockKind, Board, BriefCost, Ended, EpicCell, EpicRow, EpicState, FoldCard, Folds, Loop, Phase, PhaseSplit, Run, StripCell } from '../types'
 import {
   FOLD_KEY,
   KIND_TAG,
@@ -28,7 +28,6 @@ import {
   daySums,
   lsTreeBlobs,
   shippedCount,
-  deckTree,
   elapsed,
   hoursMinutes,
   historyTag,
@@ -39,7 +38,6 @@ import {
   isLoopLanding,
   lastToolOf,
   ledgerChunk,
-  liveDepths,
   phaseGlyphs,
   phaseLine,
   phaseName,
@@ -56,6 +54,7 @@ import {
   RECORD_NEWER,
   recordRead,
   STATUS_NEWER,
+  UNQUEUED_NEXT,
   statusRead,
   lanesOf,
   recentCandidates,
@@ -96,7 +95,7 @@ const F = {
   red: '#ed8796',
 } as const
 
-// Every section of the pane sits in one of these: a lane, the queue, on deck, recent.
+// Every section of the pane sits in one of these: a lane, the queue, recent.
 const CARD = {
   flexDirection: 'column',
   marginTop: 1,
@@ -108,14 +107,12 @@ const CARD = {
 
 // Each lane's colour, on its card's pill.
 const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
-// Each on-deck group's colour: green can queue now, yellow needs a pass to
-// reach autopilot, red needs a person in the session.
-const DECK_COLOR: Record<DeckMode, string> = { ready: F.green, enrich: F.yellow, interactive: F.red }
 // A Todd node's `◇` and id, by the dispatcher's `next`: yellow when he is up
-// soon, red when he is needed. A value the board does not know draws in text.
+// soon, red when he is needed. A brief nothing queues, and a value the board
+// does not know, draw in text.
 const NEXT_COLOR: Readonly<Record<string, string>> = { waiting: F.text, soon: F.yellow, you: F.red }
 /** The dispatcher's `next` values the board knows; `machine` is the machine's. */
-const KNOWN_NEXT = new Set(['machine', ...Object.keys(NEXT_COLOR)])
+const KNOWN_NEXT = new Set(['machine', UNQUEUED_NEXT, ...Object.keys(NEXT_COLOR)])
 // Each timeline cell's colour: green for a run live or in flight, peach for
 // its projection and the now-line, red for a stop, blue queued, mauve on
 // deck, yellow held, and the idle track faint.
@@ -140,7 +137,7 @@ const labelCells = (slots: readonly { slot: number }[]): number =>
 const RECENT_TIME_CELLS = 6
 const RECENT_COST_CELLS = 7
 const RECENT_AGE_CELLS = 4
-// How much faster a queue or deck row's note shrinks than its name, so the
+// How much faster a queue row's note shrinks than its name, so the
 // note gives way first on a narrow pane.
 const NOTE_SHRINK = 1000
 // Each epic cell's glyph and colour: green shipped, peach running, a faint
@@ -178,7 +175,7 @@ const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
-const folds = atom({ plugin: 'run-board', key: 'folds' } as const, {} as Folds, { shape: 'folds-1' })
+const folds = atom({ plugin: 'run-board', key: 'folds' } as const, {} as Folds, { shape: 'folds-2' })
 const FOLDS_KEY = 'folds'
 
 /** The folds `$.store` holds, each field checked, since the file outlives this code. */
@@ -981,7 +978,7 @@ export const register: Register = on => {
       { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
       { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
     ]
-    const queueRows = queueTree(b.running, b.queued, b.blocked)
+    const queueRows = queueTree(b.running, b.queued, b.blocked, b.onDeck)
     // A rule across the card, inside its border and padding.
     const rule = (color: string) => <Text color={color}>{'─'.repeat(Math.max(1, e.props.bodyColumns - 4))}</Text>
     const totals = recentTotals(b.recent, b.checkedAt)
@@ -1026,12 +1023,10 @@ export const register: Register = on => {
       </Text>
     )
 
-    // On deck as a tree, and the box at the right edge of each queue and deck
-    // row: a square per cycle in a slot as wide as the most cycles, then the
-    // projected cost right-aligned to the widest cost. One width serves both
-    // cards, so every cost ends in one column whatever a row's indent.
-    const deckRows = deckTree(b.onDeck, liveDepths(b, queueRows), new Set(b.queued.map(q => q.sitting)))
-    const boxed = [...queueRows.map(r => r.sitting), ...deckRows.filter(r => r.kind !== 'group').map(r => r.sitting)]
+    // The box at the right edge of each queue row: a square per cycle in a
+    // slot as wide as the most cycles, then the projected cost right-aligned
+    // to the widest cost, so every cost ends in one column whatever a row's indent.
+    const boxed = queueRows.map(r => r.sitting)
     const projected = (c: BriefCost): string => (c.usd === null ? '~$?' : `~${dollars(c.usd)}`)
     const slotCells = Math.max(1, ...boxed.map(s => b.costs[s]?.cycles ?? 0))
     const projectedCells = Math.max(0, ...boxed.map(s => (b.costs[s] === undefined ? 0 : projected(b.costs[s]).length)))
@@ -1061,7 +1056,7 @@ export const register: Register = on => {
         </Box>
       )
     }
-    // A queue or deck row: the name, then the note, which sits between the
+    // A queue row: the name, then the note, which sits between the
     // name and the box and gives way first, then the box.
     const boxedRow = (name: JSX.Element, note: JSX.Element, box: JSX.Element, marginTop = 0) => (
       <Box columnGap={2} marginTop={marginTop}>
@@ -1368,7 +1363,7 @@ export const register: Register = on => {
           </Box>
         )}
 
-        {(b.queued.length > 0 || b.blocked.some(k => k.holds.length > 0)) && (
+        {queueRows.length > 0 && (
           <Box {...CARD}>
             {cardHead('queued', 'queued', F.lavender)}
             {!folded('queued') &&
@@ -1401,47 +1396,10 @@ export const register: Register = on => {
                       {note}
                     </Text>
                   ),
-                  costBox(r.sitting, isHeld ? F.yellow : F.blue, isHeld, lit),
+                  costBox(r.sitting, isHeld ? F.yellow : r.kind === 'unqueued' ? F.surface2 : F.blue, isHeld, lit),
                   r.kind === 'block' && i > 0 ? 1 : 0,
                 )
               })}
-          </Box>
-        )}
-
-        {b.onDeck.length > 0 && (
-          <Box {...CARD}>
-            {cardHead('deck', 'on deck', F.lavender)}
-            {!folded('deck') &&
-              deckRows.map(r =>
-                r.kind === 'group' ? (
-                  <Text>
-                    <Text bold color={DECK_COLOR[r.mode]}>{r.slug}</Text>
-                    <Text color={F.overlay0}> {r.note}</Text>
-                  </Text>
-                ) : (
-                  // A solid joint waits on the brief above it; a dashed one hangs under its group.
-                  boxedRow(
-                    <Text wrap="truncate-end">
-                      <Text color={F.overlay0}>{r.rails}</Text>
-                      <Text color={r.kind === 'after' ? DECK_COLOR[r.mode] : F.surface2}>{r.joint}</Text>
-                      <Text color={DECK_COLOR[r.mode]}>◇ </Text>
-                      <Text bold color={F.text}>{r.sitting}</Text>
-                      <Text color={F.subtext0}> {r.slug}</Text>
-                    </Text>,
-                    <Text wrap="truncate-end" color={F.overlay2}>
-                      {r.wait !== '' && (
-                        // The nearest wait, its sitting blue when it is queued.
-                        <Text>
-                          after <Text color={r.isWaitQueued ? F.blue : F.overlay2}>{r.wait}</Text>
-                        </Text>
-                      )}
-                      {r.wait !== '' && r.note !== '' ? ' · ' : ''}
-                      {r.note}
-                    </Text>,
-                    costBox(r.sitting, DECK_COLOR[r.mode], false),
-                  )
-                ),
-              )}
           </Box>
         )}
 

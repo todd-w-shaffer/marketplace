@@ -876,7 +876,7 @@ export function buildBoard(
     plans,
   })
   const recent = (extra.recent ?? []).map(d => ({ ...d, plan: planOf(plans, d.sitting) }))
-  // A held brief, and a stopped one, sits under BLOCKED and never on deck.
+  // A held brief, and a stopped one, sits under BLOCKED and never in the tree as unqueued.
   const onDeck = (extra.onDeck ?? []).filter(d => !drawn.has(d.sitting))
   const medians = phaseMedians(recent)
   const running: Run[] = raw.running.map(r => {
@@ -1732,6 +1732,17 @@ export function heldNote(reason: string): string | null {
   return peer === null ? null : `held · ${peer}`
 }
 
+/**
+ * The `next` of a brief on `origin/main` that nothing runs or queues. No
+ * dispatcher record moves it, so queuing it is Todd's move.
+ */
+export const UNQUEUED_NEXT = 'unqueued'
+
+const NOT_QUEUED = 'not queued'
+
+/** An unqueued brief's note after its waits: `needs a decision pass` for a brief with no mode yet, else `not queued`. */
+export const unqueuedNote = (mode: DeckMode): string => (mode === 'enrich' ? 'needs a decision pass' : NOT_QUEUED)
+
 /** One row of the queue drawn as a tree. */
 export type TreeRow = {
   /** A rail for each level above whose branch goes on below this row, two cells per level. */
@@ -1745,28 +1756,34 @@ export type TreeRow = {
    * It hangs under that run on a dashed joint, or is a root tagged with the
    * run when the board does not show that run running.
    * `block`: a stuck sitting that holds a chain. `hold`: a brief in that chain.
+   * `unqueued`: a brief on `origin/main` that nothing runs or queues, under
+   * its deepest `After:` sitting or a root.
    */
-  kind: 'run' | 'after' | 'free' | 'held' | 'block' | 'hold'
+  kind: 'run' | 'after' | 'free' | 'held' | 'block' | 'hold' | 'unqueued'
   sitting: string
   slug: string
   lane: string
   /**
    * At an `after` or `hold` row, `after S396`: the waits the tree does not draw. At a free root, the
    * dispatcher's reason; at a held root, the held tag; at a held entry under its run, as at `after`; at a block, `blocked ↑`, then ` · holds N` when it holds something; at a running root, empty.
+   * At an unqueued row, and a hold that nothing queues, the waits as at `after`, then `unqueuedNote`: `after S396 · not queued`.
    */
   note: string
-  /** Who moves the row next: the entry's `next`, a block's node's, or `machine` for a run and a block with no node. */
+  /** Who moves the row next: the entry's `next`, a block's node's, `UNQUEUED_NEXT` for a brief nothing queues, or `machine` for a run and a block with no node. */
   next: string
 }
 
 /**
  * The queue as a tree of who waits on whom. Each running run is a root, drawn
- * only when something waits on it. An entry hangs under the running or queued
- * sitting on its `After:` line that sits deepest in the tree, which is the one
- * to ship last; a sitting that is neither running nor queued draws no edge:
- * a held one sits under its block, and one that is neither has shipped. An entry that needs nothing in the tree is a root of its
- * own under the dispatcher's reason; a running run it does not name is not its
- * parent, since slots order nothing. Siblings go in queue order.
+ * only when something waits on it. A node is a queued entry, or a brief on
+ * `origin/main` that nothing runs or queues. A node hangs under the running
+ * sitting or node on its `After:` line that sits deepest in the tree, which is
+ * the one to ship last; a sitting that is neither draws no edge: a held one
+ * sits under its block, and one that is neither has shipped. A node that needs
+ * nothing in the tree is a root of its own, an entry under the dispatcher's
+ * reason; a running run it does not name is not its parent, since slots order
+ * nothing. Siblings go in queue order, and the unqueued briefs follow the
+ * entries, by sitting.
  *
  * An entry the dispatcher holds off a running run that touches the same paths
  * hangs under that run on a dashed joint. The dispatcher checks `After:` waits
@@ -1775,29 +1792,42 @@ export type TreeRow = {
  * entry can change from one pass to the next.
  *
  * Each block that holds something follows, its root first and its chain under
- * it in the order `Block.holds` gives, so a held entry is never a root of its
+ * it in the order `Block.holds` gives, so a held node is never a root of its
  * own as well. Roots go running first, then free and path-held, then the
- * blocks, so what can launch next leads the card.
+ * unqueued briefs, then the blocks, so what can launch next leads the card. A
+ * ring of nodes that each name the next on their `After:` lines draws after
+ * the other roots, each node once.
  *
  * A row's note names only its waits that the tree does not draw: each
- * running, queued or held sitting on its `After:` line other than its parent.
+ * running, queued, unqueued or held sitting on its `After:` line other than its
+ * parent. An unqueued row's note ends in `unqueuedNote`.
  */
 export function queueTree(
   running: readonly Pick<Run, 'sitting' | 'slug' | 'lane'>[],
   queued: readonly Waiting[],
   blocks: readonly (Pick<Block, 'sitting' | 'slug' | 'holds'> & { nodeNext?: string | null })[],
+  unqueued: readonly Pick<Deck, 'sitting' | 'slug' | 'lane' | 'after' | 'mode'>[] = [],
 ): TreeRow[] {
   const runs = new Set(running.map(r => r.sitting))
   const held = new Set(blocks.flatMap(k => k.holds.map(h => h.sitting)))
   // A stopped node is queued and a block root, and draws once, as its block.
   const roots = new Set(blocks.map(k => k.sitting))
-  const byEntry = [...queued].sort((a, b) => a.entry - b.entry).filter(q => !held.has(q.sitting) && !roots.has(q.sitting))
-  const waiting = new Map(byEntry.map(q => [q.sitting, q]))
-  // A board stored by an older version of the mod has no `after`.
-  const needs = (q: Waiting): string[] => (q.after ?? []).filter(s => s !== q.sitting && (runs.has(s) || waiting.has(s)))
-  const others = (after: readonly string[], self: string, parent: string | null): string => {
+  type TreeNode = { sitting: string; slug: string; lane: string; reason: string; after: readonly string[]; next: string; tail: string }
+  const entries: TreeNode[] = [...queued]
+    .sort((a, b) => a.entry - b.entry)
+    // A board stored by an older version of the mod has no `after`.
+    .map(q => ({ sitting: q.sitting, slug: q.slug, lane: q.lane, reason: q.reason, after: q.after ?? [], next: q.next ?? 'machine', tail: '' }))
+  const briefs: TreeNode[] = [...unqueued]
+    .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
+    .map(d => ({ sitting: d.sitting, slug: d.slug, lane: d.lane, reason: '', after: afterSittings(d.after), next: UNQUEUED_NEXT, tail: unqueuedNote(d.mode) }))
+  const nodes = [...entries, ...briefs].filter(n => !held.has(n.sitting) && !roots.has(n.sitting) && !runs.has(n.sitting))
+  const waiting = new Map<string, TreeNode>()
+  for (const n of nodes) if (!waiting.has(n.sitting)) waiting.set(n.sitting, n)
+  const order = [...waiting.values()]
+  const needs = (n: TreeNode): string[] => n.after.filter(s => s !== n.sitting && (runs.has(s) || waiting.has(s)))
+  const others = (after: readonly string[], self: string, parent: string | null, tail: string): string => {
     const w = after.filter(s => s !== self && s !== parent && (runs.has(s) || waiting.has(s) || held.has(s)))
-    return w.length === 0 ? '' : `after ${w.join(', ')}`
+    return [w.length === 0 ? '' : `after ${w.join(', ')}`, tail].filter(p => p !== '').join(' · ')
   }
 
   const parent = new Map<string, string | null>()
@@ -1806,10 +1836,10 @@ export function queueTree(
     if (runs.has(s)) return 0
     const known = depth.get(s)
     if (known !== undefined) return known
-    const q = waiting.get(s)
-    if (q === undefined || seen.has(s)) return 0
+    const n = waiting.get(s)
+    if (n === undefined || seen.has(s)) return 0
     seen.add(s)
-    const peer = heldPeer(q.reason)
+    const peer = heldPeer(n.reason)
     if (peer !== null && runs.has(peer)) {
       parent.set(s, peer)
       depth.set(s, 1)
@@ -1817,38 +1847,47 @@ export function queueTree(
     }
     let best: string | null = null
     let d = 0
-    for (const n of needs(q)) {
-      const nd = depthOf(n, seen) + 1
-      if (best === null || nd > d) [best, d] = [n, nd]
+    for (const w of needs(n)) {
+      const nd = depthOf(w, seen) + 1
+      if (best === null || nd > d) [best, d] = [w, nd]
     }
     parent.set(s, best)
     depth.set(s, d)
     return d
   }
-  for (const q of byEntry) depthOf(q.sitting, new Set())
+  for (const n of order) depthOf(n.sitting, new Set())
 
   const rows: TreeRow[] = []
   const drawn = new Set<string>()
-  const kids = (s: string) => byEntry.filter(q => parent.get(q.sitting) === s && !drawn.has(q.sitting))
+  const kids = (s: string) => order.filter(n => parent.get(n.sitting) === s && !drawn.has(n.sitting))
   const branch = (s: string, rails: string) => {
     const ks = kids(s)
     ks.forEach((k, i) => walk(k, rails, i === ks.length - 1))
   }
-  const walk = (q: Waiting, rails: string, isLast: boolean) => {
-    if (drawn.has(q.sitting)) return
-    drawn.add(q.sitting)
-    const isHeld = heldPeer(q.reason) === parent.get(q.sitting)
+  const walk = (n: TreeNode, rails: string, isLast: boolean) => {
+    if (drawn.has(n.sitting)) return
+    drawn.add(n.sitting)
+    const isHeld = heldPeer(n.reason) === parent.get(n.sitting)
     rows.push({
       rails,
       joint: `${isLast ? '└' : '├'}${isHeld ? '┄' : '─'}`,
-      kind: isHeld ? 'held' : 'after',
-      sitting: q.sitting,
-      slug: q.slug,
-      lane: q.lane,
-      note: others(q.after ?? [], q.sitting, parent.get(q.sitting) ?? null),
-      next: q.next ?? 'machine',
+      kind: n.next === UNQUEUED_NEXT ? 'unqueued' : isHeld ? 'held' : 'after',
+      sitting: n.sitting,
+      slug: n.slug,
+      lane: n.lane,
+      note: others(n.after, n.sitting, parent.get(n.sitting) ?? null, n.tail),
+      next: n.next,
     })
-    branch(q.sitting, rails + (isLast ? '  ' : '│ '))
+    branch(n.sitting, rails + (isLast ? '  ' : '│ '))
+  }
+  const root = (n: TreeNode) => {
+    if (drawn.has(n.sitting)) return
+    drawn.add(n.sitting)
+    const tag = heldNote(n.reason)
+    const kind = n.next === UNQUEUED_NEXT ? 'unqueued' : tag === null ? 'free' : 'held'
+    const note = kind === 'unqueued' ? others(n.after, n.sitting, null, n.tail) : (tag ?? n.reason)
+    rows.push({ rails: '', joint: '', kind, sitting: n.sitting, slug: n.slug, lane: n.lane, note, next: n.next })
+    branch(n.sitting, '')
   }
 
   for (const r of running) {
@@ -1856,15 +1895,10 @@ export function queueTree(
     rows.push({ rails: '', joint: '', kind: 'run', sitting: r.sitting, slug: r.slug, lane: r.lane, note: '', next: 'machine' })
     branch(r.sitting, '')
   }
-  // What hangs under no run: an entry that names nothing running, or a ring of
-  // entries that each name the next on their After lines.
-  for (const q of byEntry) {
-    if (drawn.has(q.sitting)) continue
-    drawn.add(q.sitting)
-    const tag = heldNote(q.reason)
-    rows.push({ rails: '', joint: '', kind: tag === null ? 'free' : 'held', sitting: q.sitting, slug: q.slug, lane: q.lane, note: tag ?? q.reason, next: q.next ?? 'machine' })
-    branch(q.sitting, '')
-  }
+  // What hangs under no run: a node that names nothing in the tree, then a
+  // ring of nodes that each name the next on their After lines.
+  for (const n of order) if ((parent.get(n.sitting) ?? null) === null) root(n)
+  for (const n of order) root(n)
   for (const k of blocks) {
     // A stopped node is Todd's, so it draws with no holds too.
     const node = k.nodeNext ?? null
@@ -1875,160 +1909,14 @@ export function queueTree(
       const ks = k.holds.filter(h => h.parent === p)
       ks.forEach((h, i) => {
         const isLast = i === ks.length - 1
-        rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', note: others(h.after, h.sitting, h.parent), next: h.next ?? 'machine' })
+        const next = h.next ?? 'machine'
+        // A held brief's mode is not read, so its note says only that nothing queues it.
+        const tail = next === UNQUEUED_NEXT ? NOT_QUEUED : ''
+        rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', note: others(h.after, h.sitting, h.parent, tail), next })
         holdBranch(h.sitting, rails + (isLast ? '  ' : '│ '))
       })
     }
     holdBranch(k.sitting, '')
-  }
-  return rows
-}
-
-/**
- * How deep each running and queued sitting sits in the queue tree: a running
- * sitting is 0, and a queued one is its row's depth in `queueTree`. Pass
- * `rows` when the caller has the tree already.
- */
-export function liveDepths(
-  b: Pick<Board, 'running' | 'queued' | 'blocked'>,
-  rows: readonly TreeRow[] = queueTree(b.running, b.queued, b.blocked),
-): Map<string, number> {
-  const queued = new Set(b.queued.map(q => q.sitting))
-  const depths = new Map(b.running.map(r => [r.sitting, 0]))
-  for (const r of rows) {
-    if (queued.has(r.sitting)) depths.set(r.sitting, r.rails.length / 2 + (r.joint === '' ? 0 : 1))
-  }
-  return depths
-}
-
-/** On deck's three groups, in the order the pane draws them, and each one's heading. */
-export const DECK_GROUPS: readonly { mode: DeckMode; label: string }[] = [
-  { mode: 'ready', label: 'ready' },
-  { mode: 'enrich', label: 'enrich' },
-  { mode: 'interactive', label: 'needs you' },
-]
-
-/** One row of on deck drawn as a tree. */
-export type DeckRow = {
-  /** A rail for each level above whose branch goes on below this row, two cells per level. */
-  rails: string
-  /** `├─` or `└─` under the brief it waits on, `├╌` or `└╌` under its group, empty at a group. */
-  joint: string
-  /** `group`: a heading. `after`: a brief under one it waits on. `free`: a brief under its group. */
-  kind: 'group' | 'after' | 'free'
-  mode: DeckMode
-  /** Empty at a group. */
-  sitting: string
-  /** The brief's slug, or the group's heading. */
-  slug: string
-  /** The one sitting the brief's note names after `after`, or empty. */
-  wait: string
-  /** Whether `wait` is queued. */
-  isWaitQueued: boolean
-  /** At a group, how many briefs it holds. At a brief, its epic. */
-  note: string
-}
-
-/**
- * On deck as a tree in three groups: ready (autopilot), enrich (not yet
- * autopilot) and needs you (interactive). A brief waits on each sitting its
- * `After:` line names that is on deck, queued or running; one that has
- * shipped is gone from all three and draws nothing. Inside its group a brief
- * hangs under the brief it waits on that sits deepest in the group, the one to
- * ship last, and otherwise dashed under the group. A wait that crosses groups
- * shows in the note only. Siblings go by sitting.
- *
- * A brief's note names one wait, the nearest: the waited sitting that sits
- * deepest across the queue and on deck, and so ships last. A running or
- * queued sitting's depth comes from `live`; an on-deck brief sits one deeper
- * than its own nearest wait, and at 0 with none. A tie goes to the brief's
- * tree parent. The note never names the parent, since the tree draws it.
- */
-export function deckTree(deck: readonly Deck[], live: ReadonlyMap<string, number>, queued: ReadonlySet<string>): DeckRow[] {
-  const onDeck = new Map(deck.map(d => [d.sitting, d]))
-  const waitsOf = new Map(deck.map(d => [d.sitting, afterSittings(d.after).filter(s => s !== d.sitting && (live.has(s) || onDeck.has(s)))]))
-  const waits = (d: Deck): string[] => waitsOf.get(d.sitting) ?? []
-  const reach = new Map<string, number>()
-  const reachOf = (s: string, seen: Set<string>): number => {
-    const known = live.get(s) ?? reach.get(s)
-    if (known !== undefined) return known
-    const d = onDeck.get(s)
-    if (d === undefined || seen.has(s)) return 0
-    seen.add(s)
-    const n = Math.max(-1, ...waits(d).map(w => reachOf(w, seen))) + 1
-    reach.set(s, n)
-    return n
-  }
-  const nearest = (d: Deck, parent: string | null): string => {
-    let best: string | null = null
-    let depth = -1
-    for (const w of waits(d)) {
-      const wd = reachOf(w, new Set([d.sitting]))
-      if (wd > depth || (wd === depth && w === parent)) [best, depth] = [w, wd]
-    }
-    return best === null || best === parent ? '' : best
-  }
-  const note = (d: Deck): string => d.epic
-
-  const rows: DeckRow[] = []
-  for (const g of DECK_GROUPS) {
-    const members = deck.filter(d => d.mode === g.mode).sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
-    if (members.length === 0) continue
-    const by = new Map(members.map(d => [d.sitting, d]))
-    const parent = new Map<string, string | null>()
-    const depth = new Map<string, number>()
-    const depthOf = (s: string, seen: Set<string>): number => {
-      const known = depth.get(s)
-      if (known !== undefined) return known
-      const d = by.get(s)
-      if (d === undefined || seen.has(s)) return 0
-      seen.add(s)
-      let best: string | null = null
-      let n = 0
-      for (const w of waits(d)) {
-        if (!by.has(w)) continue
-        const wd = depthOf(w, seen) + 1
-        if (best === null || wd > n) [best, n] = [w, wd]
-      }
-      parent.set(s, best)
-      depth.set(s, n)
-      return n
-    }
-    for (const d of members) depthOf(d.sitting, new Set())
-    // A ring of briefs that each wait on the next hangs from nowhere: cut it
-    // where it is found, so the cut brief hangs under its group.
-    for (const d of members) {
-      const seen = new Set<string>([d.sitting])
-      let p = parent.get(d.sitting) ?? null
-      while (p !== null && !seen.has(p)) {
-        seen.add(p)
-        p = parent.get(p) ?? null
-      }
-      if (p !== null) parent.set(d.sitting, null)
-    }
-
-    rows.push({ rails: '', joint: '', kind: 'group', mode: g.mode, sitting: '', slug: g.label, wait: '', isWaitQueued: false, note: String(members.length) })
-    const walk = (d: Deck, rails: string, isLast: boolean) => {
-      const isAfter = parent.get(d.sitting) != null
-      const wait = nearest(d, parent.get(d.sitting) ?? null)
-      rows.push({
-        rails,
-        joint: `${isLast ? '└' : '├'}${isAfter ? '─' : '╌'}`,
-        kind: isAfter ? 'after' : 'free',
-        mode: g.mode,
-        sitting: d.sitting,
-        slug: d.slug,
-        wait,
-        isWaitQueued: queued.has(wait),
-        note: note(d),
-      })
-      branch(d.sitting, rails + (isLast ? '  ' : '│ '))
-    }
-    const branch = (s: string | null, rails: string) => {
-      const ks = members.filter(d => (parent.get(d.sitting) ?? null) === s)
-      ks.forEach((k, i) => walk(k, rails, i === ks.length - 1))
-    }
-    branch(null, '')
   }
   return rows
 }
@@ -2194,7 +2082,7 @@ export const handoffStops = (handoff: string): string[] => {
 
 /**
  * The BLOCKED card: one block per root cause, most held first, and every
- * sitting the card draws, none of which ON DECK lists.
+ * sitting the card draws, none of which the queue tree draws as an unqueued brief.
  *
  * A sitting is stuck when its last end is not live, nothing runs or queues
  * it, and either its brief is still on `origin/main`, or it is a red deploy
@@ -2313,7 +2201,8 @@ export function blockedOf(input: {
       ...h,
       slug: slugOf.get(h.sitting) ?? stuck.get(h.sitting)?.slug ?? '',
       after: afterOf(h.sitting),
-      next: queued.get(h.sitting)?.next ?? 'machine',
+      // A brief nothing queues is Todd's to queue; a stuck sitting with no node stays the machine's.
+      next: queued.get(h.sitting)?.next ?? (stuck.has(h.sitting) ? 'machine' : UNQUEUED_NEXT),
     }))
     const history = { plan: planOf(plans, root), launches: info === undefined || info.launches <= 0 ? null : info.launches }
     blocks.push({ ...blockFace(root, info, kind, holds, handoffs, deployStages), ...history, nodeNext: info?.nodeNext ?? null })
@@ -2802,14 +2691,13 @@ export function statusLine(b: Board): string | undefined {
 }
 
 /** Each foldable card's header hotkey. */
-export const FOLD_KEY: Record<FoldCard, string> = { recent: 'r', deck: 'd', queued: 'q', blocked: 'b', timeline: 't', epics: 'e' }
+export const FOLD_KEY: Record<FoldCard, string> = { recent: 'r', queued: 'q', blocked: 'b', timeline: 't', epics: 'e' }
 
 /**
- * Whether a card is folded: as set by hand, else folded for recent and on
- * deck while BLOCKED shows, so the stuck work leads the pane.
+ * Whether a card is folded: as set by hand, else folded for recent while
+ * BLOCKED shows, so the stuck work leads the pane.
  */
-export const isFolded = (card: FoldCard, folds: Folds, hasBlocked: boolean): boolean =>
-  folds[card] ?? (hasBlocked && (card === 'recent' || card === 'deck'))
+export const isFolded = (card: FoldCard, folds: Folds, hasBlocked: boolean): boolean => folds[card] ?? (hasBlocked && card === 'recent')
 
 /** The one line a folded card keeps. */
 export function foldSummary(card: FoldCard, b: Board): string {
@@ -2823,7 +2711,9 @@ export function foldSummary(card: FoldCard, b: Board): string {
   }
   if (card === 'queued') {
     const held = b.blocked.reduce((n, k) => n + k.holds.length, 0)
-    return [b.queued.length > 0 ? `${b.queued.length} waiting` : '', held > 0 ? `holds ${held}` : ''].filter(p => p !== '').join(' · ')
+    return [b.queued.length > 0 ? `${b.queued.length} waiting` : '', b.onDeck.length > 0 ? `${b.onDeck.length} ${NOT_QUEUED}` : '', held > 0 ? `holds ${held}` : '']
+      .filter(p => p !== '')
+      .join(' · ')
   }
   if (card === 'timeline') {
     // What holds each slot at now: a run, or idle.
@@ -2837,11 +2727,6 @@ export function foldSummary(card: FoldCard, b: Board): string {
       .join(' · ')
   }
   if (card === 'epics') return b.epics.map(e => `${e.label} ${shippedCount(e)}/${e.cells.length}`).join(' · ')
-  if (card === 'deck')
-    return DECK_GROUPS.map(g => [g.label, b.onDeck.filter(d => d.mode === g.mode).length] as const)
-      .filter(([, n]) => n > 0)
-      .map(([label, n]) => `${label} ${n}`)
-      .join(' · ')
   const last = b.recent[0]
   return last === undefined ? 'none live' : `${b.recent.length} live · last ${last.sitting} ${agoShort(last.endedMs, b.checkedAt)} ago`
 }
