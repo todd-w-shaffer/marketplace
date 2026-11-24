@@ -54,7 +54,6 @@ import {
   RECORD_NEWER,
   recordRead,
   STATUS_NEWER,
-  UNQUEUED_NEXT,
   statusRead,
   lanesOf,
   recentCandidates,
@@ -112,11 +111,10 @@ const LANE_COLOR: Record<string, string> = { epic: F.pink, fix: F.teal }
 // soon, red when he is needed. A brief nothing queues, and a value the board
 // does not know, draw in text.
 const NEXT_COLOR: Readonly<Record<string, string>> = { waiting: F.text, soon: F.yellow, you: F.red }
-/** The dispatcher's `next` values the board knows; `machine` is the machine's. */
-const KNOWN_NEXT = new Set(['machine', UNQUEUED_NEXT, ...Object.keys(NEXT_COLOR)])
+const nextColor = (next: string): string => (Object.hasOwn(NEXT_COLOR, next) ? NEXT_COLOR[next] : undefined) ?? F.text
 // Each timeline cell's colour: green for a run live or in flight, peach for
-// its projection and the now-line, red for a stop, blue queued, mauve on
-// deck, yellow held, and the idle track faint.
+// its projection and the now-line, red for a stop, blue queued, mauve for an
+// unqueued brief, yellow held, and the idle track faint.
 const TONE_COLOR: Record<CellTone, string> = {
   live: F.green,
   running: F.green,
@@ -172,7 +170,7 @@ const LOG_DIR = 'Library/Logs/shootsfilm-autopilot'
 
 // Change the tag when Board's fields change: it declines what an earlier
 // version stored, which outlives a reload.
-const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-17' })
+const board = atom({ plugin: 'run-board', key: 'board' } as const, null, { shape: 'board-18' })
 
 // The folds set by hand, mirrored to `$.store` under FOLDS_KEY so they outlast
 // the session; seeded from it at session start.
@@ -622,7 +620,7 @@ function printedFacts($: EngineInterface, main: string, briefKey: string, shas: 
 }
 
 /**
- * The briefs on deck, each brief's cycle count and epic, the epics
+ * The unqueued briefs, each brief's cycle count and epic, the epics
  * `sittings.json` records, and each plan's epic titles, from one
  * `git ls-tree -r origin/main docs/briefs/ docs/plans/` in the checkout.
  * Each brief's facts are what `printedFacts` prints, one brief after
@@ -1370,10 +1368,10 @@ export const register: Register = on => {
             {!folded('queued') &&
               queueRows.map((r, i) => {
                 const isHeld = r.kind === 'held' || r.kind === 'block' || r.kind === 'hold'
-                // A node whose next is not the machine's is Todd's: a `◇`, which shares its colour with the id.
-                const mine = r.kind !== 'run' && r.next !== 'machine'
-                const mineColor = Object.hasOwn(NEXT_COLOR, r.next) ? (NEXT_COLOR[r.next] ?? F.text) : F.text
-                const note = KNOWN_NEXT.has(r.next) ? r.note : [r.next, r.note].filter(p => p !== '').join(' · ')
+                // A Todd node draws a `◇`, which shares its colour with the id.
+                const mine = r.isTodds
+                const mineColor = nextColor(r.next)
+                const note = r.note
                 const lit = r.kind === 'run' ? (b.costs[r.sitting]?.lit ?? 0) : null
                 // A solid joint means the entry needs its parent shipped, a yellow dashed one that the run holds its paths, and a yellow `‖` that a block holds it.
                 return boxedRow(

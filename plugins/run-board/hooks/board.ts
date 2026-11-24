@@ -43,6 +43,9 @@ function parseSlot(r: Record<string, unknown>): SlotFields {
  */
 export type Cause = { kind: 'deploy-red'; run: number } | { kind: 'needs'; missing: string } | { kind: string; sitting: string }
 
+/** Whether a cause holds its entry on the board: a `needs` cause holds nothing. */
+export const holdsEntry = (c: Cause): boolean => c.kind !== 'needs'
+
 /**
  * A queued entry's `cause`: undefined when the record has no such key, as a
  * dispatcher older than the field writes it, and null when the dispatcher
@@ -111,9 +114,9 @@ function statusFields(d: Record<string, unknown>): RawStatus {
       reason: str(q.reason),
       cause: parseCause(q),
       // An older dispatcher writes no `next`, and every record it writes is the machine's.
-      next: typeof q.next === 'string' && q.next !== '' ? q.next : 'machine',
+      next: str(q.next) || MACHINE_NEXT,
       mode: str(q.mode),
-      stop: typeof q.stop === 'string' && q.stop !== '' ? q.stop : null,
+      stop: str(q.stop) || null,
     })),
     finished: list(d.finished).map(f => ({
       entry: num(f.entry) ?? 0,
@@ -907,7 +910,7 @@ export function buildBoard(
     lane: q.lane,
     reason: q.reason,
     after: afters[briefKey(q.brief)] ?? [],
-    next: q.next ?? 'machine',
+    next: q.next ?? MACHINE_NEXT,
     mode: q.mode ?? '',
     stop: q.stop ?? null,
   }))
@@ -1075,7 +1078,7 @@ function offsetMinutes(utcOffset: string): number | null {
  *
  * With a median, the running run is projected to its start plus the median,
  * or to now once it is over. Then each queued entry that nothing holds, in
- * entry order, and each ready brief on deck, by sitting, takes the slot where
+ * entry order, and each unqueued `ready` brief, by sitting, takes the slot where
  * it can start soonest, the lower slot on a tie, no earlier than the
  * projected end of each `After:` sitting. An `After:` sitting that is not
  * running, queued or on `origin/main` waits on nothing; one that is but has
@@ -1206,7 +1209,7 @@ export function timelineOf(input: {
 
   // What BLOCKED holds and what a cause holds, each once.
   const held = new Set<string>(blocks.flatMap(k => k.holds.map(h => h.sitting)))
-  for (const q of raw.queued) if (q.cause != null && q.cause.kind !== 'needs') held.add(sittingOf(q.brief).sitting)
+  for (const q of raw.queued) if (q.cause != null && holdsEntry(q.cause)) held.add(sittingOf(q.brief).sitting)
 
   if (medianMs !== null) {
     const free = new Map(slots.map(k => [k, now]))
@@ -1253,11 +1256,11 @@ export function timelineOf(input: {
     if (known === undefined || known.mtimeMs < e.mtimeMs) endingOf.set(sitting, e)
   }
   const stops = blocks
-    .filter(k => k.kind === 'decision')
     // A stopped node with no ending has no finish to draw from.
-    .flatMap(k => {
+    .filter(k => k.kind === 'decision' && !(k.nodeNext !== null && !endingOf.has(k.sitting)))
+    .map(k => {
       const e = endingOf.get(k.sitting)
-      return e === undefined && k.nodeNext !== null ? [] : [{ sitting: k.sitting, sinceMs: (e === undefined ? null : finishedAt(e.text)) ?? k.endedMs }]
+      return { sitting: k.sitting, sinceMs: (e === undefined ? null : finishedAt(e.text)) ?? k.endedMs }
     })
     .sort((a, b) => a.sinceMs - b.sinceMs)
   const oldest = stops[0]
@@ -1529,7 +1532,7 @@ const sittingNumber = (sitting: string): number => {
 }
 
 /**
- * The briefs on deck, lowest sitting first: every brief on `origin/main` that
+ * The unqueued briefs, lowest sitting first: every brief on `origin/main` that
  * no run holds and the queue does not list. A brief with an `Epic:` line runs
  * on the epic lane; one without runs on fix.
  */
@@ -1539,12 +1542,12 @@ export function onDeckOf(briefs: readonly HeadedBrief[], held: readonly string[]
     .filter(b => !taken.has(briefKey(b.path)))
     .map(b => {
       const { epic, after, mode } = b.header
-      return { ...briefName(briefKey(b.path)), lane: epic === '' ? 'fix' : 'epic', epic, after, mode }
+      return { ...briefName(briefKey(b.path)), lane: epic === '' ? 'fix' : 'epic', after, mode }
     })
     .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
 }
 
-/** A brief's sitting and slug as on deck names them: `S342`, or `#527` for an issue brief. */
+/** A brief's sitting and slug as the board names them: `S342`, or `#527` for an issue brief. */
 function briefName(key: string): { sitting: string; slug: string } {
   const issue = /^kickoff-(\d+)-(.+)$/.exec(baseName(key))
   return issue ? { sitting: `#${issue[1] ?? ''}`, slug: issue[2] ?? '' } : sittingOf(key)
@@ -1732,11 +1735,11 @@ export function heldNote(reason: string): string | null {
   return peer === null ? null : `held · ${peer}`
 }
 
-/**
- * The `next` of a brief on `origin/main` that nothing runs or queues. No
- * dispatcher record moves it, so queuing it is Todd's move.
- */
-export const UNQUEUED_NEXT = 'unqueued'
+/** The dispatcher's `next` for a record the machine moves next. */
+export const MACHINE_NEXT = 'machine'
+
+/** The dispatcher's `next` values the board knows; a note leads with any other as written. */
+const KNOWN_NEXT: ReadonlySet<string> = new Set([MACHINE_NEXT, 'waiting', 'soon', 'you'])
 
 const NOT_QUEUED = 'not queued'
 
@@ -1767,10 +1770,13 @@ export type TreeRow = {
    * At an `after` or `hold` row, `after S396`: the waits the tree does not draw. At a free root, the
    * dispatcher's reason; at a held root, the held tag; at a held entry under its run, as at `after`; at a block, `blocked ↑`, then ` · holds N` when it holds something; at a running root, empty.
    * At an unqueued row, and a hold that nothing queues, the waits as at `after`, then `unqueuedNote`: `after S396 · not queued`.
+   * A `next` the board does not know leads the note as written: `review · after S396`.
    */
   note: string
-  /** Who moves the row next: the entry's `next`, a block's node's, `UNQUEUED_NEXT` for a brief nothing queues, or `machine` for a run and a block with no node. */
+  /** Who moves the row next, as the dispatcher writes it: the entry's `next`, a block's node's, or `machine` for a run, a block with no node and a brief nothing queues. */
   next: string
+  /** Whether the row is Todd's: its `next` is not `machine`, or nothing queues its brief. */
+  isTodds: boolean
 }
 
 /**
@@ -1805,21 +1811,21 @@ export type TreeRow = {
 export function queueTree(
   running: readonly Pick<Run, 'sitting' | 'slug' | 'lane'>[],
   queued: readonly Waiting[],
-  blocks: readonly (Pick<Block, 'sitting' | 'slug' | 'holds'> & { nodeNext?: string | null })[],
+  blocks: readonly Pick<Block, 'sitting' | 'slug' | 'holds' | 'nodeNext'>[],
   unqueued: readonly Pick<Deck, 'sitting' | 'slug' | 'lane' | 'after' | 'mode'>[] = [],
 ): TreeRow[] {
   const runs = new Set(running.map(r => r.sitting))
   const held = new Set(blocks.flatMap(k => k.holds.map(h => h.sitting)))
   // A stopped node is queued and a block root, and draws once, as its block.
   const roots = new Set(blocks.map(k => k.sitting))
-  type TreeNode = { sitting: string; slug: string; lane: string; reason: string; after: readonly string[]; next: string; tail: string }
+  type TreeNode = { sitting: string; slug: string; lane: string; reason: string; after: readonly string[]; next: string; isUnqueued: boolean; mode?: DeckMode }
   const entries: TreeNode[] = [...queued]
     .sort((a, b) => a.entry - b.entry)
     // A board stored by an older version of the mod has no `after`.
-    .map(q => ({ sitting: q.sitting, slug: q.slug, lane: q.lane, reason: q.reason, after: q.after ?? [], next: q.next ?? 'machine', tail: '' }))
+    .map(q => ({ sitting: q.sitting, slug: q.slug, lane: q.lane, reason: q.reason, after: q.after ?? [], next: q.next, isUnqueued: false }))
   const briefs: TreeNode[] = [...unqueued]
     .sort((a, b) => sittingNumber(a.sitting) - sittingNumber(b.sitting))
-    .map(d => ({ sitting: d.sitting, slug: d.slug, lane: d.lane, reason: '', after: afterSittings(d.after), next: UNQUEUED_NEXT, tail: unqueuedNote(d.mode) }))
+    .map(d => ({ sitting: d.sitting, slug: d.slug, lane: d.lane, reason: '', after: afterSittings(d.after), next: MACHINE_NEXT, isUnqueued: true, mode: d.mode }))
   const nodes = [...entries, ...briefs].filter(n => !held.has(n.sitting) && !roots.has(n.sitting) && !runs.has(n.sitting))
   const waiting = new Map<string, TreeNode>()
   for (const n of nodes) if (!waiting.has(n.sitting)) waiting.set(n.sitting, n)
@@ -1829,6 +1835,13 @@ export function queueTree(
     const w = after.filter(s => s !== self && s !== parent && (runs.has(s) || waiting.has(s) || held.has(s)))
     return [w.length === 0 ? '' : `after ${w.join(', ')}`, tail].filter(p => p !== '').join(' · ')
   }
+  // A row's fields that follow from who moves it next.
+  const whose = (next: string, isUnqueued: boolean, note: string): Pick<TreeRow, 'next' | 'isTodds' | 'note'> => ({
+    next,
+    isTodds: isUnqueued || next !== MACHINE_NEXT,
+    note: KNOWN_NEXT.has(next) ? note : [next, note].filter(p => p !== '').join(' · '),
+  })
+  const tailOf = (n: TreeNode): string => (n.isUnqueued ? unqueuedNote(n.mode ?? 'ready') : '')
 
   const parent = new Map<string, string | null>()
   const depth = new Map<string, number>()
@@ -1871,12 +1884,11 @@ export function queueTree(
     rows.push({
       rails,
       joint: `${isLast ? '└' : '├'}${isHeld ? '┄' : '─'}`,
-      kind: n.next === UNQUEUED_NEXT ? 'unqueued' : isHeld ? 'held' : 'after',
+      kind: n.isUnqueued ? 'unqueued' : isHeld ? 'held' : 'after',
       sitting: n.sitting,
       slug: n.slug,
       lane: n.lane,
-      note: others(n.after, n.sitting, parent.get(n.sitting) ?? null, n.tail),
-      next: n.next,
+      ...whose(n.next, n.isUnqueued, others(n.after, n.sitting, parent.get(n.sitting) ?? null, tailOf(n))),
     })
     branch(n.sitting, rails + (isLast ? '  ' : '│ '))
   }
@@ -1884,15 +1896,15 @@ export function queueTree(
     if (drawn.has(n.sitting)) return
     drawn.add(n.sitting)
     const tag = heldNote(n.reason)
-    const kind = n.next === UNQUEUED_NEXT ? 'unqueued' : tag === null ? 'free' : 'held'
-    const note = kind === 'unqueued' ? others(n.after, n.sitting, null, n.tail) : (tag ?? n.reason)
-    rows.push({ rails: '', joint: '', kind, sitting: n.sitting, slug: n.slug, lane: n.lane, note, next: n.next })
+    const kind = n.isUnqueued ? 'unqueued' : tag === null ? 'free' : 'held'
+    const note = n.isUnqueued ? others(n.after, n.sitting, null, tailOf(n)) : (tag ?? n.reason)
+    rows.push({ rails: '', joint: '', kind, sitting: n.sitting, slug: n.slug, lane: n.lane, ...whose(n.next, n.isUnqueued, note) })
     branch(n.sitting, '')
   }
 
   for (const r of running) {
     if (kids(r.sitting).length === 0) continue
-    rows.push({ rails: '', joint: '', kind: 'run', sitting: r.sitting, slug: r.slug, lane: r.lane, note: '', next: 'machine' })
+    rows.push({ rails: '', joint: '', kind: 'run', sitting: r.sitting, slug: r.slug, lane: r.lane, note: '', next: MACHINE_NEXT, isTodds: false })
     branch(r.sitting, '')
   }
   // What hangs under no run: a node that names nothing in the tree, then a
@@ -1901,18 +1913,16 @@ export function queueTree(
   for (const n of order) root(n)
   for (const k of blocks) {
     // A stopped node is Todd's, so it draws with no holds too.
-    const node = k.nodeNext ?? null
-    if (k.holds.length === 0 && node === null) continue
+    if (k.holds.length === 0 && k.nodeNext === null) continue
     const note = k.holds.length === 0 ? 'blocked ↑' : `blocked ↑ · holds ${k.holds.length}`
-    rows.push({ rails: '', joint: '', kind: 'block', sitting: k.sitting, slug: k.slug, lane: '', note, next: node ?? 'machine' })
+    rows.push({ rails: '', joint: '', kind: 'block', sitting: k.sitting, slug: k.slug, lane: '', ...whose(k.nodeNext ?? MACHINE_NEXT, false, note) })
     const holdBranch = (p: string, rails: string) => {
       const ks = k.holds.filter(h => h.parent === p)
       ks.forEach((h, i) => {
         const isLast = i === ks.length - 1
-        const next = h.next ?? 'machine'
         // A held brief's mode is not read, so its note says only that nothing queues it.
-        const tail = next === UNQUEUED_NEXT ? NOT_QUEUED : ''
-        rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', note: others(h.after, h.sitting, h.parent, tail), next })
+        const note = others(h.after, h.sitting, h.parent, h.isUnqueued ? NOT_QUEUED : '')
+        rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', ...whose(h.next, h.isUnqueued, note) })
         holdBranch(h.sitting, rails + (isLast ? '  ' : '│ '))
       })
     }
@@ -2160,7 +2170,7 @@ export function blockedOf(input: {
       for (const [s, i] of stuck) if (i.kind === 'deploy-red' && i.end !== undefined && deployRunOf(i.end) === String(c.run)) return s
       return `run ${c.run}`
     }
-    return 'missing' in c ? null : sittingOf(c.sitting).sitting
+    return holdsEntry(c) && 'sitting' in c ? sittingOf(c.sitting).sitting : null
   }
   const afterOf = (s: string): string[] => afters[onMain.get(s) ?? ''] ?? []
   const held = new Map<string, string | null>()
@@ -2201,8 +2211,9 @@ export function blockedOf(input: {
       ...h,
       slug: slugOf.get(h.sitting) ?? stuck.get(h.sitting)?.slug ?? '',
       after: afterOf(h.sitting),
+      next: queued.get(h.sitting)?.next ?? MACHINE_NEXT,
       // A brief nothing queues is Todd's to queue; a stuck sitting with no node stays the machine's.
-      next: queued.get(h.sitting)?.next ?? (stuck.has(h.sitting) ? 'machine' : UNQUEUED_NEXT),
+      isUnqueued: !queued.has(h.sitting) && !stuck.has(h.sitting),
     }))
     const history = { plan: planOf(plans, root), launches: info === undefined || info.launches <= 0 ? null : info.launches }
     blocks.push({ ...blockFace(root, info, kind, holds, handoffs, deployStages), ...history, nodeNext: info?.nodeNext ?? null })

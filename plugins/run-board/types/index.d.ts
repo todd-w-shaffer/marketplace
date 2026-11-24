@@ -101,7 +101,16 @@ export type StripCell = { stage: Stage; state: 'done' | 'broke' | 'todo' | 'skip
  * A brief a root cause holds. `parent` is the sitting it hangs under: the root, or another hold.
  * `after` is every sitting on its `After:` line.
  */
-export type Held = { sitting: string; slug: string; parent: string; after: string[]; /** Its queued record's `next`, or `machine`. */ next: string }
+export type Held = {
+  sitting: string
+  slug: string
+  parent: string
+  after: string[]
+  /** Its queued record's `next`, or `machine`. */
+  next: string
+  /** Whether nothing queues it and it is not stuck: a brief on `origin/main` that Todd has yet to queue. */
+  isUnqueued: boolean
+}
 
 /** One root cause on the BLOCKED card. */
 export type Block = {
@@ -144,8 +153,6 @@ export type Deck = {
   slug: string
   /** `epic` when the brief has an `Epic:` header line, else `fix`. */
   lane: string
-  /** The `Epic:` line's value, such as `minisite/E4`, or empty. */
-  epic: string
   /** The `After:` line's value, such as `S340, S341`, or empty. */
   after: string
   /** `ready`: marked `**Mode: autopilot.**`. `interactive`: marked `**Mode: interactive.**`. `enrich`: neither yet. */
@@ -156,7 +163,7 @@ export type DeckMode = 'ready' | 'enrich' | 'interactive'
 
 /**
  * What a timeline bar stands for: a past run that went live or stopped, the
- * run in flight, a queued entry, or a ready brief on deck.
+ * run in flight, a queued entry, or an unqueued `ready` brief.
  */
 export type BarTone = 'live' | 'stopped' | 'running' | 'queued' | 'deck'
 

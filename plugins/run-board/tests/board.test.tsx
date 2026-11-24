@@ -29,7 +29,6 @@ import {
   loopStageOf,
   newestRunDir,
   onDeckOf,
-  UNQUEUED_NEXT,
   FOLD_KEY,
   outcomeDetail,
   phaseGlyphs,
@@ -948,8 +947,8 @@ test('the unqueued briefs are the unheld briefs on main by sitting, epic lane fr
   const headers: Record<string, BriefHeader> = { bbb222: hdr('ready', 'minisite/E4', 'S340, S341'), ccc333: hdr('ready', 'account-basics/E8'), fff666: hdr('ready'), '222999': hdr('enrich') }
   const briefs = briefFiles(lsTreeBlobs(LS_TREE)).map(f => ({ ...f, header: headers[f.sha] ?? UNREAD_HEADER }))
   const deck = onDeckOf(briefs, ['docs/briefs/kickoff-sitting-s340-e8-help-pages.md'])
-  expect(deck.map(d => `${d.sitting} ${d.slug} ${d.lane}${d.epic === '' ? '' : ` · ${d.epic}`}`)).toEqual([
-    'S342 gallery-pass-keeps-stars epic · minisite/E4',
+  expect(deck.map(d => `${d.sitting} ${d.slug} ${d.lane}`)).toEqual([
+    'S342 gallery-pass-keeps-stars epic',
     'S350 split-work fix',
     '#527 gallery-race fix',
   ])
@@ -957,7 +956,7 @@ test('the unqueued briefs are the unheld briefs on main by sitting, epic lane fr
   expect(onDeckOf(briefs, ['docs/briefs/s350-split-work/README.md']).some(d => d.sitting === 'S350')).toBe(false)
 })
 
-const deckOf = (sitting: string, mode: Deck['mode'], after = ''): Deck => ({ sitting, slug: sitting.toLowerCase(), lane: 'fix', epic: '', after, mode })
+const deckOf = (sitting: string, mode: Deck['mode'], after = ''): Deck => ({ sitting, slug: sitting.toLowerCase(), lane: 'fix', after, mode })
 
 test('an unqueued brief hangs under the deepest live sitting on its After line, and one that names nothing live is a root', async () => {
   // S434 runs, S475 waits under it, and S429 has shipped.
@@ -980,8 +979,14 @@ test('an unqueued brief hangs under the deepest live sitting on its After line, 
     'S467 not queued',
     'S473 not queued',
   ])
-  expect(rows.filter(r => r.kind === 'unqueued').map(r => `${r.sitting} ${r.next}`)).toEqual(['S470 unqueued', 'S472 unqueued', 'S471 unqueued', 'S467 unqueued', 'S473 unqueued'])
-  expect(UNQUEUED_NEXT).toBe('unqueued')
+  // Each unqueued row is Todd's, though no dispatcher record names a next for it.
+  expect(rows.filter(r => r.isTodds).map(r => `${r.sitting} ${r.kind} ${r.next}`)).toEqual([
+    'S470 unqueued machine',
+    'S472 unqueued machine',
+    'S471 unqueued machine',
+    'S467 unqueued machine',
+    'S473 unqueued machine',
+  ])
 })
 
 test('a queued entry hangs under the unqueued brief it names, and unqueued roots follow the free roots and precede the blocks', async () => {
@@ -1039,7 +1044,7 @@ const S625_ENDINGS = [
 ]
 /** A red deploy's end, naming deploy run `run`. */
 const redEnd = (text: string, run: number) => endOf(text, 'deploy-red', { deploy_run: run })
-const heldDeck = (sitting: string, slug: string): Deck => ({ sitting, slug, lane: 'epic', epic: 'gallery', after: '', mode: 'ready' })
+const heldDeck = (sitting: string, slug: string): Deck => ({ sitting, slug, lane: 'epic', after: '', mode: 'ready' })
 
 test("S625's decision stop is one block that holds S626 and S627, which draw only under it", async () => {
   const b = buildBoard(S625_STATUS, new Set([927]), NOW, {
@@ -1059,8 +1064,8 @@ test("S625's decision stop is one block that holds S626 and S627, which draw onl
   expect(k.strip.map(c => `${c.stage}:${c.state}`)).toEqual(['savor:broke', 'cycles:todo', 'push:todo', 'staging:todo', 'prod:todo'])
   // The refused S626 is a hold, never a root of its own.
   expect(k.holds).toEqual([
-    { sitting: 'S626', slug: 'gallery-arrange-page', parent: 'S625', after: ['S625'], next: 'machine' },
-    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'], next: UNQUEUED_NEXT },
+    { sitting: 'S626', slug: 'gallery-arrange-page', parent: 'S625', after: ['S625'], next: 'machine', isUnqueued: false },
+    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'], next: 'machine', isUnqueued: true },
   ])
   expect(k.next).toBe('answer in the handoff, then relaunch S625')
   expect(b.onDeck.map(d => d.sitting)).toEqual(['S640'])
@@ -1191,7 +1196,7 @@ test('a handoff question reads both the bare and the addressed label', () => {
 })
 
 // The shapes the pane's board and folds atoms are stored under; each moves with its type.
-const BOARD_SHAPE = 'board-17'
+const BOARD_SHAPE = 'board-18'
 const FOLDS_SHAPE = 'folds-2'
 
 type Ui = {
@@ -2304,6 +2309,8 @@ const BLUE = '#8aadf4'
 const PEACH = '#f5a97f'
 const YELLOW = '#eed49f'
 const SURFACE2 = '#5b6078'
+const RED = '#ed8796'
+const TEXT = '#cad3f5'
 const OVERLAY1 = '#8087a2'
 
 test('the epics card names each epic by its plan title, a cell per sitting, shipped over total, and the next state', async ($, on) => {
@@ -3252,33 +3259,30 @@ const NODE = {
 }
 const NEXT_AFTERS = { [`${BRIEFS}s901-x.md`]: [], [`${BRIEFS}s902-i.md`]: ['S901'], [`${BRIEFS}s903-j.md`]: ['S901'], [`${BRIEFS}s904-k.md`]: [], [`docs/briefs/${S769_RUN}.md`]: [] }
 const nextStatus = (queued: object[], finished: object[] = []) => parseStatus(JSON.stringify({ dispatcher: 1, running: [], queued, finished })) as NonNullable<ReturnType<typeof parseStatus>>
-const RED = '#ed8796'
-const TEXT = '#cad3f5'
+
+type Span = { text?: string; props?: { color?: string } }
 
 /**
- * Each queue row drawn for `sitting`: its glyph and the colours of its glyph
- * span and its id span. A row's glyph span sits just before its id span, so a
- * bar or a card that also names the sitting is not read.
+ * Each queue row drawn for `sitting` as its joint, glyph and id spans. A
+ * row's glyph span sits just before its id span and its joint span just before
+ * that, so a bar or a card that also names the sitting is not read.
  */
-async function rowMarks(ui: Ui, sitting: string): Promise<{ glyph: string; glyphColor: string; idColor: string }[]> {
-  const ts = await ui.findAll({ type: 'Text' })
-  const out: { glyph: string; glyphColor: string; idColor: string }[] = []
-  for (let i = 1; i < ts.length; i++) {
-    const g = ts[i - 1]?.text ?? ''
-    if (ts[i]?.text === sitting && /^[●○‖◇] $/.test(g)) out.push({ glyph: g.trim(), glyphColor: ts[i - 1]?.props?.color ?? '', idColor: ts[i]?.props?.color ?? '' })
+async function rowSpans(ui: Ui, sitting: string): Promise<{ joint: Span; glyph: Span; id: Span }[]> {
+  const ts: Span[] = await ui.findAll({ type: 'Text' })
+  const out: { joint: Span; glyph: Span; id: Span }[] = []
+  for (let i = 2; i < ts.length; i++) {
+    const [joint, glyph, id] = [ts[i - 2] ?? {}, ts[i - 1] ?? {}, ts[i] ?? {}]
+    if (id.text === sitting && /^[●○‖◇] $/.test(glyph.text ?? '')) out.push({ joint, glyph, id })
   }
   return out
 }
 
-/** Each queue row's joint drawn for `sitting`, with its colour: the span just before the row's glyph span. */
-async function jointsOf(ui: Ui, sitting: string): Promise<string[]> {
-  const ts = await ui.findAll({ type: 'Text' })
-  const out: string[] = []
-  for (let i = 2; i < ts.length; i++) {
-    if (ts[i]?.text === sitting && /^[●○‖◇] $/.test(ts[i - 1]?.text ?? '')) out.push(`${ts[i - 2]?.text ?? ''} ${ts[i - 2]?.props?.color ?? ''}`)
-  }
-  return out
-}
+/** Each queue row's glyph for `sitting`, and the colours of its glyph and id spans. */
+const rowMarks = async (ui: Ui, sitting: string): Promise<{ glyph: string; glyphColor: string; idColor: string }[]> =>
+  (await rowSpans(ui, sitting)).map(r => ({ glyph: (r.glyph.text ?? '').trim(), glyphColor: r.glyph.props?.color ?? '', idColor: r.id.props?.color ?? '' }))
+
+/** Each queue row's joint for `sitting`, with its colour. */
+const jointsOf = async (ui: Ui, sitting: string): Promise<string[]> => (await rowSpans(ui, sitting)).map(r => `${r.joint.text ?? ''} ${r.joint.props?.color ?? ''}`)
 
 test("a Todd node draws ◇, its id and its ◇ in the colour of its next, and the machine's draws ○", async ($, on) => {
   const b = buildBoard(nextStatus([NEXT_MACHINE, NEXT_WAITING, NEXT_SOON, NEXT_YOU]), new Set([1]), NOW, { afters: NEXT_AFTERS })
