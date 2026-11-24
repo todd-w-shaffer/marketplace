@@ -5,7 +5,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 
 - **Hint line.** The end of the dim line under the prompt shows each running sitting with its stage
   as a one-cell-per-phase bar, the phase in flight and how long it has run, then
-  how many briefs wait and the cost so far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ ○ 1 │ $12.22`.
+  how many briefs wait, `◇ N` for those whose status.json `next` is `you` while there is one, and the cost so
+  far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ ○ 3 │ ◇ 1 │ $12.22`. The `◇ N` is plain, in the line's dim grey.
   It is empty when nothing runs or waits.
 - **Progress bar.** Each run's card has a braille block per phase of its run record's `phases`, in the record's order: step 0's `savor` when the run has one,
   each cycle, then `⋮` where session 2 takes over, simplify, the xhigh review, the ship and the archive. The record is
@@ -36,8 +37,8 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `(loop)`. The loop's spend counts toward the cost in flight.
 - **Header.** The pane opens on a card in the design language of coolant's thermo dashboard: `autopilot`,
   the dispatcher's state and the local time (`date +%z` gives the offset, since the engine gives a mod no
-  time zone), then three figures drawn as 3-by-7 dot numerals in braille, running, queued and on deck,
-  each in its section's colour and grey at zero. Each figure sits right-aligned over a thin dim rule as wide
+  time zone), then three figures drawn as 3-by-7 dot numerals in braille, running, queued and yours (the queued
+  records whose `next` is `you`, in red), each in its section's colour and grey at zero. Each figure sits right-aligned over a thin dim rule as wide
   as the tile, with its label under the rule in plain lowercase grey (other surfaces than the terminal draw the label at
   caption size). The cost in flight stays on the hint line. One line under the figures is a spend sparkline: a bar
   per local day for the last 14 days, `▁` to `█`, today's peach, a day with spend grey and an empty day faint, then

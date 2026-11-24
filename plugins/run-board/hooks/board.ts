@@ -2665,9 +2665,12 @@ export const isLoopLanding = (b: Board, r: Run): boolean =>
 export const loopPart = (loop: Loop, now: number): string =>
   `◐ loop ${loop.stage} ${elapsed(loop.startedMs, now)}`
 
+/** How many queued records wait on Todd now: those whose `next` is `you`. */
+export const yoursOf = (b: Pick<Board, 'queued'>): number => b.queued.filter(q => q.next === 'you').length
+
 /**
  * One line for the hint line: each lane's run, or that the lane is idle, then
- * the queue and the cost in flight. The loop's lane shows the loop's stage in
+ * the queue, `◇ N` for the records `yoursOf` counts while N is above zero, and the cost in flight. The loop's lane shows the loop's stage in
  * place of idle, and tags a landing of the loop's. Undefined when nothing
  * runs or waits.
  */
@@ -2685,6 +2688,8 @@ export function statusLine(b: Board): string | undefined {
         ),
   )
   if (b.queued.length > 0) parts.push(`○ ${b.queued.length}`)
+  const yours = yoursOf(b)
+  if (yours > 0) parts.push(`◇ ${yours}`)
   const cost = inFlight(b)
   if (cost > 0) parts.push(money(cost))
   return parts.join(' │ ')

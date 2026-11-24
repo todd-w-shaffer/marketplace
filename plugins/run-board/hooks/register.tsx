@@ -62,6 +62,7 @@ import {
   recentTotals,
   statusLine,
   tileFace,
+  yoursOf,
   axisCells,
   heldCells,
   laneCells,
@@ -976,7 +977,7 @@ export const register: Register = on => {
     const tiles: { value: string; label: string; color: string; isZero: boolean }[] = [
       { value: String(b.running.length), label: 'running', color: F.peach, isZero: b.running.length === 0 },
       { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
-      { value: String(b.onDeck.length), label: 'on deck', color: F.mauve, isZero: b.onDeck.length === 0 },
+      { value: String(yoursOf(b)), label: 'yours', color: F.red, isZero: yoursOf(b) === 0 },
     ]
     const queueRows = queueTree(b.running, b.queued, b.blocked, b.onDeck)
     // A rule across the card, inside its border and padding.

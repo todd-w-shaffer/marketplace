@@ -1423,7 +1423,8 @@ test('the header draws three figures and one spend line, and a running card has 
   expect(await has(ui, `spend ▁▁█${'▁'.repeat(11)}`)).toBe(true)
   expect(await has(ui, '$0 today · $9 14d')).toBe(true)
   expect(await has(ui, '24h')).toBe(false)
-  for (const label of ['running', 'queued', 'on deck']) expect(await has(ui, label)).toBe(true)
+  for (const label of ['running', 'queued', 'yours']) expect(await has(ui, label)).toBe(true)
+  expect(await has(ui, 'on deck')).toBe(false)
   expect(await has(ui, '$ in flight')).toBe(false)
   expect(await has(ui, 'The archive commit is pushing.')).toBe(false)
   await ui.unmount()
@@ -3357,5 +3358,26 @@ test('a polled needs cause holds nothing in BLOCKED and is not counted held on t
   expect(await has(ui, 'blocked')).toBe(false)
   expect(await has(ui, ' held')).toBe(false)
   expect(await rowMarks(ui, 'S904')).toEqual([{ glyph: '◇', glyphColor: RED, idColor: RED }])
+  await ui.unmount()
+})
+
+/** The colour of the header tile's top row for `value` over `label`, or none when no tile draws it. */
+const tileColour = async (ui: Ui, value: string, label: string): Promise<string[]> => coloursOf(ui, tileFace(value, label).top)
+
+test('the third figure counts the records whose next is you, in red, and the hint line adds a plain ◇ N', async ($, on) => {
+  const second = { ...NEXT_YOU, entry: 5, brief: `${BRIEFS}s905-l.md` }
+  const review = { ...NEXT_MACHINE, next: 'review' }
+  const b = buildBoard(nextStatus([review, NEXT_WAITING, NEXT_SOON, NEXT_YOU, second]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(statusLine(b)).toBe('○ 5 │ ◇ 2')
+  const { ui } = await mountBoard($, on, b)
+  expect(await tileColour(ui, '2', 'yours')).toEqual([RED])
+  await ui.unmount()
+})
+
+test('with no record whose next is you, the third figure is a grey 0 and the hint line has no ◇', async ($, on) => {
+  const b = buildBoard(nextStatus([NEXT_MACHINE, NEXT_SOON]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(statusLine(b)).toBe('○ 2')
+  const { ui } = await mountBoard($, on, b)
+  expect(await tileColour(ui, '0', 'yours')).toEqual([SURFACE2])
   await ui.unmount()
 })
