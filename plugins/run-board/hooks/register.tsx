@@ -62,6 +62,7 @@ import {
   statusLine,
   tileFace,
   yoursOf,
+  waitingOf,
   axisCells,
   heldCells,
   laneCells,
@@ -974,7 +975,7 @@ export const register: Register = on => {
     // section uses below; a zero fades to the to-come grey.
     const tiles: { value: string; label: string; color: string; isZero: boolean }[] = [
       { value: String(b.running.length), label: 'running', color: F.peach, isZero: b.running.length === 0 },
-      { value: String(b.queued.length), label: 'queued', color: F.blue, isZero: b.queued.length === 0 },
+      { value: String(waitingOf(b).length), label: 'queued', color: F.blue, isZero: waitingOf(b).length === 0 },
       { value: String(yoursOf(b)), label: 'yours', color: F.red, isZero: yoursOf(b) === 0 },
     ]
     const queueRows = queueTree(b.running, b.queued, b.blocked, b.onDeck)

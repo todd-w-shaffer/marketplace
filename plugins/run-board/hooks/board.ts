@@ -39,12 +39,17 @@ function parseSlot(r: Record<string, unknown>): SlotFields {
  * by its run, or a sitting that stopped, with that stop's kind. `sitting` is
  * `S625` for an `After:` sitting and the run name for an `--after` brief. A
  * `needs` cause is a Worker secret Todd sets, named by `missing`; it holds
- * nothing on the board.
+ * nothing on the board. An `after` cause names the sitting the entry waits on
+ * as `waits_on`; whether that wait holds it is read through the `After:` lines.
  */
-export type Cause = { kind: 'deploy-red'; run: number } | { kind: 'needs'; missing: string } | { kind: string; sitting: string }
+export type Cause =
+  | { kind: 'deploy-red'; run: number }
+  | { kind: 'needs'; missing: string }
+  | { kind: 'after'; waitsOn: string }
+  | { kind: string; sitting: string }
 
-/** Whether a cause holds its entry on the board: a `needs` cause holds nothing. */
-export const holdsEntry = (c: Cause): boolean => c.kind !== 'needs'
+/** Whether a cause by itself holds its entry on the board: a `needs` cause holds nothing, and an `after` cause holds through the `After:` lines. */
+export const holdsEntry = (c: Cause): boolean => c.kind !== 'needs' && c.kind !== 'after'
 
 /**
  * A queued entry's `cause`: undefined when the record has no such key, as a
@@ -59,6 +64,7 @@ function parseCause(q: Record<string, unknown>): Cause | null | undefined {
   const run = num(r.run)
   if (r.kind === 'deploy-red' && run !== null) return { kind: 'deploy-red', run }
   if (r.kind === 'needs') return typeof r.missing === 'string' && r.missing !== '' ? { kind: 'needs', missing: r.missing } : null
+  if (r.kind === 'after' && typeof r.waits_on === 'string' && r.waits_on !== '') return { kind: 'after', waitsOn: r.waits_on }
   if (typeof r.kind === 'string' && typeof r.sitting === 'string' && r.sitting !== '') return { kind: r.kind, sitting: r.sitting }
   return null
 }
@@ -880,7 +886,13 @@ export function buildBoard(
   })
   const recent = (extra.recent ?? []).map(d => ({ ...d, plan: planOf(plans, d.sitting) }))
   // A held brief, and a stopped one, sits under BLOCKED and never in the tree as unqueued.
-  const onDeck = (extra.onDeck ?? []).filter(d => !drawn.has(d.sitting))
+  // `drawn` names an issue brief by its base, and the unqueued list by `#527`.
+  const shown = new Set([...drawn].map(s => briefName(s).sitting))
+  const allDeck = extra.onDeck ?? []
+  const onDeck = allDeck.filter(d => !shown.has(d.sitting))
+  // A held brief that nothing queues reads its mode, as an unqueued brief does.
+  const modes = new Map(allDeck.map(d => [d.sitting, d.mode]))
+  for (const k of blocks) for (const h of k.holds) if (h.isUnqueued) h.mode = modes.get(briefName(h.sitting).sitting) ?? 'ready'
   const medians = phaseMedians(recent)
   const running: Run[] = raw.running.map(r => {
     // A run with no record the board can read draws from status.json alone.
@@ -1239,9 +1251,11 @@ export function timelineOf(input: {
       free.set(best.slot, end)
       ends.set(sitting, end)
     }
+    // A block root is stuck, so it has no projected end and nothing after it projects.
+    const stuck = new Set(blocks.map(k => k.sitting))
     for (const q of [...raw.queued].sort((a, b) => a.entry - b.entry)) {
       const { sitting } = sittingOf(q.brief)
-      if (!held.has(sitting)) project(sitting, afters[briefKey(q.brief)] ?? [], 'queued')
+      if (!held.has(sitting) && !stuck.has(sitting)) project(sitting, afters[briefKey(q.brief)] ?? [], 'queued')
     }
     for (const d of onDeck) if (d.mode === 'ready') project(d.sitting, afterSittings(d.after), 'deck')
   }
@@ -1915,13 +1929,13 @@ export function queueTree(
     // A stopped node is Todd's, so it draws with no holds too.
     if (k.holds.length === 0 && k.nodeNext === null) continue
     const note = k.holds.length === 0 ? 'blocked ↑' : `blocked ↑ · holds ${k.holds.length}`
-    rows.push({ rails: '', joint: '', kind: 'block', sitting: k.sitting, slug: k.slug, lane: '', ...whose(k.nodeNext ?? MACHINE_NEXT, false, note) })
+    // A stopped node is Todd's whatever its `next` says.
+    rows.push({ rails: '', joint: '', kind: 'block', sitting: k.sitting, slug: k.slug, lane: '', ...whose(k.nodeNext ?? MACHINE_NEXT, k.nodeNext !== null, note) })
     const holdBranch = (p: string, rails: string) => {
       const ks = k.holds.filter(h => h.parent === p)
       ks.forEach((h, i) => {
         const isLast = i === ks.length - 1
-        // A held brief's mode is not read, so its note says only that nothing queues it.
-        const note = others(h.after, h.sitting, h.parent, h.isUnqueued ? NOT_QUEUED : '')
+        const note = others(h.after, h.sitting, h.parent, h.isUnqueued ? unqueuedNote(h.mode ?? 'ready') : '')
         rows.push({ rails, joint: `${isLast ? '└' : '├'}─`, kind: 'hold', sitting: h.sitting, slug: h.slug, lane: '', ...whose(h.next, h.isUnqueued, note) })
         holdBranch(h.sitting, rails + (isLast ? '  ' : '│ '))
       })
@@ -2130,7 +2144,7 @@ export function blockedOf(input: {
   for (const f of [...raw.finished].sort((a, b) => a.entry - b.entry)) statusKind.set(baseName(f.brief), f.kind)
 
   // `end` is absent for a stopped node with no ending, whose face reads `reason`.
-  type Info = { slug: string; base: string; text: string; mtimeMs: number; end?: RecordEnd; reason?: string; launches: number; kind: BlockKind; nodeNext: string | null }
+  type Info = { slug: string; base: string; text: string; mtimeMs: number; end?: RecordEnd; reason?: string; whyFromReason?: boolean; launches: number; kind: BlockKind; nodeNext: string | null }
   const ends = new Map<string, Info>()
   let newestLive = Number.NEGATIVE_INFINITY
   for (const e of endings) {
@@ -2160,7 +2174,7 @@ export function blockedOf(input: {
     if (q.stop == null) continue
     const { sitting, slug } = sittingOf(q.brief)
     const e = ends.get(sitting)
-    const node = { slug, reason: q.reason, kind: blockKind(q.stop), nodeNext: q.next ?? 'you' }
+    const node = { slug, reason: q.reason, kind: blockKind(q.stop), nodeNext: q.next ?? MACHINE_NEXT, whyFromReason: e === undefined || blockKind(q.stop) !== q.stop }
     stuck.set(sitting, e === undefined ? { ...node, base: baseName(q.brief), text: '', mtimeMs: 0, launches: 0 } : { ...e, ...node })
   }
 
@@ -2181,7 +2195,8 @@ export function blockedOf(input: {
     seen.add(s)
     const q = queued.get(s)
     let root: string | null = null
-    if (q?.cause !== undefined) root = q.cause === null ? null : rootOfCause(q.cause)
+    // An `after` cause, like a record with no cause key, is held when an After: sitting is stuck or held.
+    if (q?.cause !== undefined && q.cause?.kind !== 'after') root = q.cause === null ? null : rootOfCause(q.cause)
     else
       for (const a of afterOf(s)) {
         // A sitting off main that nothing queues has shipped and holds nothing.
@@ -2301,6 +2316,19 @@ export function chainLine(k: Pick<Block, 'holds'>): { count: string; chain: stri
 /** A block's words by kind: its headline, the line of why, the strip and the next line. */
 function blockFace(
   root: string,
+  info: { slug: string; base: string; text: string; mtimeMs: number; end?: RecordEnd; reason?: string; whyFromReason?: boolean } | undefined,
+  kind: BlockKind,
+  holds: Held[],
+  handoffs: Readonly<Record<string, string>>,
+  deployStages: Readonly<Record<string, string>>,
+): Omit<Block, 'plan' | 'launches' | 'nodeNext'> {
+  const face = blockWords(root, info, kind, holds, handoffs, deployStages)
+  // A stopped node with no ending, or with a stop the board does not know, reads its reason as written.
+  return info?.whyFromReason === true ? { ...face, why: info.reason ?? '' } : face
+}
+
+function blockWords(
+  root: string,
   info: { slug: string; base: string; text: string; mtimeMs: number; end?: RecordEnd; reason?: string } | undefined,
   kind: BlockKind,
   holds: Held[],
@@ -2313,7 +2341,8 @@ function blockFace(
   const spent = totals === null ? [] : [hoursMinutes(Number(totals[2])), `$${totals[1] ?? ''}`]
   const run = (info?.end === undefined ? '' : deployRunOf(info.end)) || (root.startsWith('run ') ? root.slice('run '.length) : '')
   const handoff = info === undefined ? '' : (handoffs[info.base] ?? '')
-  const strip = info === undefined ? [] : stripOf(info.text, kind, deployStages[run] ?? '')
+  // A stopped node with no ending has no progress to draw a strip from.
+  const strip = info?.end === undefined ? [] : stripOf(info.text, kind, deployStages[run] ?? '')
   const broke = strip.find(p => p.state === 'broke')?.stage
   const pushed = strip.some(p => p.stage === 'push' && p.state === 'done')
   const base = { kind, sitting: root, slug: info?.slug ?? '', strip, holds, endedMs: info?.mtimeMs ?? 0 }
@@ -2676,6 +2705,9 @@ export const isLoopLanding = (b: Board, r: Run): boolean =>
 export const loopPart = (loop: Loop, now: number): string =>
   `◐ loop ${loop.stage} ${elapsed(loop.startedMs, now)}`
 
+/** The queued records that wait: every one but a stopped node, which BLOCKED draws. */
+export const waitingOf = (b: Pick<Board, 'queued'>): Board['queued'] => b.queued.filter(q => q.stop === null)
+
 /** How many queued records wait on Todd now: those whose `next` is `you`. */
 export const yoursOf = (b: Pick<Board, 'queued'>): number => b.queued.filter(q => q.next === 'you').length
 
@@ -2683,7 +2715,7 @@ export const yoursOf = (b: Pick<Board, 'queued'>): number => b.queued.filter(q =
  * One line for the hint line: each lane's run, or that the lane is idle, then
  * the queue, `◇ N` for the records `yoursOf` counts while N is above zero, and the cost in flight. The loop's lane shows the loop's stage in
  * place of idle, and tags a landing of the loop's. Undefined when nothing
- * runs or waits.
+ * runs, waits or waits on Todd.
  */
 export function statusLine(b: Board): string | undefined {
   if (b.running.length === 0 && b.queued.length === 0 && b.loop === null) return undefined
@@ -2698,12 +2730,13 @@ export function statusLine(b: Board): string | undefined {
               : `● ${r.sitting} ${miniBar(r.phases)} ${livePhase(r.phases)} ${elapsed(r.startedMs, b.checkedAt)}${isLoopLanding(b, r) ? ' (loop)' : ''}`,
         ),
   )
-  if (b.queued.length > 0) parts.push(`○ ${b.queued.length}`)
+  const waiting = waitingOf(b).length
+  if (waiting > 0) parts.push(`○ ${waiting}`)
   const yours = yoursOf(b)
   if (yours > 0) parts.push(`◇ ${yours}`)
   const cost = inFlight(b)
   if (cost > 0) parts.push(money(cost))
-  return parts.join(' │ ')
+  return parts.length === 0 ? undefined : parts.join(' │ ')
 }
 
 /** Each foldable card's header hotkey. */
@@ -2727,7 +2760,8 @@ export function foldSummary(card: FoldCard, b: Board): string {
   }
   if (card === 'queued') {
     const held = b.blocked.reduce((n, k) => n + k.holds.length, 0)
-    return [b.queued.length > 0 ? `${b.queued.length} waiting` : '', b.onDeck.length > 0 ? `${b.onDeck.length} ${NOT_QUEUED}` : '', held > 0 ? `holds ${held}` : '']
+    const waiting = waitingOf(b).length
+    return [waiting > 0 ? `${waiting} waiting` : '', b.onDeck.length > 0 ? `${b.onDeck.length} ${NOT_QUEUED}` : '', held > 0 ? `holds ${held}` : '']
       .filter(p => p !== '')
       .join(' · ')
   }

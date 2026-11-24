@@ -1065,7 +1065,7 @@ test("S625's decision stop is one block that holds S626 and S627, which draw onl
   // The refused S626 is a hold, never a root of its own.
   expect(k.holds).toEqual([
     { sitting: 'S626', slug: 'gallery-arrange-page', parent: 'S625', after: ['S625'], next: 'machine', isUnqueued: false },
-    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'], next: 'machine', isUnqueued: true },
+    { sitting: 'S627', slug: 'gallery-arrange-options', parent: 'S626', after: ['S626'], next: 'machine', isUnqueued: true, mode: 'ready' },
   ])
   expect(k.next).toBe('answer in the handoff, then relaunch S625')
   expect(b.onDeck.map(d => d.sitting)).toEqual(['S640'])
@@ -3384,4 +3384,59 @@ test('with no record whose next is you, the third figure is a grey 0 and the hin
   const { ui } = await mountBoard($, on, b)
   expect(await tileColour(ui, '0', 'yours')).toEqual([SURFACE2])
   await ui.unmount()
+})
+
+// An entry the dispatcher holds behind S769, in the shape `write_status` gives a wait on a sitting with no finished line.
+const AFTER_NODE = { entry: 461, brief: `${BRIEFS}s770-after-node.md`, lane: '', reason: 'S769', cause: { kind: 'after', waits_on: 'S769' }, early: null, next: 'waiting', mode: 'autopilot', stop: null }
+const NODE_AFTERS = { ...NEXT_AFTERS, [`${BRIEFS}s770-after-node.md`]: ['S769'] }
+
+test('the timeline projects no bar for a stopped node, nor for an entry after it', () => {
+  const b = buildBoard(nextStatus([NODE, AFTER_NODE]), new Set([1]), NOW, { afters: NODE_AFTERS, recent: endedOf([['S601', 60, 5]]) })
+  expect(barsOf(b, 1).filter(x => x.startsWith('S769') || x.startsWith('S770'))).toEqual([])
+})
+
+test('an entry whose after cause names a stopped node is a hold under its block', () => {
+  const b = buildBoard(nextStatus([NODE, AFTER_NODE]), new Set([1]), NOW, { afters: NODE_AFTERS })
+  expect(b.blocked.map(k => [k.sitting, k.holds.map(h => h.sitting)])).toEqual([['S769', ['S770']]])
+  expect(drawn(queueTree(b.running, b.queued, b.blocked, b.onDeck))).toEqual(['S769 blocked ↑ · holds 1', '└─S770'])
+  // An after cause holds nothing by itself: an entry behind a sitting that is not stuck still waits in the queue.
+  const free = buildBoard(nextStatus([NEXT_MACHINE, NEXT_WAITING]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(free.blocked).toEqual([])
+})
+
+test('a stopped node with no ending draws no strip and reads its reason, whatever its stop', () => {
+  const b = buildBoard(nextStatus([{ ...NODE, stop: 'decision' }]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(b.blocked.map(k => [k.kind, k.why, k.strip.length])).toEqual([['decision', NODE.reason, 0]])
+})
+
+test('a stop the board does not know reads the reason even over an ending', () => {
+  const b = buildBoard(nextStatus([{ ...NODE, stop: 'paused' }]), new Set([1]), NOW, {
+    afters: NEXT_AFTERS,
+    endings: [ending(S769_RUN, NOW - 10 * MIN, endOf('stopped: an older thing. ($2.00, 9 min)', 'run-broke'))],
+  })
+  expect(b.blocked.map(k => [k.kind, k.why])).toEqual([['run-broke', NODE.reason]])
+})
+
+test('a held issue brief draws only under its block, and a held brief with no mode needs a decision pass', () => {
+  const issue = `docs/briefs/kickoff-527-gallery-race.md`
+  const b = buildBoard(nextStatus([NODE]), new Set([1]), NOW, {
+    afters: { ...NEXT_AFTERS, [issue]: ['S769'], [`${BRIEFS}s771-unread.md`]: ['S769'] },
+    onDeck: [
+      { sitting: '#527', slug: 'gallery-race', lane: 'fix', after: 'S769', mode: 'ready' },
+      { sitting: 'S771', slug: 'unread', lane: 'fix', after: 'S769', mode: 'enrich' },
+    ],
+  })
+  expect(b.onDeck).toEqual([])
+  const rows = drawn(queueTree(b.running, b.queued, b.blocked, b.onDeck))
+  expect(rows.filter(r => r.includes('527'))).toHaveLength(1)
+  expect(rows).toContain('├─S771 needs a decision pass')
+})
+
+test('a stopped node counts in no waiting figure, and is Todd\'s with no next', () => {
+  const { next: _, ...noNext } = NODE
+  const b = buildBoard(nextStatus([noNext]), new Set([1]), NOW, { afters: NEXT_AFTERS })
+  expect(statusLine(b)).toBe(undefined)
+  expect(statusLine(buildBoard(nextStatus([NODE]), new Set([1]), NOW, { afters: NEXT_AFTERS }))).toBe('◇ 1')
+  expect(foldSummary('queued', b)).toBe('')
+  expect(queueTree(b.running, b.queued, b.blocked, b.onDeck).map(r => [r.sitting, r.kind, r.isTodds])).toEqual([['S769', 'block', true]])
 })

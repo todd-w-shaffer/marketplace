@@ -110,6 +110,8 @@ export type Held = {
   next: string
   /** Whether nothing queues it and it is not stuck: a brief on `origin/main` that Todd has yet to queue. */
   isUnqueued: boolean
+  /** An unqueued hold's mode, from its brief's header; absent on any other hold. */
+  mode?: DeckMode
 }
 
 /** One root cause on the BLOCKED card. */

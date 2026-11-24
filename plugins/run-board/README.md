@@ -5,7 +5,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
 
 - **Hint line.** The end of the dim line under the prompt shows each running sitting with its stage
   as a one-cell-per-phase bar, the phase in flight and how long it has run, then
-  how many briefs wait, `◇ N` for those whose status.json `next` is `you` while there is one, and the cost so
+  how many briefs wait (a stopped node is a block, not a wait), `◇ N` for those whose status.json `next` is `you` while there is one, and the cost so
   far: `● S393 ⣿⣤⣀⣀⣀⣀⡇ c2 1h12m │ ○ 3 │ ◇ 1 │ $12.22`. The `◇ N` is plain, in the line's dim grey.
   It is empty when nothing runs or waits.
 - **Progress bar.** Each run's card has a braille block per phase of its run record's `phases`, in the record's order: step 0's `savor` when the run has one,
@@ -37,7 +37,7 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   `(loop)`. The loop's spend counts toward the cost in flight.
 - **Header.** The pane opens on a card in the design language of coolant's thermo dashboard: `autopilot`,
   the dispatcher's state and the local time (`date +%z` gives the offset, since the engine gives a mod no
-  time zone), then three figures drawn as 3-by-7 dot numerals in braille, running, queued and yours (the queued
+  time zone), then three figures drawn as 3-by-7 dot numerals in braille, running, queued (less the stopped nodes) and yours (the queued
   records whose `next` is `you`, in red), each in its section's colour and grey at zero. Each figure sits right-aligned over a thin dim rule as wide
   as the tile, with its label under the rule in plain lowercase grey (other surfaces than the terminal draw the label at
   caption size). The cost in flight stays on the hint line. One line under the figures is a spend sparkline: a bar
@@ -84,8 +84,11 @@ dispatcher writes and never starts a model turn, so it costs no tokens.
   does not know draws a text `◇` whose note leads with the value as written; a record with no `next` is the
   machine's. Rails and joints keep their colours, so a held chain stays yellow under a `◇`. A stopped node (a
   queued record with a `stop`) is a block whose kind is its `stop`, and its row is a red `◇` that reads
-  `blocked ↑`, with ` · holds N` when it holds something; it draws once, as that block. A `needs` cause holds
-  nothing. The card draws while it has a row. The `After:` lines come from `origin/main`, read with the briefs.
+  `blocked ↑`, with ` · holds N` when it holds something; it draws once, as that block, and is Todd's whatever its
+  `next` says. With no ending, its BLOCKED face has no strip and its why is the node's `reason`, as it is for a `stop`
+  the board does not know. It counts in no waiting figure, and the timeline projects neither it nor what waits on it.
+  A `needs` cause holds nothing; an `after` cause is read through the `After:` lines, so an entry behind a stopped
+  node is a hold under it. The card draws while it has a row. The `After:` lines come from `origin/main`, read with the briefs.
   A queue row whose brief was split reads `split ×2`: the briefs on `origin/main` whose `Split from:` line names it,
   and the archived claims in `docs/briefs/sittings.json` whose `split_from` list does, each child once.
   Each queue row ends in a box pinned to its right edge: a square per cycle the brief plans, or a dim
